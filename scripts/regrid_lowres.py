@@ -237,10 +237,28 @@ def process_single_step(item: tuple) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Production-grade, resumable regridder for GEOS-FP to 3 km LCC.")
     parser.add_argument(
-        "--lowres_dir",
+        "--lowres_root",
         type=str,
-        default="/gpfsm/dnb06/projects/p174/f5295_fp/diag/Y2025/M01",
-        help="Source directory containing slv and flx files",
+        default="/gpfsm/dnb06/projects/p174/f5295_fp/diag",
+        help="Root directory containing YYYYY/MM subdirectories",
+    )
+    parser.add_argument(
+        "--year",
+        type=str,
+        default="2025",
+        help="Year to process (default: 2025)",
+    )
+    parser.add_argument(
+        "--month",
+        type=str,
+        default=None,
+        help="Month to process (e.g. 1 to 12). If omitted, processes all available months of the year.",
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Filter for specific date (e.g. 20250108). Optional.",
     )
     parser.add_argument(
         "--highres_sample",
@@ -249,10 +267,10 @@ def main():
         help="Sample high-res file for target grid geometry",
     )
     parser.add_argument(
-        "--output_dir",
+        "--output_root",
         type=str,
-        default="/gpfsm/dnb10/projects/p311/ML_downscaling/data/lowres_lcc_1hr/202501",
-        help="Destination directory for regridded LCC files",
+        default="/gpfsm/dnb10/projects/p311/ML_downscaling/data/lowres_lcc_1hr",
+        help="Root destination directory for regridded LCC files (subfolders YYYYMM created automatically)",
     )
     parser.add_argument(
         "--weights_path",
@@ -260,45 +278,70 @@ def main():
         default="/gpfsm/dnb10/projects/p311/ML_downscaling/data/weights/regrid_weights_bilinear_conus.nc",
         help="Path for cached xESMF regridding weights",
     )
-    parser.add_argument("--date", type=str, default=None, help="Filter for specific date (e.g. 20250108)")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of parallel worker processes")
     args = parser.parse_args()
 
-    # 1. Grid geometry & precompute weights once
-    grid_target, bbox = get_grid_definitions(args.highres_sample)
+    # 1. Determine input directories to scan
+    year_dir = os.path.join(args.lowres_root, f"Y{args.year}")
+    if not os.path.exists(year_dir):
+        # Fallback if lowres_root is already a monthly or direct path
+        if os.path.exists(args.lowres_root):
+            month_dirs = [args.lowres_root]
+        else:
+            raise FileNotFoundError(f"Directory not found: {year_dir}")
+    elif args.month is not None:
+        m_int = int(args.month)
+        m_dir = os.path.join(year_dir, f"M{m_int:02d}")
+        month_dirs = [m_dir] if os.path.exists(m_dir) else []
+    else:
+        month_dirs = sorted(glob.glob(os.path.join(year_dir, "M*")))
 
+    print(f"=== Regridding GEOS-FP for Year {args.year} ===")
+    print(f"Scanning {len(month_dirs)} monthly directories: {[os.path.basename(d) for d in month_dirs]}")
+
+    # 2. Collect all slv files across selected months
+    slv_files = []
     pattern = f"*{args.date}*.nc4" if args.date else "*.nc4"
-    slv_files = sorted(glob.glob(os.path.join(args.lowres_dir, f"f5295_fp.tavg1_2d_slv_Nx.{pattern}")))
-    print(f"Total matching slv files found: {len(slv_files)}")
+    for m_dir in month_dirs:
+        m_files = sorted(glob.glob(os.path.join(m_dir, f"f5295_fp.tavg1_2d_slv_Nx.{pattern}")))
+        slv_files.extend(m_files)
 
+    print(f"Total matching slv files found across selected period: {len(slv_files)}")
     if not slv_files:
         print("No input files found. Exiting.")
         return
 
+    # 3. Grid geometry & precompute weights once
+    grid_target, bbox = get_grid_definitions(args.highres_sample)
     precompute_weights(slv_files[0], grid_target, bbox, args.weights_path)
 
-    # 2. Build task list
+    # 4. Build task list & check existing files (resumable)
     tasks = []
     skipped_count = 0
     for slv_path in slv_files:
         basename = os.path.basename(slv_path)
-        timestamp = basename.split(".")[2]
-        flx_path = os.path.join(args.lowres_dir, f"f5295_fp.tavg1_2d_flx_Nx.{timestamp}.nc4")
+        timestamp = basename.split(".")[2]  # e.g., 20250108_0030z
+        month_tag = timestamp[:6]          # e.g., 202501
+
+        m_dir = os.path.dirname(slv_path)
+        flx_path = os.path.join(m_dir, f"f5295_fp.tavg1_2d_flx_Nx.{timestamp}.nc4")
         if not os.path.exists(flx_path):
             continue
 
-        out_path = os.path.join(args.output_dir, f"f5295_fp.lowres_lcc_1hr.{timestamp}.nc4")
+        out_dir = os.path.join(args.output_root, month_tag)
+        out_path = os.path.join(out_dir, f"f5295_fp.lowres_lcc_1hr.{timestamp}.nc4")
+
         if is_file_valid(out_path):
             skipped_count += 1
             continue
         tasks.append((slv_path, flx_path, out_path))
 
-    print(f"Tasks to execute: {len(tasks)} (Already completed and skipped: {skipped_count})")
+    print(f"Tasks to execute: {len(tasks)} (Already completed and verified: {skipped_count})")
     if not tasks:
         print("All requested files are already processed and verified! Nothing to do.")
         return
 
-    # 3. Parallel execution with ProcessPoolExecutor
+    # 5. Parallel execution with ProcessPoolExecutor
     print(f"Launching processing pool with {args.num_workers} parallel workers...")
     with ProcessPoolExecutor(
         max_workers=args.num_workers,
@@ -309,7 +352,7 @@ def main():
         for future in tqdm(as_completed(futures), total=len(futures), desc="Regridding progress"):
             res = future.result()
 
-    print(f"\nAll operations completed successfully! Output stored in: {args.output_dir}")
+    print(f"\nAll operations completed successfully! Output stored in: {args.output_root}")
 
 
 if __name__ == "__main__":
