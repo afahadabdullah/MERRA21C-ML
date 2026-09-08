@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=regrid_lowres
-#SBATCH --account=s311
+#SBATCH --account=s3292
+#SBATCH --qos=allnccs
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=regrid2025
-#SBATCH --account=s311
+#SBATCH --account=s3292
+#SBATCH --qos=allnccs
 #SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
