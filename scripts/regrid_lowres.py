@@ -51,10 +51,10 @@ def get_grid_definitions(highres_sample_path: str, buffer_deg: float = 2.0):
     print(f"  Latitude:  [{lat_min:.2f}°, {lat_max:.2f}°]")
     print(f"  Longitude: [{lon_min:.2f}°, {lon_max:.2f}°]")
 
-    # Create target xESMF grid dataset
+    # Create target xESMF grid dataset with CF attributes
     grid_target = xr.Dataset({
-        "lat": (["y", "x"], target_lats),
-        "lon": (["y", "x"], target_lons),
+        "lat": (["y", "x"], target_lats, {"units": "degrees_north", "standard_name": "latitude"}),
+        "lon": (["y", "x"], target_lons, {"units": "degrees_east", "standard_name": "longitude"}),
     })
 
     bbox = {
@@ -80,39 +80,32 @@ def crop_lowres(ds: xr.Dataset, bbox: dict) -> xr.Dataset:
 
 
 def setup_regridders(sample_lowres_path: str, grid_target: xr.Dataset, bbox: dict, weights_dir: str):
-    """Build and cache xESMF bilinear and conservative regridders."""
+    """Build and cache xESMF bilinear regridder for continuous conditioning fields."""
     os.makedirs(weights_dir, exist_ok=True)
     w_bilinear = os.path.join(weights_dir, "regrid_weights_bilinear_conus.nc")
-    w_conservative = os.path.join(weights_dir, "regrid_weights_conservative_conus.nc")
 
     print("Initializing source cropped grid for regridding weights...")
     ds_src_raw = xr.open_dataset(sample_lowres_path)
     ds_src = crop_lowres(ds_src_raw, bbox)
 
     grid_src = xr.Dataset({
-        "lat": ds_src["lat"],
-        "lon": ds_src["lon"],
+        "lat": (["lat"], ds_src["lat"].values, {"units": "degrees_north", "standard_name": "latitude"}),
+        "lon": (["lon"], ds_src["lon"].values, {"units": "degrees_east", "standard_name": "longitude"}),
     })
 
     print(f"Source cropped grid size: lat={len(grid_src['lat'])}, lon={len(grid_src['lon'])}")
 
     print(f"Setting up Bilinear regridder (cached at {w_bilinear})...")
-    regridder_bilinear = xe.Regridder(
+    regridder = xe.Regridder(
         grid_src, grid_target, method="bilinear",
         filename=w_bilinear, reuse_weights=os.path.exists(w_bilinear)
     )
 
-    print(f"Setting up Conservative regridder (cached at {w_conservative})...")
-    regridder_conservative = xe.Regridder(
-        grid_src, grid_target, method="conservative",
-        filename=w_conservative, reuse_weights=os.path.exists(w_conservative)
-    )
-
-    return regridder_bilinear, regridder_conservative
+    return regridder
 
 
 def process_hourly_step(slv_path: str, flx_path: str, out_path: str,
-                         bbox: dict, regrid_bi, regrid_cons):
+                         bbox: dict, regridder):
     """Regrids one hourly step combining slv and flx into a single LCC NetCDF-4."""
     if os.path.exists(out_path):
         return
@@ -125,20 +118,22 @@ def process_hourly_step(slv_path: str, flx_path: str, out_path: str,
     ds_slv = crop_lowres(ds_slv_raw, bbox)
     ds_flx = crop_lowres(ds_flx_raw, bbox)
 
-    # 3. Bilinear fields (continuous state)
-    t2m_lcc = regrid_bi(ds_slv["T2M"])
-    qv2m_lcc = regrid_bi(ds_slv["QV2M"]) if "QV2M" in ds_slv else None
-    u10m_lcc = regrid_bi(ds_slv["U10M"]) if "U10M" in ds_slv else None
-    v10m_lcc = regrid_bi(ds_slv["V10M"]) if "V10M" in ds_slv else None
-    ps_lcc = regrid_bi(ds_slv["PS"]) if "PS" in ds_slv else None
-    slp_lcc = regrid_bi(ds_slv["SLP"]) if "SLP" in ds_slv else None
-    tqv_lcc = regrid_bi(ds_slv["TQV"]) if "TQV" in ds_slv else None
+    # 3. Bilinear regridding of continuous state
+    t2m_lcc = regridder(ds_slv["T2M"])
+    qv2m_lcc = regridder(ds_slv["QV2M"]) if "QV2M" in ds_slv else None
+    u10m_lcc = regridder(ds_slv["U10M"]) if "U10M" in ds_slv else None
+    v10m_lcc = regridder(ds_slv["V10M"]) if "V10M" in ds_slv else None
+    ps_lcc = regridder(ds_slv["PS"]) if "PS" in ds_slv else None
+    slp_lcc = regridder(ds_slv["SLP"]) if "SLP" in ds_slv else None
+    tqv_lcc = regridder(ds_slv["TQV"]) if "TQV" in ds_slv else None
 
-    # 4. Conservative fields (mass / fluxes)
-    prectot_lcc = regrid_cons(ds_flx["PRECTOT"])
-    preccon_lcc = regrid_cons(ds_flx["PRECCON"]) if "PRECCON" in ds_flx else None
-    preclsc_lcc = regrid_cons(ds_flx["PRECLSC"]) if "PRECLSC" in ds_flx else None
-    precsno_lcc = regrid_cons(ds_flx["PRECSNO"]) if "PRECSNO" in ds_flx else None
+    # 4. Bilinear regridding of precipitation (with zero-clipping to prevent negative drizzle)
+    prectot_raw = regridder(ds_flx["PRECTOT"]).values
+    prectot_lcc = np.maximum(prectot_raw, 0.0)
+
+    preccon_lcc = np.maximum(regridder(ds_flx["PRECCON"]).values, 0.0) if "PRECCON" in ds_flx else None
+    preclsc_lcc = np.maximum(regridder(ds_flx["PRECLSC"]).values, 0.0) if "PRECLSC" in ds_flx else None
+    precsno_lcc = np.maximum(regridder(ds_flx["PRECSNO"]).values, 0.0) if "PRECSNO" in ds_flx else None
 
     # 5. Combine into single output dataset
     data_vars = {
@@ -190,8 +185,8 @@ def main():
         print("No matching slv files found! Exiting.")
         return
 
-    # Build or load regridders
-    regrid_bi, regrid_cons = setup_regridders(slv_files[0], grid_target, bbox, args.weights_dir)
+    # Build or load regridder
+    regridder = setup_regridders(slv_files[0], grid_target, bbox, args.weights_dir)
 
     # Process all hours
     os.makedirs(args.output_dir, exist_ok=True)
@@ -208,7 +203,7 @@ def main():
         out_name = f"f5295_fp.lowres_lcc_1hr.{timestamp}.nc4"
         out_path = os.path.join(args.output_dir, out_name)
 
-        process_hourly_step(slv_path, flx_path, out_path, bbox, regrid_bi, regrid_cons)
+        process_hourly_step(slv_path, flx_path, out_path, bbox, regridder)
 
     print(f"\nAll hourly files regridded successfully to: {args.output_dir}")
 
