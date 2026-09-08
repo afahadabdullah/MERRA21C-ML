@@ -135,26 +135,34 @@ def process_hourly_step(slv_path: str, flx_path: str, out_path: str,
     preclsc_lcc = np.maximum(regridder(ds_flx["PRECLSC"]).values, 0.0) if "PRECLSC" in ds_flx else None
     precsno_lcc = np.maximum(regridder(ds_flx["PRECSNO"]).values, 0.0) if "PRECSNO" in ds_flx else None
 
+    # Helper to safely convert either DataArray or ndarray to 3D float32 (time, Ydim, Xdim)
+    def to_3d(val):
+        arr = val.values if hasattr(val, "values") else np.asarray(val)
+        arr = arr.astype(np.float32)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        return arr
+
     # 5. Combine into single output dataset
     data_vars = {
-        "T2M": (["time", "Ydim", "Xdim"], t2m_lcc.values.astype(np.float32), {"units": "K", "long_name": "2-meter_air_temperature"}),
-        "PRECTOT": (["time", "Ydim", "Xdim"], prectot_lcc.values.astype(np.float32), {"units": "kg m-2 s-1", "long_name": "total_precipitation"}),
+        "T2M": (["time", "Ydim", "Xdim"], to_3d(t2m_lcc), {"units": "K", "long_name": "2-meter_air_temperature"}),
+        "PRECTOT": (["time", "Ydim", "Xdim"], to_3d(prectot_lcc), {"units": "kg m-2 s-1", "long_name": "total_precipitation"}),
     }
     if qv2m_lcc is not None:
-        data_vars["QV2M"] = (["time", "Ydim", "Xdim"], qv2m_lcc.values.astype(np.float32), {"units": "kg kg-1", "long_name": "2-meter_specific_humidity"})
+        data_vars["QV2M"] = (["time", "Ydim", "Xdim"], to_3d(qv2m_lcc), {"units": "kg kg-1", "long_name": "2-meter_specific_humidity"})
     if u10m_lcc is not None and v10m_lcc is not None:
-        data_vars["U10M"] = (["time", "Ydim", "Xdim"], u10m_lcc.values.astype(np.float32), {"units": "m s-1"})
-        data_vars["V10M"] = (["time", "Ydim", "Xdim"], v10m_lcc.values.astype(np.float32), {"units": "m s-1"})
+        data_vars["U10M"] = (["time", "Ydim", "Xdim"], to_3d(u10m_lcc), {"units": "m s-1"})
+        data_vars["V10M"] = (["time", "Ydim", "Xdim"], to_3d(v10m_lcc), {"units": "m s-1"})
     if ps_lcc is not None:
-        data_vars["PS"] = (["time", "Ydim", "Xdim"], ps_lcc.values.astype(np.float32), {"units": "Pa"})
+        data_vars["PS"] = (["time", "Ydim", "Xdim"], to_3d(ps_lcc), {"units": "Pa"})
     if slp_lcc is not None:
-        data_vars["SLP"] = (["time", "Ydim", "Xdim"], slp_lcc.values.astype(np.float32), {"units": "Pa"})
+        data_vars["SLP"] = (["time", "Ydim", "Xdim"], to_3d(slp_lcc), {"units": "Pa"})
     if tqv_lcc is not None:
-        data_vars["TQV"] = (["time", "Ydim", "Xdim"], tqv_lcc.values.astype(np.float32), {"units": "kg m-2"})
+        data_vars["TQV"] = (["time", "Ydim", "Xdim"], to_3d(tqv_lcc), {"units": "kg m-2"})
     if preccon_lcc is not None:
-        data_vars["PRECCON"] = (["time", "Ydim", "Xdim"], preccon_lcc.values.astype(np.float32), {"units": "kg m-2 s-1"})
+        data_vars["PRECCON"] = (["time", "Ydim", "Xdim"], to_3d(preccon_lcc), {"units": "kg m-2 s-1"})
     if preclsc_lcc is not None:
-        data_vars["PRECLSC"] = (["time", "Ydim", "Xdim"], preclsc_lcc.values.astype(np.float32), {"units": "kg m-2 s-1"})
+        data_vars["PRECLSC"] = (["time", "Ydim", "Xdim"], to_3d(preclsc_lcc), {"units": "kg m-2 s-1"})
 
     ds_out = xr.Dataset(data_vars=data_vars, coords={"time": ds_slv["time"].values})
     
