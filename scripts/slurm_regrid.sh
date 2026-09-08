@@ -18,12 +18,9 @@ set -e
 PROJECT_DIR="/gpfsm/dnb10/projects/p311/ML_downscaling"
 ENV_DIR="${PROJECT_DIR}/env"
 
-echo "=== Loading Environment ==="
-source /usr/share/modules/init/bash || true
-module purge || true
-module load python/GEOSpyD/Min24.7.2-0_py3.11 || module load comp/gcc/11.2.0
-
-source activate "${ENV_DIR}"
+echo "=== Loading Conda Environment ==="
+source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.sh || source ~/.bashrc
+conda activate "${ENV_DIR}"
 
 LOWRES_DIR="/gpfsm/dnb06/projects/p174/f5295_fp/diag/Y2025/M01"
 HIGHRES_SAMPLE="/gpfsm/dnb08/projects/p38/HWT/CONUS02KM/Feature-c2160_L137/holding/hwt_30mn_slv_LCC/202501/Feature-c2160_L137.hwt_30mn_slv_LCC.20250131_2330z.nc4"
