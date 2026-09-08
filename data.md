@@ -112,19 +112,41 @@ This document records the exact file paths, grid definitions, variables, and tem
 * **Timestamps:** `T2M` and `PRECTOT` are synchronous, sharing the exact same hourly timestamp sequence.
 
 ### 2.3 Primary Low-Res Predictor Collections
-1. **`f5295_fp.tavg1_2d_slv_Nx.YYYYMMDD_HH30z.nc4`** (Single-Level Diagnostics):
+1. **`f5295_fp.tavg1_2d_slv_Nx.YYYYMMDD_HH30z.nc4`** (Verified Single-Level Diagnostics):
    - **`T2M`**: 2-meter air temperature ($\text{K}$) — *Primary Temperature Predictor*
-   - `U10M`, `V10M`: 10-meter eastward and northward wind components ($\text{m}\ \text{s}^{-1}$)
-   - `Q2M`: 2-meter specific humidity ($\text{kg}\ \text{kg}^{-1}$)
-   - `SLP`: Sea level pressure ($\text{Pa}$)
-   - `PS`: Surface pressure ($\text{Pa}$)
-   - `TS`: Surface skin temperature ($\text{K}$)
+   - **`TS`**: Surface skin temperature ($\text{K}$)
+   - **`QV2M`**, **`QV10M`**: 2-meter and 10-meter specific humidity ($\text{kg}\ \text{kg}^{-1}$)
+   - **`T10M`**: 10-meter air temperature ($\text{K}$)
+   - **`PS`**: Surface pressure ($\text{Pa}$)
+   - **`SLP`**: Sea level pressure ($\text{Pa}$)
+   - **`U10M`**, **`V10M`**: 10-meter surface wind components ($\text{m}\ \text{s}^{-1}$)
+   - **`U2M`**, **`V2M`**: 2-meter surface wind components ($\text{m}\ \text{s}^{-1}$)
+   - **`TQV`**: Total precipitable water vapor ($\text{kg}\ \text{m}^{-2}$)
+   - **`TQL`**, **`TQI`**: Total precipitable liquid and ice water ($\text{kg}\ \text{m}^{-2}$)
+   - **`CLDPRS`**, **`CLDTMP`**: Cloud top pressure ($\text{Pa}$) and temperature ($\text{K}$)
+   - **`OMEGA500`**: 500 hPa vertical velocity ($\text{Pa}\ \text{s}^{-1}$, synoptic lift)
+   - `T850`, `T500`, `T250`: Temperature aloft ($\text{K}$)
+   - `Q850`, `Q500`, `Q250`: Specific humidity aloft ($\text{kg}\ \text{kg}^{-1}$)
+   - `H1000`, `H850`, `H500`, `H250`: Geopotential heights ($\text{m}$)
+   - `U850`, `V850`, `U500`, `V500`, `U250`, `V250`: Winds aloft ($\text{m}\ \text{s}^{-1}$)
+   - `PBLTOP`: Planetary boundary layer top pressure ($\text{Pa}$)
+   - `DISPH`: Zero plane displacement height ($\text{m}$)
 
-2. **`f5295_fp.tavg1_2d_flx_Nx.YYYYMMDD_HH30z.nc4`** (Surface Flux Diagnostics):
+2. **`f5295_fp.tavg1_2d_flx_Nx.YYYYMMDD_HH30z.nc4`** (Verified Surface Flux Diagnostics):
    - **`PRECTOT`**: Total precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$) — *Primary Precipitation Predictor*
-   - `PRECCON`: Convective precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
-   - `PRECLSC`: Large scale precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
-   - `EFLUX`, `HFLUX`: Latent and sensible heat fluxes ($\text{W}\ \text{m}^{-2}$)
+   - **`PRECCON`**: Convective precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`PRECLSC`**: Non-anvil large-scale precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`PRECANV`**: Anvil precipitation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`PRECSNO`**: Snowfall rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`PGENTOT`**: Total column production of precipitation ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`PREVTOT`**: Total column re-evaporation/sublimation of precipitation ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`EVAP`**: Surface evaporation rate ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
+   - **`EFLUX`**: Total latent heat flux ($\text{W}\ \text{m}^{-2}$)
+   - **`HFLUX`**: Sensible heat flux ($\text{W}\ \text{m}^{-2}$)
+   - **`PBLH`**: Planetary boundary layer height ($\text{m}$)
+   - **`USTAR`**, **`BSTAR`**, **`QSTAR`**, **`TSTAR`**: Surface boundary-layer turbulence scales
+   - `FRCCN`, `FRCLS`, `FRCAN`: Areal shower fractions (convective, large-scale, anvil)
+   - `NIRDF`, `NIRDR`: Near-infrared downwelling diffuse and direct beam fluxes ($\text{W}\ \text{m}^{-2}$)
 
 ---
 
