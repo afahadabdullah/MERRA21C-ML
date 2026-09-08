@@ -1,0 +1,29 @@
+name: downscale_env
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.23.0
+  - scipy
+  - xarray>=2023.01.0
+  - netcdf4
+  - h5netcdf
+  - dask
+  - pyproj
+  - xesmf>=0.8.0
+  - esmpy
+  - matplotlib
+  - cartopy
+  - tqdm
+  - pyyaml
+  - pip:
+      - torch>=2.2.0
+      - torchvision
+      - torchaudio
+      - torchcfm>=1.0.0
+      - pytorch-lightning>=2.1.0
+      - tensorboard
+      - wandb

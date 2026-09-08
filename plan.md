@@ -10,7 +10,11 @@ This project implements a machine learning framework for statistical and generat
   - 2-meter Temperature (`t2m` / T2M)
   - Precipitation (`precip` / PRECTOT / PRECTOTCORR)
 - **Primary ML Framework:** Conditional Flow Matching (CFM) / Optimal Transport Flow Matching (OT-CFM) with deep generative architectures (e.g., U-Net / DiT backbones).
-- **Computing Platform:** NASA Center for Climate Simulation (NCCS) **Discover** Supercomputer (`/discover/nobackup/...`).
+- **Computing Platform:** NASA Center for Climate Simulation (NCCS) **Discover** Supercomputer.
+- **Project Directory & Conda Environment:**
+  ```bash
+  /gpfsm/dnb10/projects/p311/ML_downscaling/
+  ```
 
 ---
 
