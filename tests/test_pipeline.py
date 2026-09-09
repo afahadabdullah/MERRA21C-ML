@@ -145,7 +145,11 @@ def test_accumulation_bounds_mismatch_fails(prepared, tmp_path):
         assert_time(ds, datetime(2025, 9, 1, 2), 'fixture')
 
 
-def test_hwt_area_plus_exponent_units_are_recognized():
-    from merraflow.prepare import units
-    ds = xr.Dataset({'AREA': (('Ydim', 'Xdim'), np.ones((2, 2)), {'units': 'm+2'})})
+def test_hwt_plus_exponent_units_are_recognized():
+    from merraflow.prepare import unit_text, units
+    ds = xr.Dataset({
+        'AREA': (('Ydim', 'Xdim'), np.ones((2, 2)), {'units': 'm+2'}),
+        'HGT_SFC': (('Ydim', 'Xdim'), np.ones((2, 2)), {'units': 'm+2 s-2'}),
+    })
     units(ds, 'AREA', 'area')
+    assert unit_text(ds.HGT_SFC) == 'm2s-2'

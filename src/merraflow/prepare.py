@@ -27,13 +27,15 @@ def field(ds, name):
     return a
 
 
+def unit_text(da):
+    u = da.attrs.get('units', '').lower().replace(' ', '').replace('**', '^')
+    # HWT LCC metadata writes positive exponents with an explicit plus sign.
+    # These exact aliases change spelling only; they do not convert dimensions.
+    return {'m+2': 'm2', 'm+2s-2': 'm2s-2'}.get(u, u)
+
+
 def units(ds, name, kind):
-    u = ds[name].attrs.get('units', '').lower().replace(' ', '').replace('**', '^')
-    # HWT LCC files encode square metres as ``m+2``.  This is a source-specific
-    # exponent spelling, not a dimensional conversion; recognize it only for
-    # cell area so that other malformed metadata still fails the audit.
-    if kind == 'area' and u == 'm+2':
-        u = 'm2'
+    u = unit_text(ds[name])
     allowed = {
         'rate': {'kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kg/m^2/s'},
         'accum': {'mm', 'kgm-2', 'kgm^-2', 'kg/m2', 'kg/m^2'},
@@ -102,7 +104,7 @@ def make_static(hr, native):
     if np.any(area <= 0):
         raise ValueError('AREA must be strictly positive')
     z = field(hr, 'HGT_SFC')
-    u = hr.HGT_SFC.attrs.get('units', '').lower().replace(' ', '').replace('**', '^')
+    u = unit_text(hr.HGT_SFC)
     if u in {'m2s-2', 'm^2s^-2', 'm2/s2', 'm^2/s^2'}:
         z /= 9.80665
     elif u not in {'m', 'meter', 'meters'}:
