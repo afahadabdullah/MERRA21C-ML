@@ -17,17 +17,10 @@ data:
     - '2025-10-18'
     - '2026-01-01'
   predictors:
-  - T2M
   - PRECTOT
-  - PS
   - U10M
   - V10M
-  - QV2M
-  - SLP
   - TQV
-  - OMEGA500
-  - PRECCON
-  - PRECLSC
   accumulation_timestamp: end
   accumulation_hours: 1.0
   state_alignment: midpoint_snapshot

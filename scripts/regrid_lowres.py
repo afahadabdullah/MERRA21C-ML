@@ -37,12 +37,12 @@ from tqdm import tqdm
 _WORKER_REGRIDDER = None
 _WORKER_BBOX = None
 
-# Variables consumed by configs/discover.yaml and configs/a100_80gb.yaml.  A
-# legacy output containing only T2M/PRECTOT is not complete enough to train.
+# Variables consumed by configs/discover.yaml and configs/a100_80gb.yaml,
+# including the four coarse baseline fields assembled by preparation.
 MODEL_REQUIRED_SLV_VARS = {
-    "T2M", "QV2M", "U10M", "V10M", "PS", "SLP", "TQV", "OMEGA500",
+    "T2M", "U10M", "V10M", "PS", "TQV",
 }
-MODEL_REQUIRED_FLX_VARS = {"PRECTOT", "PRECCON", "PRECLSC"}
+MODEL_REQUIRED_FLX_VARS = {"PRECTOT"}
 MODEL_REQUIRED_OUTPUT_VARS = MODEL_REQUIRED_SLV_VARS | MODEL_REQUIRED_FLX_VARS
 
 

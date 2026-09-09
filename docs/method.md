@@ -11,7 +11,7 @@ The source information is GEOS-FP on a 0.25°×0.3125° grid. The existing bilin
 | ps | slv `PS` | 30mn slv `PRES_SFC` | Pa |
 | wind10m | slv `hypot(U10M,V10M)` | 30mn slv `hypot(UGRD_10M,VGRD_10M)` | m/s |
 
-Wind speed is scalar; this model does not generate wind direction or conserve momentum. Extra LR conditions are `QV2M`, `SLP`, `TQV`, `OMEGA500`, `PRECCON`, and `PRECLSC`. The spelling is `QV2M`, not the `Q2M` shorthand in the old plan. Static/temporal conditions are elevation, sine/cosine latitude and longitude, log area, annual phase accounting for leap years, UTC daily phase, and longitude-adjusted local solar phase. Four coarse baseline channels explicitly condition the residual model. No HR dynamic predictors leak into conditioning.
+Wind speed is scalar; this model does not generate wind direction or conserve momentum. The minimal dynamic predictor set is `PRECTOT`, `U10M`, `V10M`, and `TQV`. The four coarse baseline channels already supply `T2M`, native precipitation, `PS`, and wind speed; repeating temperature and pressure as dynamic channels adds no new field. U/V retain wind direction, while total-column water supplies moisture information not present in the baseline. `QV2M`, `SLP`, `OMEGA500`, `PRECCON`, and `PRECLSC` are excluded to reduce redundancy, missing-variable sensitivity, storage, and model width. This is a physically motivated minimal set, not a claim of measured feature importance; add predictors only through train/validation ablations. Static/temporal conditions are elevation, sine/cosine latitude and longitude, log area, annual phase accounting for leap years, UTC daily phase, and longitude-adjusted local solar phase. No HR dynamic predictors leak into conditioning.
 
 ## Flow formulation
 

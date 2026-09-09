@@ -11,6 +11,7 @@ from .config import write_json
 from .physics import native_groups, project_precip, transform_target, budget_error
 
 PRECIP_VARS = {'PRECTOT', 'PRECCON', 'PRECLSC', 'PRECANV', 'PRECSNO'}
+BASELINE_VARS = {'T2M', 'PS', 'U10M', 'V10M'}
 
 
 def field(ds, name):
@@ -97,7 +98,7 @@ def manifest(cfg):
 def predictor_gaps(entries, predictors):
     """Return unreadable/incomplete regridded files before expensive preparation."""
     gaps = []
-    required = set(predictors)
+    required = set(predictors) | BASELINE_VARS
     for entry in entries:
         try:
             with xr.open_dataset(entry['lr'], decode_times=False) as ds:

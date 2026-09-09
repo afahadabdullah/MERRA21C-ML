@@ -313,7 +313,7 @@ def data_stage(fig, left, width, case):
     )
     fig.text(
         left + 0.018, 0.125,
-        "11 dynamic predictors\nT2M • PRECTOT • PS • U/V • humidity • SLP • ω₅₀₀",
+        "4 nonredundant predictors\nPRECTOT • U10M • V10M • TQV",
         color=INK, fontsize=7.5, linespacing=1.45, va="bottom",
     )
 
@@ -390,17 +390,17 @@ def tensor_stage(fig, left, width, case):
              color=INK, fontweight="bold")
     cursor, y0, total = left + 0.018, 0.710, width - 0.036
     for count, color, label in [
-        (11, BLUE, "weather"), (6, GOLD, "static"),
+        (4, BLUE, "weather"), (6, GOLD, "static"),
         (6, TEAL, "time"), (4, NAVY, "baseline"),
     ]:
-        section = total * count / 27
+        section = total * count / 20
         fig.patches.append(Rectangle((cursor, y0), section, 0.031,
                                      transform=fig.transFigure, facecolor=color,
                                      edgecolor="white", linewidth=0.4))
         fig.text(cursor + section / 2, y0 + 0.0155, f"{count} {label}", color="white",
                  fontsize=6.0, ha="center", va="center", fontweight="bold")
         cursor += section
-    fig.text(left + width / 2, 0.687, "27 normalized channels at every LCC pixel",
+    fig.text(left + width / 2, 0.687, "20 normalized channels at every LCC pixel",
              ha="center", fontsize=6.6, color=MUTED)
     fields = case["target"]
     specifications = [

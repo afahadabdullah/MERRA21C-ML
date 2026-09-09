@@ -39,11 +39,11 @@ def test_pairing_crosses_month_and_split_validation(prepared):
 def test_stats_train_only_and_patches(prepared):
     a = Archive(prepared['data']['prepared'])
     entries = [e for e in a.index['entries'] if e['split'] == 'train']
-    exact = np.concatenate([a.array(e, 'condition')[:, ::2, ::2].reshape(11, -1) for e in entries], axis=1)
+    exact = np.concatenate([a.array(e, 'condition')[:, ::2, ::2].reshape(4, -1) for e in entries], axis=1)
     np.testing.assert_allclose(a.cm.ravel(), exact.mean(1), rtol=1e-5, atol=1e-5)
     ds = PatchDataset(a.root, 'train', 16, 4, 8, seed=12)
     assert ds[0]['target'].shape == (4, 24, 24)
-    assert ds[0]['condition'].shape == (27, 24, 24)
+    assert ds[0]['condition'].shape == (20, 24, 24)
     np.testing.assert_array_equal(ds[0]['target'], ds[0]['target'])
     first = ds[0]['condition'].clone()
     ds.epoch = 1
@@ -64,15 +64,15 @@ def test_predictor_gaps_report_file_and_all_missing_variables(tmp_path):
     path = tmp_path/'incomplete.nc'
     xr.Dataset({'T2M': (('y', 'x'), np.ones((2, 2))) }).to_netcdf(path)
     gaps = predictor_gaps([{'id': '20250107_0130', 'lr': str(path)}],
-                          ['T2M', 'OMEGA500', 'PRECTOT'])
+                          ['T2M', 'PRECTOT', 'TQV'])
     assert gaps == [{'id': '20250107_0130', 'path': str(path),
-                     'missing': ['OMEGA500', 'PRECTOT']}]
+                     'missing': ['PRECTOT', 'PS', 'TQV', 'U10M', 'V10M']}]
 
 
 def test_network_backward_and_heun(prepared):
     ds = PatchDataset(prepared['data']['prepared'], 'train', 16, 4, 2)
     batch = {k: v[None] for k, v in ds[0].items()}
-    model = VelocityUNet(27, **prepared['model'])
+    model = VelocityUNet(20, **prepared['model'])
     loss = flow_loss(model, batch, 4, [1]*4)
     loss.backward()
     assert torch.isfinite(loss) and model.output[-1].weight.grad.abs().sum() > 0
@@ -142,7 +142,7 @@ def test_unlabeled_inference_uses_frozen_statistics(prepared, tmp_path):
     e = a.index['entries'][0]
     assert e['split'] == 'predict'
     assert not (a.root/e['id']/'truth.npy').exists()
-    assert a.condition(e, 0, 0, 16, 4).shape == (27, 24, 24)
+    assert a.condition(e, 0, 0, 16, 4).shape == (20, 24, 24)
 
 
 def test_accumulation_bounds_mismatch_fails(prepared, tmp_path):

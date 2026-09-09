@@ -11,7 +11,10 @@ data:
     train: ['2025-01-01', '2025-09-01']
     val: ['2025-09-03', '2025-10-16']
     test: ['2025-10-18', '2026-01-01']
-  predictors: [T2M, PRECTOT, PS, U10M, V10M, QV2M, SLP, TQV, OMEGA500, PRECCON, PRECLSC]
+  # Minimal nonredundant dynamic set. T2M, PS, and wind speed are already
+  # supplied as coarse baseline channels; U/V retain direction and TQV adds
+  # column moisture information for precipitation structure.
+  predictors: [PRECTOT, U10M, V10M, TQV]
   # APCP at 01:00 is assumed to integrate 00:00--01:00; LR label is 00:30.
   # Validate this archive convention with data_audit.py before production.
   accumulation_timestamp: end
