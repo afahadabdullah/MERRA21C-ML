@@ -15,8 +15,7 @@ Rows:
   Row 2: Total Precipitation Rate (kg m-2 s-1 -> mm hr-1)
 
 Display:
-  - Uses imshow / pcolormesh flat rasterization without smoothing or contour interpolation,
-    so raw 25 km discrete pixels and 3 km resolved features are crisply preserved.
+  - Uses imshow / pcolormesh flat rasterization without smoothing or contour interpolation.
   - Cartopy publication-quality maps with CONUS Lambert Conformal Conic projections.
   - Regional Orographic Zoom panel over complex terrain (Southern/Central Rockies).
 """
@@ -138,14 +137,11 @@ def find_matching_triplets(regrid_dir: str, raw_root: str, highres_dir: str):
             continue
 
         # 2. Raw low-res files (slv and flx)
-        # Location: raw_root/Y2025/M01/f5295_fp.tavg1_2d_slv_Nx.YYYYMMDD_HH30z.nc4
         raw_month_dir = os.path.join(raw_root, f"Y{dt.year}", f"M{dt.month:02d}")
         raw_slv = os.path.join(raw_month_dir, f"f5295_fp.tavg1_2d_slv_Nx.{dt.strftime('%Y%m%d_%H%M')}z.nc4")
         raw_flx = os.path.join(raw_month_dir, f"f5295_fp.tavg1_2d_flx_Nx.{dt.strftime('%Y%m%d_%H%M')}z.nc4")
 
-        # Fallback if raw_month_dir doesn't exist or files slightly different
         if not (os.path.exists(raw_slv) and os.path.exists(raw_flx)):
-            # Try flat or alternate search
             raw_slv = None
             raw_flx = None
 
@@ -237,7 +233,6 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     raw_t2m_c, raw_precip_mm, raw_lats, raw_lons = None, None, None, None
     if item["raw_slv"] and os.path.exists(item["raw_slv"]) and item["raw_flx"] and os.path.exists(item["raw_flx"]):
         with xr.open_dataset(item["raw_slv"]) as ds_r_slv:
-            # Crop roughly to CONUS extent with buffer
             lons_norm = np.where(ds_r_slv["lon"].values > 180.0, ds_r_slv["lon"].values - 360.0, ds_r_slv["lon"].values)
             ds_r_slv = ds_r_slv.assign_coords(lon=lons_norm).sortby("lon")
             ds_crop_slv = ds_r_slv.sel(lat=slice(20.0, 55.0), lon=slice(-130.0, -65.0))
@@ -280,8 +275,6 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     # Setup Projections & Bounds
     proj = ccrs.LambertConformal(central_longitude=-96.0, central_latitude=37.5, standard_parallels=(30, 45))
     data_crs = ccrs.PlateCarree()
-
-    # Determine CONUS map extent from high-res grid
     extent = [-125.0, -66.5, 23.0, 50.5]
 
     fig, axes = plt.subplots(
@@ -298,9 +291,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
         y=0.98,
     )
 
-    # For imshow on PlateCarree / LCC:
-    # To plot raw discrete grid cells without smoothing or bilinear contour interpolation,
-    # pcolormesh with shading="nearest" or "auto" or imshow with extent produces crisp non-interpolated pixels.
+    # Subsample for responsive rendering
     step = 2
     lons_sub = lons[::step, ::step]
     lats_sub = lats[::step, ::step]
@@ -314,7 +305,6 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     add_map_features(ax)
     ax.set_extent(extent, crs=data_crs)
     if raw_t2m_c is not None:
-        # Use imshow with PlateCarree coordinate bounds to see crisp discrete 25 km pixels
         im1 = ax.imshow(
             raw_t2m_c, origin="lower",
             extent=[raw_lons.min(), raw_lons.max(), raw_lats.min(), raw_lats.max()],
@@ -334,7 +324,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im2 = ax.pcolormesh(
         lons_sub, lats_sub, lr_t2m_c[::step, ::step],
         transform=data_crs, cmap=t_cmap, vmin=t_min, vmax=t_max,
-        shading="nearest"  # Explicit discrete pixel boundaries, no contouring
+        shading="auto"
     )
     ax.set_title("[2] Low-Res Interpolated: T2M\n(Bilinear on 3 km LCC Grid)", fontsize=13, fontweight="bold")
     cb = fig.colorbar(im2, ax=ax, orientation="horizontal", pad=0.04, shrink=0.75)
@@ -347,7 +337,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im3 = ax.pcolormesh(
         lons_sub, lats_sub, hr_t2m_c[::step, ::step],
         transform=data_crs, cmap=t_cmap, vmin=t_min, vmax=t_max,
-        shading="nearest"
+        shading="auto"
     )
     ax.set_title("[3] High-Res Ground Truth: TMP_2M\n(HWT Simulation, Resolved 3 km LCC)", fontsize=13, fontweight="bold")
     cb = fig.colorbar(im3, ax=ax, orientation="horizontal", pad=0.04, shrink=0.75)
@@ -360,7 +350,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im4 = ax.pcolormesh(
         lons_sub, lats_sub, diff_t2m[::step, ::step],
         transform=data_crs, cmap=diff_t_cmap, norm=diff_t_norm,
-        shading="nearest"
+        shading="auto"
     )
     rmse_t = np.sqrt(np.nanmean(diff_t2m**2))
     mae_t = np.nanmean(np.abs(diff_t2m))
@@ -396,7 +386,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im6 = ax.pcolormesh(
         lons_sub, lats_sub, lr_precip_mm[::step, ::step],
         transform=data_crs, cmap=precip_cmap, norm=precip_norm,
-        shading="nearest"
+        shading="auto"
     )
     ax.set_title("[2] Low-Res Interpolated: PRECTOT\n(Bilinear on 3 km LCC Grid)", fontsize=13, fontweight="bold")
     cb = fig.colorbar(im6, ax=ax, orientation="horizontal", pad=0.04, shrink=0.75)
@@ -409,7 +399,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im7 = ax.pcolormesh(
         lons_sub, lats_sub, hr_precip_mm[::step, ::step],
         transform=data_crs, cmap=precip_cmap, norm=precip_norm,
-        shading="nearest"
+        shading="auto"
     )
     ax.set_title("[3] High-Res Ground Truth: PRECTOT\n(HWT Simulation, Resolved 3 km LCC)", fontsize=13, fontweight="bold")
     cb = fig.colorbar(im7, ax=ax, orientation="horizontal", pad=0.04, shrink=0.75)
@@ -422,7 +412,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     im8 = ax.pcolormesh(
         lons_sub, lats_sub, diff_precip[::step, ::step],
         transform=data_crs, cmap=diff_p_cmap, norm=diff_p_norm,
-        shading="nearest"
+        shading="auto"
     )
     mae_p = np.nanmean(np.abs(diff_precip))
     max_hr_p = np.nanmax(hr_precip_mm)
@@ -435,7 +425,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
     plt.close()
     print(f"Saved 4-column diagnostic multi-panel to: {out_file}")
 
-    # Also generate regional orographic zoom with discrete nearest rendering
+    # Generate regional orographic zoom
     plot_orographic_zoom(
         dt, lons, lats, elev, lr_t2m_c, hr_t2m_c, diff_t2m,
         raw_t2m_c, raw_lats, raw_lons, out_dir
@@ -473,7 +463,7 @@ def plot_orographic_zoom(dt, lons, lats, elev, lr_t2m, hr_t2m, diff_t2m, raw_t2m
     add_map_features(ax)
     ax.set_extent([bbox_lon[0], bbox_lon[1], bbox_lat[0], bbox_lat[1]], crs=proj)
     if elev is not None:
-        im0 = ax.pcolormesh(lons, lats, elev, transform=proj, cmap="terrain", vmin=500, vmax=4000, shading="nearest")
+        im0 = ax.pcolormesh(lons, lats, elev, transform=proj, cmap="terrain", vmin=500, vmax=4000, shading="auto")
         ax.set_title("[1] High-Res Topography (m)\n(3 km Resolved Ridge & Valley)", fontsize=11, fontweight="bold")
         cb = fig.colorbar(im0, ax=ax, orientation="horizontal", pad=0.06, shrink=0.8)
         cb.set_label("Elevation (m)", fontsize=10)
@@ -501,7 +491,7 @@ def plot_orographic_zoom(dt, lons, lats, elev, lr_t2m, hr_t2m, diff_t2m, raw_t2m
     ax = axes[2]
     add_map_features(ax)
     ax.set_extent([bbox_lon[0], bbox_lon[1], bbox_lat[0], bbox_lat[1]], crs=proj)
-    im2 = ax.pcolormesh(lons, lats, lr_t2m, transform=proj, cmap="coolwarm", vmin=t_min, vmax=t_max, shading="nearest")
+    im2 = ax.pcolormesh(lons, lats, lr_t2m, transform=proj, cmap="coolwarm", vmin=t_min, vmax=t_max, shading="auto")
     ax.set_title("[3] Interpolated Low-Res T2M (°C)\n(Bilinear on 3 km LCC Grid)", fontsize=11, fontweight="bold")
     cb = fig.colorbar(im2, ax=ax, orientation="horizontal", pad=0.06, shrink=0.8)
     cb.set_label("T2M (°C)", fontsize=10)
@@ -510,7 +500,7 @@ def plot_orographic_zoom(dt, lons, lats, elev, lr_t2m, hr_t2m, diff_t2m, raw_t2m
     ax = axes[3]
     add_map_features(ax)
     ax.set_extent([bbox_lon[0], bbox_lon[1], bbox_lat[0], bbox_lat[1]], crs=proj)
-    im3 = ax.pcolormesh(lons, lats, hr_t2m, transform=proj, cmap="coolwarm", vmin=t_min, vmax=t_max, shading="nearest")
+    im3 = ax.pcolormesh(lons, lats, hr_t2m, transform=proj, cmap="coolwarm", vmin=t_min, vmax=t_max, shading="auto")
     ax.set_title("[4] High-Res Ground Truth (°C)\n(3 km Fine Thermal Structure)", fontsize=11, fontweight="bold")
     cb = fig.colorbar(im3, ax=ax, orientation="horizontal", pad=0.06, shrink=0.8)
     cb.set_label("TMP_2M (°C)", fontsize=10)
@@ -520,7 +510,7 @@ def plot_orographic_zoom(dt, lons, lats, elev, lr_t2m, hr_t2m, diff_t2m, raw_t2m
     add_map_features(ax)
     ax.set_extent([bbox_lon[0], bbox_lon[1], bbox_lat[0], bbox_lat[1]], crs=proj)
     norm = mcolors.TwoSlopeNorm(vmin=-8.0, vcenter=0.0, vmax=8.0)
-    im4 = ax.pcolormesh(lons, lats, diff_t2m, transform=proj, cmap="bwr", norm=norm, shading="nearest")
+    im4 = ax.pcolormesh(lons, lats, diff_t2m, transform=proj, cmap="bwr", norm=norm, shading="auto")
     ax.set_title("[5] Orographic Bias (Low - High)\n(Peak warming / Valley cooling)", fontsize=11, fontweight="bold")
     cb = fig.colorbar(im4, ax=ax, orientation="horizontal", pad=0.06, shrink=0.8)
     cb.set_label("Δ T2M (°C)", fontsize=10)
