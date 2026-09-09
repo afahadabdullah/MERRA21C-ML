@@ -86,9 +86,9 @@ Preparation can rebuild incomplete shards after interruption if no completed `in
 
 ```bash
 python -m merraflow.cli train --config configs/discover.yaml
-# Single node, four A100 GPUs:
-torchrun --standalone --nproc-per-node=4 -m merraflow.cli train --config configs/discover.yaml
-# Or use the scheduler template (set the site's current A100 partition/resource selector):
+# Single node, two A100 GPUs:
+torchrun --standalone --nproc-per-node=2 -m merraflow.cli train --config configs/discover.yaml
+# Recommended: request two Discover A100s and launch one DDP worker per GPU:
 sbatch scripts/slurm_train_flow.sh
 ```
 
@@ -102,6 +102,8 @@ sbatch scripts/slurm_train_flow.sh
 | Batch per GPU | 2 | 2 |
 | Accumulation | 8 | 8 |
 | Effective batch / GPU | 16 | 16 |
+| Default GPU count | 2 | 2 |
+| Effective global batch | 32 | 32 |
 | Precision | BF16 | BF16 |
 | Activation checkpointing | Enabled | Enabled |
 
@@ -113,7 +115,7 @@ python scripts/benchmark_a100.py --config configs/discover.yaml --batches 1,2,4
 
 It includes activations, gradients, AdamW state and EMA, and records out-of-memory cases. It uses synthetic patches, so real I/O throughput and validation skill need separate measurement.
 
-Both use AdamW at 2e-4, warmup then cosine decay, gradient clipping, EMA, and an area-weighted velocity loss on the patch core. Full-domain fields never enter GPU memory. Epoch logs include allocated peak GPU memory. Benchmark the first epoch, then change batch/patch size if appropriate; neither preset has an A100 memory guarantee yet. With four GPUs the effective batch is 64. The SLURM scripts are single-node templates using the account/environment paths from the existing scripts; scheduler GPU labels must match Discover's current configuration.
+Both use AdamW at 2e-4, warmup then cosine decay, gradient clipping, EMA, and an area-weighted velocity loss on the patch core. Full-domain fields never enter GPU memory. Epoch logs include allocated peak GPU memory. Benchmark the first epoch, then change batch/patch size if appropriate; neither preset has an A100 memory guarantee yet. The default two-GPU job has an effective global batch of 32. The Discover template uses the verified `s3292` account, `alla100` QoS, `gpu_a100` partition, and Rome constraint.
 
 ```bash
 python -m merraflow.cli train --config configs/discover.yaml --resume runs/cfm128/last.pt
