@@ -10,7 +10,7 @@
 #SBATCH --output=logs/flow_prepare_%j.log
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
-ENV_DIR="${ENV_DIR:-/discover/nobackup/projects/GEOS_MITgcm/afahad/conda/envs/myenv}"
+ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"
 source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.sh
 conda activate "$ENV_DIR"
 cd "$PROJECT_DIR"

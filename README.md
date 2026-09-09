@@ -45,7 +45,7 @@ Each epoch samples deterministic random timestamp/crop pairs from the training s
 Use the existing Discover environment, with a CUDA-enabled PyTorch build appropriate to the node:
 
 ```bash
-conda activate /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/envs/myenv
+conda activate /gpfsm/dnb10/projects/p311/ML_downscaling/env
 python -m pip install -e '.[test]'
 python -c 'import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))'
 mkdir -p logs

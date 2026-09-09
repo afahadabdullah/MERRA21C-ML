@@ -17,7 +17,7 @@
 set -e
 
 PROJECT_DIR="/gpfsm/dnb10/projects/p311/ML_downscaling"
-ENV_DIR="/discover/nobackup/projects/GEOS_MITgcm/afahad/conda/envs/myenv"
+ENV_DIR="/gpfsm/dnb10/projects/p311/ML_downscaling/env"
 
 echo "=== Loading Conda Environment ==="
 source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.sh || source ~/.bashrc
