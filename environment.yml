@@ -19,8 +19,10 @@ dependencies:
   - cartopy
   - tqdm
   - pyyaml
+  - pytest
+  - h5py
   - pip:
-      - torch>=2.2.0
+      - torch>=2.3.0
       - torchvision
       - torchaudio
       - torchcfm>=1.0.0

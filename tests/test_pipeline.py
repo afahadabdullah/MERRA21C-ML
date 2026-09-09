@@ -1,0 +1,145 @@
+from copy import deepcopy
+from pathlib import Path
+import json
+import numpy as np
+import pytest
+import torch
+import xarray as xr
+from merraflow.config import load_config
+from merraflow.synthetic import make_synthetic
+from merraflow.prepare import prepare, manifest, field
+from merraflow.dataset import Archive, PatchDataset, crop
+from merraflow.model import VelocityUNet, flow_loss, integrate
+from merraflow.inference import starts, blend_window, sample_frame, predict
+from merraflow.train import train
+from merraflow.evaluate import evaluate
+
+
+@pytest.fixture(scope='module')
+def prepared(tmp_path_factory):
+    torch.set_num_threads(1)
+    root = tmp_path_factory.mktemp('archive')
+    template = load_config(Path(__file__).resolve().parents[1]/'configs/discover.yaml')
+    cfg = load_config(make_synthetic(root, template))
+    prepare(cfg)
+    return cfg
+
+
+def test_pairing_crosses_month_and_split_validation(prepared):
+    entries, missing = manifest(prepared)
+    assert not missing and len(entries) == 6
+    e = entries[1]
+    assert '20250831_2330' in e['hr'] and '20250901_0000' in e['acc']
+    cfg = deepcopy(prepared)
+    cfg['data']['splits']['val'][0] = '2025-08-01'
+    with pytest.raises(ValueError, match='overlap'):
+        manifest(cfg)
+
+
+def test_stats_train_only_and_patches(prepared):
+    a = Archive(prepared['data']['prepared'])
+    entries = [e for e in a.index['entries'] if e['split'] == 'train']
+    exact = np.concatenate([a.array(e, 'condition')[:, ::2, ::2].reshape(11, -1) for e in entries], axis=1)
+    np.testing.assert_allclose(a.cm.ravel(), exact.mean(1), rtol=1e-5, atol=1e-5)
+    ds = PatchDataset(a.root, 'train', 16, 4, 8, seed=12)
+    assert ds[0]['target'].shape == (4, 24, 24)
+    assert ds[0]['condition'].shape == (27, 24, 24)
+    np.testing.assert_array_equal(ds[0]['target'], ds[0]['target'])
+    first = ds[0]['condition'].clone()
+    ds.epoch = 1
+    assert not torch.equal(first, ds[0]['condition'])
+    assert crop(np.ones((4, 5)), 0, 0, 2, 3).shape == (8, 8)
+
+
+def test_missing_files_are_reported(prepared):
+    cfg = deepcopy(prepared)
+    cfg['data']['end'] = '2025-09-01T04:30:00'
+    cfg['data']['splits']['test'][1] = '2025-09-01T06:00:00'
+    _, missing = manifest(cfg)
+    assert len(missing) == 1 and len(missing[0]['missing']) == 4
+
+
+def test_network_backward_and_heun(prepared):
+    ds = PatchDataset(prepared['data']['prepared'], 'train', 16, 4, 2)
+    batch = {k: v[None] for k, v in ds[0].items()}
+    model = VelocityUNet(27, **prepared['model'])
+    loss = flow_loss(model, batch, 4, [1]*4)
+    loss.backward()
+    assert torch.isfinite(loss) and model.output[-1].weight.grad.abs().sum() > 0
+    class Constant(torch.nn.Module):
+        def forward(self, x, t, c):
+            return torch.ones_like(x)*2
+    zero = torch.zeros((1, 4, 8, 8))
+    np.testing.assert_allclose(integrate(Constant(), zero, zero, 3).numpy(), 2, atol=1e-6)
+
+
+def test_stitching_covers_irregular_domain():
+    h, w, size, stride = 35, 47, 16, 12
+    denom = np.zeros((h, w))
+    numer = np.zeros((h, w))
+    win = blend_window(size)
+    for y in starts(h, size, stride):
+        for x in starts(w, size, stride):
+            denom[y:y+size, x:x+size] += win
+            numer[y:y+size, x:x+size] += 7*win
+    assert denom.min() > 0
+    np.testing.assert_allclose(numer/denom, 7, rtol=1e-6)
+
+
+def test_train_resume_predict_evaluate(prepared, tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module('merraflow.train')
+    original_save = module.atomic_save
+    epoch0 = tmp_path/'epoch0.pt'
+    def capture(path, value):
+        original_save(path, value)
+        if str(path).endswith('last.pt') and value['epoch'] == 0:
+            original_save(epoch0, value)
+    monkeypatch.setattr(module, 'atomic_save', capture)
+    ckpt_path = train(prepared)
+    ckpt = torch.load(ckpt_path, weights_only=True)
+    assert ckpt['step'] > 0 and np.isfinite(ckpt['best'])
+    uninterrupted = torch.load(Path(prepared['train']['output'])/'last.pt', weights_only=True)
+    cfg = deepcopy(prepared)
+    cfg['train']['output'] = str(tmp_path/'resumed')
+    train(cfg, resume=epoch0)
+    resumed = torch.load(Path(cfg['train']['output'])/'last.pt', weights_only=True)
+    for key in uninterrupted['model']:
+        torch.testing.assert_close(uninterrupted['model'][key], resumed['model'][key], rtol=0, atol=0)
+    predict(prepared, ckpt_path, limit=1)
+    dest = evaluate(prepared)
+    report = json.loads((dest/'summary.json').read_text())
+    assert report['hours_evaluated'] == 1 and len(report['missing_hours']) == 1
+    for path in Path(prepared['inference']['output']).glob('*.nc'):
+        with xr.open_dataset(path) as ds:
+            assert ds.precip.min() >= 0 and ds.wind10m.min() >= 0
+            audit = json.loads(ds.attrs['conservation_audit'])
+            assert audit['after']['max_relative_wet'] < 1e-6
+            assert (ds.time_bounds.values[0, 1]-ds.time_bounds.values[0, 0])/np.timedelta64(1, 'h') == 1
+
+
+def test_unlabeled_inference_uses_frozen_statistics(prepared, tmp_path):
+    from merraflow.prepare import prepare_predict
+    cfg = deepcopy(prepared)
+    cfg['data']['prepared'] = str(tmp_path/'unlabeled')
+    # Deliberately inaccessible HR paths: production inference must not read labels.
+    cfg['data']['highres_root'] = '/does-not-exist'
+    cfg['data']['start'] = cfg['data']['end'] = '2025-09-01T02:30:00'
+    prepare_predict(cfg, prepared['data']['prepared'])
+    a = Archive(cfg['data']['prepared'])
+    original = Archive(prepared['data']['prepared'])
+    assert a.stats == original.stats and a.index['fingerprint'] == original.index['fingerprint']
+    e = a.index['entries'][0]
+    assert e['split'] == 'predict'
+    assert not (a.root/e['id']/'truth.npy').exists()
+    assert a.condition(e, 0, 0, 16, 4).shape == (27, 24, 24)
+
+
+def test_accumulation_bounds_mismatch_fails(prepared, tmp_path):
+    from merraflow.prepare import units, assert_time
+    ds = xr.Dataset({'APCP': (('Ydim', 'Xdim'), np.ones((2, 2)), {'units': 'mm/day'})}, coords={'time': [np.datetime64('2025-09-01T01:00')]})
+    with pytest.raises(ValueError, match='unsupported'):
+        units(ds, 'APCP', 'accum')
+    from datetime import datetime
+    with pytest.raises(ValueError, match='time'):
+        assert_time(ds, datetime(2025, 9, 1, 2), 'fixture')

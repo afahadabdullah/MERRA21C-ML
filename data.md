@@ -172,3 +172,18 @@ source $g/GEOSv12/GEOSgcm/@env/g5_modules
 source /discover/nobackup/projects/gmao/share/gmao_SIteam/Environments/GEOSenv
 ```
 
+
+## 5. Implemented ML pairing (`src/merraflow`, September 2026)
+
+The runnable pipeline in `README.md` supersedes the initial two-target pairing table above:
+
+| Model output | Coarse source | Fine target | Pairing |
+| :--- | :--- | :--- | :--- |
+| `t2m` | regridded `T2M` | `TMP_2M` | LR hourly mean at :30 → HR midpoint state |
+| `precip` | native `PRECTOT` for budget; regridded `PRECTOT` for conditioning | hourly `APCP` | LR :30 → end-of-hour accumulation at the next :00 |
+| `ps` | regridded `PS` | `PRES_SFC` | Same midpoint approximation as temperature |
+| `wind10m` | magnitude of regridded `U10M,V10M` | magnitude of `UGRD_10M,VGRD_10M` | Same midpoint approximation |
+
+Hourly APCP is converted from mm per hour-long window to mm/hour. It is used instead of an instantaneous high-resolution precipitation rate to match the coarse averaging window. The next-hour filename may lie in a new day, month, or year. Verify the archive's end-label convention; provided time bounds are checked. `HGT_SFC` is divided by gravity only when metadata indicates geopotential units; fields already in meters are retained. The new loader reads AREA/topography directly and does not depend on the legacy static-grid extraction assumptions.
+
+The code conserves native precipitation over explicitly defined, area-weighted LCC pixel footprints after stitching. See `docs/method.md` for the precise finite-volume definition, limitations at grid boundaries, and retained original-versus-constrained HR truth. No polygon-corner geometry has been verified in this repository.

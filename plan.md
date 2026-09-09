@@ -189,3 +189,7 @@ MERRA21C-ML/
    - Create environment configuration (`environment.yml` / `requirements.txt` / PyTorch on CUDA).
 4. **Build Core Data Ingestion & Dataset Class:**
    - Implement the spatial alignment and patch extraction logic for LCC and regular lat-lon grids.
+
+## Implementation status (September 2026)
+
+The end-to-end starting implementation is now in `src/merraflow`, with A100 configurations, tests, CLI smoke workflow, diagnostic plots and SLURM templates. Use `README.md` and `docs/method.md` for the actual supported behavior and scientific assumptions. The earlier phases above are a research plan, not a claim that every proposed architecture, storage backend, tracking service or multiyear experiment is implemented. In particular, the delivered model is a residual U-Net with independent-coupling conditional flow matching; precipitation uses hourly APCP and a native-footprint conservation projection, and targets now include pressure and scalar 10 m wind speed.
