@@ -59,6 +59,16 @@ def test_missing_files_are_reported(prepared):
     assert len(missing) == 1 and len(missing[0]['missing']) == 4
 
 
+def test_predictor_gaps_report_file_and_all_missing_variables(tmp_path):
+    from merraflow.prepare import predictor_gaps
+    path = tmp_path/'incomplete.nc'
+    xr.Dataset({'T2M': (('y', 'x'), np.ones((2, 2))) }).to_netcdf(path)
+    gaps = predictor_gaps([{'id': '20250107_0130', 'lr': str(path)}],
+                          ['T2M', 'OMEGA500', 'PRECTOT'])
+    assert gaps == [{'id': '20250107_0130', 'path': str(path),
+                     'missing': ['OMEGA500', 'PRECTOT']}]
+
+
 def test_network_backward_and_heun(prepared):
     ds = PatchDataset(prepared['data']['prepared'], 'train', 16, 4, 2)
     batch = {k: v[None] for k, v in ds[0].items()}

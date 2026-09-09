@@ -78,6 +78,8 @@ The preprocessor checks time coordinates, units, shapes, finite values, HR/nativ
 
 Missing hours are written to `data/paired_hourly/missing.json`; the default fails if any requested pairs are incomplete. Narrow the configured date ranges, or explicitly set `strict_missing: false` to use only complete hours and retain the missing-hour audit. No nearest-time pairing or random train/test patch splitting occurs.
 
+Before writing shards, preparation scans every regridded file for the configured predictor schema and writes problems to `data/paired_hourly/predictor_gaps.json`. The regridder uses the same required-variable set when deciding whether an existing output may be skipped, so rerunning the regrid job repairs legacy partial files instead of treating them as complete. A source file that genuinely lacks a required predictor fails with its exact path; do not fill or drop a predictor for only part of the record.
+
 Outputs include a timestamp/split manifest, original HR truth, constrained HR targets, coarse baselines, transformed residuals, condition arrays, train-only normalization statistics, grid metadata, and a precipitation adjustment audit. Each timestamp is a set of memory-mappable `.npy` files; patches are sampled on demand without duplicating overlapping crops. At 1059×1799, the default 27 stored float32 planes use about **206 MB/hour, or 1.8 TB/year**, excluding original/regridded data. Place `data.prepared` on Discover scratch with sufficient capacity. The loader requires complete finite fields; masked ocean/land-only training is not implemented.
 
 Preparation can rebuild incomplete shards after interruption if no completed `index.json` exists. Once preparation completes, use a new output directory when inputs/configuration change. It never silently reuses statistics from a different run.
@@ -86,10 +88,12 @@ Preparation can rebuild incomplete shards after interruption if no completed `in
 
 ```bash
 python -m merraflow.cli train --config configs/discover.yaml
-# Single node, two A100 GPUs:
+# Single node, two A100 GPUs when two were allocated:
 torchrun --standalone --nproc-per-node=2 -m merraflow.cli train --config configs/discover.yaml
-# Recommended: request two Discover A100s and launch one DDP worker per GPU:
+# Queue-friendly default: request one Discover A100:
 sbatch scripts/slurm_train_flow.sh
+# Request two A100s when shorter runtime is worth a potentially longer queue:
+sbatch --gres=gpu:2 scripts/slurm_train_flow.sh
 ```
 
 | Setting | Conservative A100 start | Larger A100 80 GB candidate |
@@ -102,8 +106,9 @@ sbatch scripts/slurm_train_flow.sh
 | Batch per GPU | 2 | 2 |
 | Accumulation | 8 | 8 |
 | Effective batch / GPU | 16 | 16 |
-| Default GPU count | 2 | 2 |
-| Effective global batch | 32 | 32 |
+| Default GPU count | 1 | 1 |
+| Default effective global batch | 16 | 16 |
+| Two-GPU effective global batch | 32 | 32 |
 | Precision | BF16 | BF16 |
 | Activation checkpointing | Enabled | Enabled |
 
@@ -115,7 +120,7 @@ python scripts/benchmark_a100.py --config configs/discover.yaml --batches 1,2,4
 
 It includes activations, gradients, AdamW state and EMA, and records out-of-memory cases. It uses synthetic patches, so real I/O throughput and validation skill need separate measurement.
 
-Both use AdamW at 2e-4, warmup then cosine decay, gradient clipping, EMA, and an area-weighted velocity loss on the patch core. Full-domain fields never enter GPU memory. Epoch logs include allocated peak GPU memory. Benchmark the first epoch, then change batch/patch size if appropriate; neither preset has an A100 memory guarantee yet. The default two-GPU job has an effective global batch of 32. The Discover template uses the verified `s3292` account, `alla100` QoS, `gpu_a100` partition, and Rome constraint.
+Both use AdamW at 2e-4, warmup then cosine decay, gradient clipping, EMA, and an area-weighted velocity loss on the patch core. Full-domain fields never enter GPU memory. Epoch logs include allocated peak GPU memory. Benchmark the first epoch, then change batch/patch size if appropriate; neither preset has an A100 memory guarantee yet. The default one-GPU job has an effective global batch of 16; a two-GPU override raises it to 32. Slurm cannot request a range of GPU counts, but the launcher dynamically uses every GPU in the allocation. Resume requires the same GPU/world count as the original run. The Discover template uses the verified `s3292` account, `alla100` QoS, `gpu_a100` partition, and Rome constraint.
 
 ```bash
 python -m merraflow.cli train --config configs/discover.yaml --resume runs/cfm128/last.pt

@@ -37,6 +37,14 @@ from tqdm import tqdm
 _WORKER_REGRIDDER = None
 _WORKER_BBOX = None
 
+# Variables consumed by configs/discover.yaml and configs/a100_80gb.yaml.  A
+# legacy output containing only T2M/PRECTOT is not complete enough to train.
+MODEL_REQUIRED_SLV_VARS = {
+    "T2M", "QV2M", "U10M", "V10M", "PS", "SLP", "TQV", "OMEGA500",
+}
+MODEL_REQUIRED_FLX_VARS = {"PRECTOT", "PRECCON", "PRECLSC"}
+MODEL_REQUIRED_OUTPUT_VARS = MODEL_REQUIRED_SLV_VARS | MODEL_REQUIRED_FLX_VARS
+
 
 def get_grid_definitions(highres_sample_path: str, buffer_deg: float = 2.0):
     """Load target LCC grid and compute cropped source bounding box."""
@@ -130,11 +138,9 @@ def is_file_valid(filepath: str) -> bool:
         return False
     try:
         with xr.open_dataset(filepath) as ds:
-            if "T2M" in ds and "PRECTOT" in ds:
-                return True
+            return MODEL_REQUIRED_OUTPUT_VARS.issubset(ds.data_vars)
     except Exception:
         return False
-    return False
 
 
 def to_3d(val):
@@ -160,6 +166,15 @@ def process_single_step(item: tuple) -> str:
 
     # 2. Open datasets
     with xr.open_dataset(slv_path) as ds_slv_raw, xr.open_dataset(flx_path) as ds_flx_raw:
+        missing_slv = sorted(MODEL_REQUIRED_SLV_VARS - set(ds_slv_raw.data_vars))
+        missing_flx = sorted(MODEL_REQUIRED_FLX_VARS - set(ds_flx_raw.data_vars))
+        if missing_slv or missing_flx:
+            details = []
+            if missing_slv:
+                details.append(f"{slv_path}: {missing_slv}")
+            if missing_flx:
+                details.append(f"{flx_path}: {missing_flx}")
+            raise KeyError("Missing model-required source variables; " + "; ".join(details))
         ds_slv = crop_lowres(ds_slv_raw, bbox)
         ds_flx = crop_lowres(ds_flx_raw, bbox)
 

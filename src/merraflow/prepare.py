@@ -94,6 +94,22 @@ def manifest(cfg):
     return entries, missing
 
 
+def predictor_gaps(entries, predictors):
+    """Return unreadable/incomplete regridded files before expensive preparation."""
+    gaps = []
+    required = set(predictors)
+    for entry in entries:
+        try:
+            with xr.open_dataset(entry['lr'], decode_times=False) as ds:
+                absent = sorted(required-set(ds.data_vars))
+            if absent:
+                gaps.append({'id': entry['id'], 'path': entry['lr'], 'missing': absent})
+        except Exception as exc:
+            gaps.append({'id': entry['id'], 'path': entry['lr'],
+                         'error': f'{type(exc).__name__}: {exc}'})
+    return gaps
+
+
 def sorted_native(ds):
     return ds.assign_coords(lon=((ds.lon+180) % 360)-180).sortby('lon').sortby('lat')
 
@@ -173,6 +189,11 @@ def prepare(cfg):
         raise FileNotFoundError(f'{len(missing)} incomplete hourly pairs; see {root}/missing.json. Adjust dates or explicitly disable strict_missing.')
     if not entries or any(not any(e['split'] == s for e in entries) for s in ('train', 'val', 'test')):
         raise ValueError('Need at least one complete hour in each train/val/test split')
+    gaps = predictor_gaps(entries, d['predictors'])
+    write_json(root/'predictor_gaps.json', gaps)
+    if gaps:
+        raise ValueError(f'{len(gaps)} regridded files lack required predictors or are unreadable; '
+                         f'see {root}/predictor_gaps.json and rebuild them before preparation')
     with xr.open_dataset(entries[0]['hr']) as hr, xr.open_dataset(entries[0]['native']) as raw:
         static = make_static(hr, sorted_native(raw))
         # Preserve available projection and grid coordinate metadata in a small NetCDF.

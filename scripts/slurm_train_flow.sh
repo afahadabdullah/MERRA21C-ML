@@ -6,15 +6,16 @@
 #SBATCH --constraint=rome
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mem-per-gpu=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/flow_%j.log
 #SBATCH --error=logs/flow_%j.err
 # Submit from project root after mkdir -p logs.
-# The default request is one Rome node with two A100 GPUs. NPROC below is
-# derived from CUDA visibility, so an explicit --gres override remains valid.
+# The queue-friendly default is one A100. Request two at submission with
+# ``sbatch --gres=gpu:2 scripts/slurm_train_flow.sh``. NPROC below is derived
+# from CUDA visibility and launches one DDP rank per allocated GPU.
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
 ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"
