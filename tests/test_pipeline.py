@@ -143,3 +143,9 @@ def test_accumulation_bounds_mismatch_fails(prepared, tmp_path):
     from datetime import datetime
     with pytest.raises(ValueError, match='time'):
         assert_time(ds, datetime(2025, 9, 1, 2), 'fixture')
+
+
+def test_hwt_area_plus_exponent_units_are_recognized():
+    from merraflow.prepare import units
+    ds = xr.Dataset({'AREA': (('Ydim', 'Xdim'), np.ones((2, 2)), {'units': 'm+2'})})
+    units(ds, 'AREA', 'area')

@@ -29,6 +29,11 @@ def field(ds, name):
 
 def units(ds, name, kind):
     u = ds[name].attrs.get('units', '').lower().replace(' ', '').replace('**', '^')
+    # HWT LCC files encode square metres as ``m+2``.  This is a source-specific
+    # exponent spelling, not a dimensional conversion; recognize it only for
+    # cell area so that other malformed metadata still fails the audit.
+    if kind == 'area' and u == 'm+2':
+        u = 'm2'
     allowed = {
         'rate': {'kgm-2s-1', 'kgm^-2s^-1', 'kg/m2/s', 'kg/m^2/s'},
         'accum': {'mm', 'kgm-2', 'kgm^-2', 'kg/m2', 'kg/m^2'},
