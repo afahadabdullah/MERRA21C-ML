@@ -6,6 +6,23 @@ Targets: **2 m temperature, hourly precipitation, surface pressure, and 10 m win
 
 This is an implemented and CPU smoke-tested starting configuration, **not a trained model or an empirically established best configuration**. NASA archive validation, A100 peak memory, distributed execution, and real-data skill must be measured on Discover. See [design and scientific assumptions](docs/method.md) and [validation record](docs/validation.md).
 
+## Workflow overview
+
+![MERRA21C-ML workflow from GEOS-FP inputs through aligned targets, flow-matching training, and generated high-resolution fields](docs/assets/merraflow-workflow.png)
+
+Every heat-map panel above is plotted directly from prepared `.npy` fields or an inference NetCDF by `scripts/make_workflow_figure.py`; the diagram is not an AI-generated image. The checked-in version uses the verified synthetic smoke fixture so it is reproducible and is **not evidence of meteorological skill**. To replace it with production maps after a Discover run:
+
+```bash
+python scripts/make_workflow_figure.py \
+  --archive data/paired_hourly \
+  --predictions runs/cfm128/predictions \
+  --run-dir runs/cfm128 \
+  --timestamp 20251018_0030 \
+  --output docs/assets/merraflow-workflow.png
+```
+
+Omit `--timestamp` to use the first matching prediction. The script reads the same archive and checkpoint outputs used by evaluation, so labels, channel counts, maps, training history, and ensemble fields remain tied to the implemented pipeline.
+
 ## Training method
 
 The model learns a **standardized residual** rather than the full high-resolution field. For each target, the preprocessor transforms the constrained HR target and the coarse baseline, subtracts them, then fits train-only residual statistics. At training time it draws an independent Gaussian field `x0`, selects a flow time `t` uniformly from 0 to 1, and constructs the straight path `xt = (1 - t) x0 + t x1`. The conditional U-Net predicts the path velocity `x1 - x0` from `xt`, `t`, and the spatial conditions.
