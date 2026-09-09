@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "xarray>=2023.1", "h5netcdf>=1.3",
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+workflow = ["cartopy>=0.22", "cfgrib>=0.9.10", "eccodes>=1.7"]
 
 [project.scripts]
 merraflow = "merraflow.cli:main"

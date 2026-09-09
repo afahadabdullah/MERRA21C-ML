@@ -10,7 +10,16 @@ This is an implemented and CPU smoke-tested starting configuration, **not a trai
 
 ![MERRA21C-ML workflow from GEOS-FP inputs through aligned targets, flow-matching training, and generated high-resolution fields](docs/assets/merraflow-workflow.png)
 
-Every heat-map panel above is plotted directly from prepared `.npy` fields or an inference NetCDF by `scripts/make_workflow_figure.py`; the diagram is not an AI-generated image. The checked-in version uses the verified synthetic smoke fixture so it is reproducible and is **not evidence of meteorological skill**. To replace it with production maps after a Discover run:
+Every map above is projected from numerical meteorological fields by `scripts/make_workflow_figure.py`; the diagram is not an AI-generated image. The checked-in version uses a fixed real-weather case: [NASA GEOS-FP](https://gmao.gsfc.nasa.gov/geos-system-news/ftp-access-to-geos-fp-data-ends-on-march-20-2019/) at 10:30 UTC and [NOAA HRRR](https://registry.opendata.aws/noaa-hrrr-pds/) valid at 11:00 UTC on 4 July 2025, during the [central-Texas heavy-rain and flash-flood event](https://www.wpc.ncep.noaa.gov/metwatch/metwatch_mpd_multi.php?md=585&yr=2025). State, national, and coastline geometry is drawn on a common Lambert conformal projection.
+
+HRRR is used only as public high-resolution visual context because the HWT target archive is not public; it is **not presented as HWT training data or as a model prediction**. Generate the public version (downloads only the required HRRR messages and caches all source files under ignored `data/`):
+
+```bash
+python -m pip install -e '.[workflow]'
+python scripts/make_workflow_figure.py
+```
+
+To replace the public context with exact project maps after a Discover preparation run:
 
 ```bash
 python scripts/make_workflow_figure.py \
@@ -21,7 +30,7 @@ python scripts/make_workflow_figure.py \
   --output docs/assets/merraflow-workflow.png
 ```
 
-Omit `--timestamp` to use the first matching prediction. The script reads the same archive and checkpoint outputs used by evaluation, so labels, channel counts, maps, training history, and ensemble fields remain tied to the implemented pipeline.
+Omit `--timestamp` to use the first prepared hour. In archive mode the map panels come directly from the GEOS-FP baselines and HWT targets stored by the implemented pipeline.
 
 ## Training method
 
