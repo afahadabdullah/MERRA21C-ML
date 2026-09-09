@@ -11,6 +11,7 @@ Compares:
   4. Differences (Bias = LowRes - HighRes, Ratio, etc.)
 
 Features:
+  - Robust timestamp parsing supporting any prefix or directory structure.
   - Generates publication-ready Cartopy maps with CONUS Lambert Conformal / PlateCarree projections.
   - Automatically matches dates/timestamps between low-res and high-res or picks random paired samples.
   - Plots:
@@ -20,6 +21,7 @@ Features:
 """
 
 import os
+import re
 import glob
 import random
 import argparse
@@ -83,14 +85,25 @@ def parse_args():
     return parser.parse_args()
 
 
+def extract_timestamp_from_filename(filename: str):
+    """Extract YYYYMMDD_HHMM from filename regardless of prefixes."""
+    match = re.search(r"(\d{8})_(\d{4})z?", filename, re.IGNORECASE)
+    if match:
+        date_part, time_part = match.group(1), match.group(2)
+        try:
+            return datetime.strptime(f"{date_part}_{time_part}", "%Y%m%d_%H%M")
+        except ValueError:
+            return None
+    return None
+
+
 def find_matching_pairs(lowres_dir: str, highres_dir: str):
     """
     Find timestamps where both regridded low-res and high-res data are present.
-    Low-res naming: YYYYMM/geos_fp_lcc_1hr.YYYYMMDD_HH30z.nc4
-    High-res naming: YYYYMM/Feature-c2160_L137.hwt_30mn_slv_LCC.YYYYMMDD_HH00z.nc4 (or HH30z)
+    Matches any low-res *.nc4 with high-res hwt_30mn_slv_LCC files.
     """
     print(f"Scanning for available regridded low-res files in: {lowres_dir}")
-    lowres_files = sorted(glob.glob(os.path.join(lowres_dir, "*", "*.nc4")))
+    lowres_files = sorted(glob.glob(os.path.join(lowres_dir, "**", "*.nc4"), recursive=True))
     if not lowres_files:
         lowres_files = sorted(glob.glob(os.path.join(lowres_dir, "*.nc4")))
 
@@ -98,33 +111,37 @@ def find_matching_pairs(lowres_dir: str, highres_dir: str):
     if not lowres_files:
         return []
 
+    print(f"Sample low-res file: {lowres_files[0]}")
+
     pairs = []
     for lr_path in lowres_files:
         fname = os.path.basename(lr_path)
-        parts = fname.split(".")
-        if len(parts) >= 3:
-            time_tag = parts[1]  # YYYYMMDD_HH30z
-            dt_str = time_tag.replace("z", "")
-            try:
-                dt = datetime.strptime(dt_str, "%Y%m%d_%H%M")
-            except ValueError:
-                continue
+        dt = extract_timestamp_from_filename(fname)
+        if dt is None:
+            continue
 
-            ym = dt.strftime("%Y%m")
-            # In HWT, files are every 30 min (HH00z and HH30z).
-            hr_candidate_30 = os.path.join(
-                highres_dir, ym, f"Feature-c2160_L137.hwt_30mn_slv_LCC.{dt.strftime('%Y%m%d_%H30')}z.nc4"
-            )
-            hr_candidate_00 = os.path.join(
-                highres_dir, ym, f"Feature-c2160_L137.hwt_30mn_slv_LCC.{dt.strftime('%Y%m%d_%H00')}z.nc4"
-            )
+        ym = dt.strftime("%Y%m")
+        # Try both HH30z and HH00z candidates in high-res directory
+        hr_candidate_30 = os.path.join(
+            highres_dir, ym, f"Feature-c2160_L137.hwt_30mn_slv_LCC.{dt.strftime('%Y%m%d_%H30')}z.nc4"
+        )
+        hr_candidate_00 = os.path.join(
+            highres_dir, ym, f"Feature-c2160_L137.hwt_30mn_slv_LCC.{dt.strftime('%Y%m%d_%H00')}z.nc4"
+        )
 
-            if os.path.exists(hr_candidate_30):
-                pairs.append((lr_path, hr_candidate_30, dt))
-            elif os.path.exists(hr_candidate_00):
-                pairs.append((lr_path, hr_candidate_00, dt))
+        if os.path.exists(hr_candidate_30):
+            pairs.append((lr_path, hr_candidate_30, dt))
+        elif os.path.exists(hr_candidate_00):
+            pairs.append((lr_path, hr_candidate_00, dt))
 
     print(f"Found {len(pairs)} matching timestamp pairs between low-res and high-res.")
+    if not pairs:
+        # Check what high-res monthly folders actually exist
+        if os.path.exists(highres_dir):
+            hr_dirs = sorted([d for d in os.listdir(highres_dir) if os.path.isdir(os.path.join(highres_dir, d))])
+            print(f"Available high-res monthly folders in {highres_dir}: {hr_dirs}")
+            sample_lr_months = sorted(list({os.path.basename(f).split('.')[2][:6] for f in lowres_files[:50] if len(os.path.basename(f).split('.')) >= 3}))
+            print(f"Sample months in low-res regridded files: {sample_lr_months}")
     return pairs
 
 
@@ -396,9 +413,6 @@ def main():
     pairs = find_matching_pairs(args.lowres_dir, args.highres_dir)
     if not pairs:
         print(f"\nNo matched pairs found yet!")
-        print(f"Make sure you have at least one regridded file in {args.lowres_dir}")
-        print(f"You can generate one quickly by running:")
-        print(f"  python scripts/regrid_lowres.py --date 20250108 --num_workers 4")
         return
 
     selected_pairs = []
