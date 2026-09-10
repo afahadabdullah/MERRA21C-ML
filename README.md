@@ -132,6 +132,18 @@ RESUME=runs/cfm128/last.pt sbatch scripts/slurm_train_flow.sh
 
 Each training directory contains `config.json`, `stats.json`, append-only `history.jsonl`, `last.pt`, and (when validation improves) `best.pt`. A checkpoint contains the model and EMA weights, optimizer, scheduler, scaler, per-rank Torch RNG states, resolved configuration, statistics, and prepared-archive fingerprint. `best.pt` is selected by fixed EMA validation flow loss. Exact resume is at epoch boundaries with the same dataset, model, patch, training settings and number of ranks. Resume does not support changing the epoch schedule; start a distinct experiment for that. Training never uses the test split.
 
+### Three-case best-model diagnostic
+
+After training finishes, generate one full-resolution member for three evenly spaced held-out test timestamps and create geographic field/error maps, an area-weighted RMSE comparison, training history, NetCDF samples, and machine-readable metrics:
+
+```bash
+python scripts/test_best_model.py --config configs/discover.yaml --checkpoint runs/cfm128/best.pt
+# Discover GPU job; replace the dependency with the training job ID:
+sbatch --dependency=afterok:<TRAIN_JOB_ID> scripts/slurm_test_best_model.sh
+```
+
+The default creates exactly three generated samples under `runs/cfm128/test_best_model`. Set `MEMBERS=3` on the Slurm submission to produce a three-member ensemble for each test timestamp, or pass explicit held-out IDs with `--timestamps`. Existing complete prediction files are validated and reused; partial member sets fail rather than mixing runs.
+
 ## Generate, evaluate and plot
 
 Start with a few validation hours to measure cost and ODE convergence:
