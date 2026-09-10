@@ -7,7 +7,7 @@ import torch
 import xarray as xr
 from merraflow.config import load_config
 from merraflow.synthetic import make_synthetic
-from merraflow.prepare import prepare, prepare_month, finalize_prepare, manifest, field
+from merraflow.prepare import prepare, prepare_month, finalize_prepare, manifest, field, grid_mismatches
 from merraflow.dataset import Archive, PatchDataset, crop
 from merraflow.model import VelocityUNet, flow_loss, integrate
 from merraflow.inference import starts, blend_window, sample_frame, predict
@@ -81,6 +81,16 @@ def test_monthly_prepare_resumes_and_finalizes(tmp_path):
 def test_month_filter_requires_zero_padding(prepared):
     with pytest.raises(ValueError, match='zero-padded'):
         manifest(prepared, month='2025-8')
+
+
+def test_grid_comparison_tolerates_encoding_roundoff(prepared):
+    static = Archive(prepared['data']['prepared']).static
+    rounded = {name: value.copy() for name, value in static.items()}
+    rounded['lat'] += 5e-6
+    rounded['area'] *= 1+5e-7
+    assert not grid_mismatches(static, rounded)
+    rounded['lon'] += 1e-2
+    assert any(item.startswith('lon ') for item in grid_mismatches(static, rounded))
 
 
 def test_predictor_gaps_report_file_and_all_missing_variables(tmp_path):

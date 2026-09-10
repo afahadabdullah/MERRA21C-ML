@@ -237,6 +237,27 @@ def grid_signature(static):
     return digest.hexdigest()
 
 
+def grid_mismatches(reference, candidate):
+    """Report material grid changes while tolerating NetCDF round-off."""
+    tolerances = {
+        'lat': (0., 2e-5), 'lon': (0., 2e-5),
+        'area': (1e-6, 1e-2), 'elevation': (1e-6, 1e-3),
+        'native_lat': (0., 1e-7), 'native_lon': (0., 1e-7),
+    }
+    mismatches = []
+    for name, (rtol, atol) in tolerances.items():
+        left, right = np.asarray(reference[name]), np.asarray(candidate[name])
+        if left.shape != right.shape:
+            mismatches.append(f'{name} shape {left.shape} != {right.shape}')
+        elif not np.allclose(left, right, rtol=rtol, atol=atol):
+            mismatches.append(f'{name} max_abs_difference={float(np.max(np.abs(left-right))):.6g}')
+    for name in ('groups', 'source_flat'):
+        left, right = np.asarray(reference[name]), np.asarray(candidate[name])
+        if left.shape != right.shape or not np.array_equal(left, right):
+            mismatches.append(f'{name} mapping changed')
+    return mismatches
+
+
 def write_static(root, entry, static, data_config):
     with xr.open_dataset(entry['hr']) as hr:
         geo = xr.Dataset({k: (('Ydim', 'Xdim'), static[k], {'units': u}) for k, u in
@@ -464,7 +485,6 @@ def finalize_prepare(cfg):
     entries, missing = manifest(cfg)
     validate_manifest(cfg, entries, missing, require_splits=True)
     static = static_for(entries[0])
-    expected_grid = grid_signature(static)
     condition_moments, residual_moments = Moments(), Moments()
     audit, gaps = [], []
     for month in sorted({entry['time'][:7] for entry in entries}):
@@ -476,8 +496,13 @@ def finalize_prepare(cfg):
         expected_ids = [entry['id'] for entry in entries if entry['time'].startswith(month)]
         if metadata['signature'] != preparation_signature(cfg) or metadata['entry_ids'] != expected_ids:
             raise ValueError(f'{path} does not match the current configuration/manifest')
-        if metadata['grid_signature'] != expected_grid:
-            raise ValueError(f'{path}: spatial grid differs from other months')
+        month_entry = next(entry for entry in entries if entry['time'].startswith(month))
+        month_static = static_for(month_entry)
+        if metadata['grid_signature'] != grid_signature(month_static):
+            raise ValueError(f'{path}: source grid changed after this month was prepared')
+        mismatches = grid_mismatches(static, month_static)
+        if mismatches:
+            raise ValueError(f'{path}: spatial grid differs materially: {"; ".join(mismatches)}')
         for entry_id in expected_ids:
             if not shard_complete(root/entry_id, static, len(d['predictors'])):
                 raise ValueError(f'{root/entry_id}: monthly metadata exists but shard is incomplete')
