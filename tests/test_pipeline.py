@@ -7,7 +7,7 @@ import torch
 import xarray as xr
 from merraflow.config import load_config
 from merraflow.synthetic import make_synthetic
-from merraflow.prepare import prepare, manifest, field
+from merraflow.prepare import prepare, prepare_month, finalize_prepare, manifest, field
 from merraflow.dataset import Archive, PatchDataset, crop
 from merraflow.model import VelocityUNet, flow_loss, integrate
 from merraflow.inference import starts, blend_window, sample_frame, predict
@@ -57,6 +57,30 @@ def test_missing_files_are_reported(prepared):
     cfg['data']['splits']['test'][1] = '2025-09-01T06:00:00'
     _, missing = manifest(cfg)
     assert len(missing) == 1 and len(missing[0]['missing']) == 4
+
+
+def test_monthly_prepare_resumes_and_finalizes(tmp_path):
+    template = load_config(Path(__file__).resolve().parents[1]/'configs/discover.yaml')
+    cfg = load_config(make_synthetic(tmp_path/'monthly', template))
+    august = prepare_month(cfg, '2025-08')
+    first = json.loads(august.read_text())
+    assert first['written'] == 2 and first['skipped'] == 0
+    second = json.loads(prepare_month(cfg, '2025-08').read_text())
+    assert second['written'] == 0 and second['skipped'] == 2
+    (Path(cfg['data']['prepared'])/'20250831_2230'/'residual.npy').unlink()
+    repaired = json.loads(prepare_month(cfg, '2025-08').read_text())
+    assert repaired['written'] == 1 and repaired['skipped'] == 1
+    prepare_month(cfg, '2025-09')
+    root = finalize_prepare(cfg)
+    archive = Archive(root)
+    assert len(archive.index['entries']) == 6
+    assert archive.stats['condition']['count_per_channel'] == 792
+    assert (root/'20250831_2230'/'condition.npy').exists()
+
+
+def test_month_filter_requires_zero_padding(prepared):
+    with pytest.raises(ValueError, match='zero-padded'):
+        manifest(prepared, month='2025-8')
 
 
 def test_predictor_gaps_report_file_and_all_missing_variables(tmp_path):

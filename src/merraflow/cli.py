@@ -5,10 +5,12 @@ from .config import load_config
 def main():
     parser = argparse.ArgumentParser(description='GEOS-FP → HWT LCC patch conditional flow matching')
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('prepare', 'prepare-predict', 'train', 'predict', 'evaluate', 'plot'):
+    for command in ('prepare', 'prepare-finalize', 'prepare-predict', 'train', 'predict', 'evaluate', 'plot'):
         p = sub.add_parser(command)
         p.add_argument('--config', required=True)
-        if command == 'prepare-predict':
+        if command == 'prepare':
+            p.add_argument('--month', help='Prepare only one YYYY-MM partition for an array job')
+        elif command == 'prepare-predict':
             p.add_argument('--reference-archive', required=True)
         elif command == 'train':
             p.add_argument('--resume')
@@ -48,8 +50,11 @@ def main():
         return
     cfg = load_config(args.config)
     if args.command == 'prepare':
-        from .prepare import prepare
-        result = prepare(cfg)
+        from .prepare import prepare, prepare_month
+        result = prepare_month(cfg, args.month) if args.month else prepare(cfg)
+    elif args.command == 'prepare-finalize':
+        from .prepare import finalize_prepare
+        result = finalize_prepare(cfg)
     elif args.command == 'prepare-predict':
         from .prepare import prepare_predict
         result = prepare_predict(cfg, args.reference_archive)

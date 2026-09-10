@@ -70,9 +70,11 @@ This runs numerical/integration tests and creates a small synthetic NetCDF archi
 
 ```bash
 python -m merraflow.cli prepare --config configs/discover.yaml
-# or
-sbatch scripts/slurm_prepare_flow.sh
+# On Discover, submit 12 monthly tasks (maximum 10 concurrent) and a dependent finalizer:
+bash scripts/submit_prepare_flow.sh
 ```
+
+The monthly submission is restart-safe. Each task checks all five float32 arrays and their expected dimensions before skipping an existing timestamp, so completed shards from an interrupted serial or array run are retained. The finalizer runs only after all 12 tasks succeed, merges train-only normalization moments, validates every shard and monthly manifest, and writes `index.json` last. Cancel any still-running serial preparation job before launching the array so two writers cannot work on the same timestamp. Set `PREP_YEAR` to override the default 2025 year; the current Discover configuration covers one calendar year.
 
 The preprocessor checks time coordinates, units, shapes, finite values, HR/native grid consistency and available accumulation bounds. It derives wind speed from U/V, converts native rates to mm/hour, and interprets topography using its units. Unknown units fail rather than being guessed. The existing `data_audit.py` prints/extracts basic surface geometry; inspect the `APCP` header/bounds and archive documentation separately to validate its accumulation convention.
 
@@ -82,7 +84,7 @@ Before writing shards, preparation scans every regridded file for the configured
 
 Outputs include a timestamp/split manifest, original HR truth, constrained HR targets, coarse baselines, transformed residuals, condition arrays, train-only normalization statistics, grid metadata, and a precipitation adjustment audit. Each timestamp is a set of memory-mappable `.npy` files; patches are sampled on demand without duplicating overlapping crops. The minimal pipeline uses four dynamic predictors (`PRECTOT`, `U10M`, `V10M`, and `TQV`) plus six static, six temporal, and four baseline channels. At 1059×1799, the resulting 20 stored float32 planes use about **152 MB/hour, or 1.32 TB for the configured 8,664 hours**, excluding original/regridded data. Place `data.prepared` on Discover scratch with sufficient capacity. The loader requires complete finite fields; masked ocean/land-only training is not implemented.
 
-Preparation can rebuild incomplete shards after interruption if no completed `index.json` exists. Once preparation completes, use a new output directory when inputs/configuration change. It never silently reuses statistics from a different run.
+Preparation can rebuild incomplete shards after interruption if no completed `index.json` exists. A preparation signature prevents monthly tasks from mixing different data configurations. Once preparation completes, use a new output directory when inputs/configuration change. It never silently reuses statistics from a different run.
 
 ## Train on A100
 

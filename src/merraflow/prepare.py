@@ -62,7 +62,7 @@ def split_for(t, splits):
     return hits[0] if hits else None
 
 
-def manifest(cfg):
+def manifest(cfg, month=None):
     d = cfg['data']
     # Validate ranges independently of which files happen to exist.
     ranges = sorted((datetime.fromisoformat(v[0]), datetime.fromisoformat(v[1]), k) for k, v in d['splits'].items())
@@ -70,6 +70,13 @@ def manifest(cfg):
         raise ValueError('Provide nonempty train, val and test half-open ranges')
     if any(ranges[i][1] > ranges[i+1][0] for i in range(len(ranges)-1)):
         raise ValueError('Split ranges overlap')
+    if month is not None:
+        try:
+            parsed_month = datetime.strptime(month, '%Y-%m')
+        except ValueError as exc:
+            raise ValueError('Month must use YYYY-MM') from exc
+        if parsed_month.strftime('%Y-%m') != month:
+            raise ValueError('Month must use zero-padded YYYY-MM')
     entries, missing = [], []
     start, end = datetime.fromisoformat(d['start']), datetime.fromisoformat(d['end'])
     if start.minute != 30 or end.minute != 30 or start > end:
@@ -77,7 +84,7 @@ def manifest(cfg):
     t = start
     while t <= end:
         split = split_for(t, d['splits'])
-        if split:
+        if split and (month is None or t.strftime('%Y-%m') == month):
             tag, endtag = t.strftime('%Y%m%d_%H%M'), (t+timedelta(minutes=30)).strftime('%Y%m%d_%H%M')
             hrroot = Path(d['highres_root'])
             paths = {
@@ -161,16 +168,30 @@ class Moments:
     def __init__(self):
         self.n, self.mean, self.m2 = 0, None, None
 
+    def _merge(self, n, mean, m2):
+        if not n:
+            return
+        mean, m2 = np.asarray(mean, dtype='float64'), np.asarray(m2, dtype='float64')
+        if self.n == 0:
+            self.n, self.mean, self.m2 = int(n), mean.copy(), m2.copy()
+            return
+        delta = mean-self.mean
+        total = self.n+n
+        self.m2 += m2 + delta**2*self.n*n/total
+        self.mean += delta*n/total
+        self.n = int(total)
+
     def add(self, arr):
         x = arr.astype('float64').reshape(arr.shape[0], -1)
-        n, mu, m2 = x.shape[1], x.mean(1), ((x-x.mean(1)[:, None])**2).sum(1)
-        if self.n == 0:
-            self.n, self.mean, self.m2 = n, mu, m2
-        else:
-            delta = mu-self.mean
-            self.m2 += m2 + delta**2*self.n*n/(self.n+n)
-            self.mean += delta*n/(self.n+n)
-            self.n += n
+        self._merge(x.shape[1], x.mean(1), ((x-x.mean(1)[:, None])**2).sum(1))
+
+    def merge(self, state):
+        self._merge(state['n'], state['mean'], state['m2'])
+
+    def state(self):
+        return {'n': self.n,
+                'mean': None if self.mean is None else self.mean.tolist(),
+                'm2': None if self.m2 is None else self.m2.tolist()}
 
     def result(self):
         if not self.n:
@@ -178,113 +199,296 @@ class Moments:
         return {'mean': self.mean.tolist(), 'std': np.maximum(np.sqrt(self.m2/self.n), 1e-4).tolist(), 'count_per_channel': self.n}
 
 
-def prepare(cfg):
-    d = cfg['data']
-    root = Path(d['prepared'])
-    root.mkdir(parents=True, exist_ok=True)
-    if (root/'index.json').exists():
-        raise FileExistsError(f'{root} already prepared; use a new directory to prevent stale shards/statistics')
-    entries, missing = manifest(cfg)
-    write_json(root/'missing.json', missing)
-    if missing and d['strict_missing']:
-        raise FileNotFoundError(f'{len(missing)} incomplete hourly pairs; see {root}/missing.json. Adjust dates or explicitly disable strict_missing.')
-    if not entries or any(not any(e['split'] == s for e in entries) for s in ('train', 'val', 'test')):
-        raise ValueError('Need at least one complete hour in each train/val/test split')
-    gaps = predictor_gaps(entries, d['predictors'])
-    write_json(root/'predictor_gaps.json', gaps)
-    if gaps:
-        raise ValueError(f'{len(gaps)} regridded files lack required predictors or are unreadable; '
-                         f'see {root}/predictor_gaps.json and rebuild them before preparation')
-    with xr.open_dataset(entries[0]['hr']) as hr, xr.open_dataset(entries[0]['native']) as raw:
-        static = make_static(hr, sorted_native(raw))
-        # Preserve available projection and grid coordinate metadata in a small NetCDF.
-        geo = xr.Dataset({k: (('Ydim', 'Xdim'), static[k], {'units': u}) for k, u in [('lat', 'degrees_north'), ('lon', 'degrees_east'), ('area', 'm2'), ('elevation', 'm')]})
+SHARD_NAMES = ('condition', 'target', 'truth', 'baseline', 'residual')
+PREPARATION_FORMAT = 2
+
+
+def preparation_signature(cfg):
+    payload = {'format': PREPARATION_FORMAT, 'data': cfg['data']}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def ensure_work_signature(root, cfg):
+    path = root/'_preparation.json'
+    expected = {'format': PREPARATION_FORMAT, 'signature': preparation_signature(cfg),
+                'data_config': cfg['data']}
+    if path.exists():
+        with open(path) as source:
+            actual = json.load(source)
+        if actual != expected:
+            raise ValueError(f'{root} contains shards from a different preparation configuration; use a new data.prepared directory')
+    else:
+        write_json(path, expected)
+
+
+def static_for(entry):
+    with xr.open_dataset(entry['hr']) as hr, xr.open_dataset(entry['native']) as raw:
+        return make_static(hr, sorted_native(raw))
+
+
+def grid_signature(static):
+    digest = hashlib.sha256()
+    for name in ('lat', 'lon', 'area', 'elevation', 'native_lat', 'native_lon'):
+        value = np.ascontiguousarray(static[name])
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(np.asarray(value.shape, dtype='int64').tobytes())
+        digest.update(value.tobytes())
+    return digest.hexdigest()
+
+
+def write_static(root, entry, static, data_config):
+    with xr.open_dataset(entry['hr']) as hr:
+        geo = xr.Dataset({k: (('Ydim', 'Xdim'), static[k], {'units': u}) for k, u in
+                          [('lat', 'degrees_north'), ('lon', 'degrees_east'),
+                           ('area', 'm2'), ('elevation', 'm')]})
         for coord in ('Xdim', 'Ydim'):
             if coord in hr:
                 geo = geo.assign_coords({coord: hr[coord].load()})
         mappings = [k for k in hr if 'grid_mapping_name' in hr[k].attrs]
-        for k in mappings:
-            geo[k] = hr[k].load()
+        for name in mappings:
+            geo[name] = hr[name].load()
         if mappings:
             geo.attrs['grid_mapping_variable'] = mappings[0]
-        geo.attrs.update({'grid': 'HWT LCC; coordinates preserved from source', 'state_alignment': d['state_alignment']})
-        geo.to_netcdf(root/'grid.nc', engine='h5netcdf')
-    np.savez(root/'static.npz', **static)
-    cond_mom, residual_mom = Moments(), Moments()
-    stride = d['stats_stride']
+        geo.attrs.update({'grid': 'HWT LCC; coordinates preserved from source',
+                          'state_alignment': data_config['state_alignment']})
+        temporary = root/'grid.tmp.nc'
+        geo.to_netcdf(temporary, engine='h5netcdf')
+        os.replace(temporary, root/'grid.nc')
+    temporary = root/'static.tmp.npz'
+    np.savez(temporary, **static)
+    os.replace(temporary, root/'static.npz')
+
+
+def shard_complete(folder, static, predictor_count):
+    expected = {'condition': (predictor_count, *static['area'].shape)}
+    expected.update({name: (4, *static['area'].shape) for name in SHARD_NAMES if name != 'condition'})
+    try:
+        for name, shape in expected.items():
+            array = np.load(folder/f'{name}.npy', mmap_mode='r')
+            if array.shape != shape or array.dtype != np.dtype('float32'):
+                return False
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return True
+
+
+def audit_arrays(entry_id, truth, target, baseline, static):
+    return {'id': entry_id,
+            'raw_hr_vs_native_budget': budget_error(truth[1], baseline[1], static['area'], static['groups']),
+            'precip_adjustment_mae_mm_h': float(np.mean(np.abs(truth[1]-target[1]))),
+            'raw_hr_wet_in_native_dry_fraction': float(np.mean((truth[1] > .1) & (baseline[1] == 0)))}
+
+
+def build_arrays(cfg, entry, static):
+    d, t = cfg['data'], datetime.fromisoformat(entry['time'])
+    with xr.open_dataset(entry['lr']) as lr, xr.open_dataset(entry['hr']) as hr, \
+            xr.open_dataset(entry['acc']) as acc, xr.open_dataset(entry['native']) as raw:
+        native = sorted_native(raw)
+        for ds, when, key in [(lr, t, 'lr'), (hr, t, 'hr'),
+                              (acc, t+timedelta(minutes=30), 'acc'), (native, t, 'native')]:
+            assert_time(ds, when, entry[key])
+        for key, expected in [('native_lat', native.lat.values), ('native_lon', native.lon.values)]:
+            if not np.array_equal(static[key], expected):
+                raise ValueError(f'{entry["native"]}: native grid changed within archive')
+        for name, saved in [('lats', 'lat'), ('AREA', 'area')]:
+            if not np.allclose(field(hr, name), static[saved], rtol=1e-6, atol=1e-5):
+                raise ValueError(f'{entry["hr"]}: HR grid {name} changed within archive')
+        if not np.allclose(((field(hr, 'lons')+180) % 360)-180, static['lon'], atol=1e-5):
+            raise ValueError(f'{entry["hr"]}: HR longitude grid changed')
+        bounds = acc.time.attrs.get('bounds')
+        if bounds and bounds in acc:
+            values = acc[bounds].values.ravel()
+            expected = [np.datetime64(t-timedelta(minutes=30)), np.datetime64(t+timedelta(minutes=30))]
+            if len(values) != 2 or not np.array_equal(values, expected):
+                raise ValueError(f'{entry["acc"]}: APCP time bounds do not match the LR hourly window')
+        for ds, name, kind in [(native, 'PRECTOT', 'rate'), (acc, 'APCP', 'accum'),
+                               (hr, 'TMP_2M', 'temperature'), (hr, 'PRES_SFC', 'pressure'),
+                               (lr, 'T2M', 'temperature'), (lr, 'PS', 'pressure')]:
+            units(ds, name, kind)
+        for ds, names in [(hr, ['UGRD_10M', 'VGRD_10M']), (lr, ['U10M', 'V10M'])]:
+            for name in names:
+                units(ds, name, 'wind')
+        source_pr = field(native, 'PRECTOT').ravel()[static['source_flat']]*3600
+        if source_pr.min() < -1e-7:
+            raise ValueError(f'{entry["native"]}: negative native precipitation')
+        reference = np.maximum(source_pr, 0)[static['groups']]
+        precip = field(acc, 'APCP')/d['accumulation_hours']
+        if precip.min() < -1e-7:
+            raise ValueError(f'{entry["acc"]}: negative APCP')
+        target = np.stack([field(hr, 'TMP_2M'), np.maximum(precip, 0),
+                           field(hr, 'PRES_SFC'), np.hypot(field(hr, 'UGRD_10M'), field(hr, 'VGRD_10M'))])
+        baseline = np.stack([field(lr, 'T2M'), reference, field(lr, 'PS'),
+                             np.hypot(field(lr, 'U10M'), field(lr, 'V10M'))])
+        condition = transformed_predictors(lr, d['predictors'], d['precip_log_scale'])
+        if target.shape != baseline.shape or condition.shape[1:] != static['area'].shape:
+            raise ValueError(f'{entry["id"]}: regridded predictors and HR targets must share the LCC grid')
+        truth = target.copy()
+        if d['conserve_training_precip']:
+            target[1] = project_precip(target[1], reference, static['area'], static['groups'])
+        scales = (d['precip_log_scale'], d['wind_log_scale'])
+        residual = transform_target(target, *scales)-transform_target(baseline, *scales)
+    return {'condition': condition, 'target': target, 'truth': truth,
+            'baseline': baseline, 'residual': residual}
+
+
+def write_shard(root, entry_id, arrays):
+    folder, temporary = root/entry_id, root/(entry_id+'.tmp')
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir()
+    for name in SHARD_NAMES:
+        np.save(temporary/f'{name}.npy', arrays[name].astype('float32'))
+    if folder.exists():
+        shutil.rmtree(folder)
+    os.replace(temporary, folder)
+
+
+def process_entries(cfg, entries, static, label='all'):
+    d, stride = cfg['data'], cfg['data']['stats_stride']
     if stride < 1 or d['precip_log_scale'] <= 0 or d['wind_log_scale'] <= 0:
         raise ValueError('Statistics stride and transform scales must be positive')
-    audit = []
-    for i, e in enumerate(entries):
-        t = datetime.fromisoformat(e['time'])
-        with xr.open_dataset(e['lr']) as lr, xr.open_dataset(e['hr']) as hr, xr.open_dataset(e['acc']) as acc, xr.open_dataset(e['native']) as raw:
-            native = sorted_native(raw)
-            for ds, when, key in [(lr, t, 'lr'), (hr, t, 'hr'), (acc, t+timedelta(minutes=30), 'acc'), (native, t, 'native')]:
-                assert_time(ds, when, e[key])
-            for key, expected in [('native_lat', native.lat.values), ('native_lon', native.lon.values)]:
-                if not np.array_equal(static[key], expected):
-                    raise ValueError('Native grid changed within archive')
-            for name, saved in [('lats', 'lat'), ('AREA', 'area')]:
-                if not np.allclose(field(hr, name), static[saved], rtol=1e-6, atol=1e-5):
-                    raise ValueError(f'HR grid {name} changed within archive')
-            if not np.allclose(((field(hr, 'lons')+180) % 360)-180, static['lon'], atol=1e-5):
-                raise ValueError('HR longitude grid changed')
-            # If bounds exist, do not accept a different accumulation interval.
-            bounds = acc.time.attrs.get('bounds')
-            if bounds and bounds in acc:
-                b = acc[bounds].values.ravel()
-                expected = [np.datetime64(t-timedelta(minutes=30)), np.datetime64(t+timedelta(minutes=30))]
-                if len(b) != 2 or not np.array_equal(b, expected):
-                    raise ValueError('APCP time bounds do not match the LR hourly window')
-            for ds, name, kind in [(native, 'PRECTOT', 'rate'), (acc, 'APCP', 'accum'), (hr, 'TMP_2M', 'temperature'), (hr, 'PRES_SFC', 'pressure'), (lr, 'T2M', 'temperature'), (lr, 'PS', 'pressure')]:
-                units(ds, name, kind)
-            for ds, names in [(hr, ['UGRD_10M', 'VGRD_10M']), (lr, ['U10M', 'V10M'])]:
-                for name in names:
-                    units(ds, name, 'wind')
-            source_pr = field(native, 'PRECTOT').ravel()[static['source_flat']]*3600
-            if source_pr.min() < -1e-7:
-                raise ValueError('Negative native precipitation')
-            reference = np.maximum(source_pr, 0)[static['groups']]
-            precip = field(acc, 'APCP')/d['accumulation_hours']
-            if precip.min() < -1e-7:
-                raise ValueError('Negative APCP')
-            target = np.stack([field(hr, 'TMP_2M'), np.maximum(precip, 0), field(hr, 'PRES_SFC'), np.hypot(field(hr, 'UGRD_10M'), field(hr, 'VGRD_10M'))])
-            baseline = np.stack([field(lr, 'T2M'), reference, field(lr, 'PS'), np.hypot(field(lr, 'U10M'), field(lr, 'V10M'))])
-            cond = transformed_predictors(lr, d['predictors'], d['precip_log_scale'])
-            if target.shape != baseline.shape or cond.shape[1:] != static['area'].shape:
-                raise ValueError('Regridded predictors and HR targets must share the LCC grid')
-            raw_target = target.copy()
-            before = budget_error(target[1], reference, static['area'], static['groups'])
-            if d['conserve_training_precip']:
-                target[1] = project_precip(target[1], reference, static['area'], static['groups'])
-            audit.append({'id': e['id'], 'raw_hr_vs_native_budget': before,
-                          'precip_adjustment_mae_mm_h': float(np.mean(np.abs(raw_target[1]-target[1]))),
-                          'raw_hr_wet_in_native_dry_fraction': float(np.mean((raw_target[1] > .1) & (reference == 0)))})
-            kw = (d['precip_log_scale'], d['wind_log_scale'])
-            residual = transform_target(target, *kw)-transform_target(baseline, *kw)
-            folder = root/e['id']
-            tmp = root/(e['id']+'.tmp')
-            if tmp.exists():
-                shutil.rmtree(tmp)
-            tmp.mkdir()
-            for name, array in [('condition', cond), ('target', target), ('truth', raw_target), ('baseline', baseline), ('residual', residual)]:
-                np.save(tmp/f'{name}.npy', array.astype('float32'))
-            if folder.exists():
-                shutil.rmtree(folder)
-            os.replace(tmp, folder)
-            if e['split'] == 'train':
-                cond_mom.add(cond[:, ::stride, ::stride])
-                residual_mom.add(residual[:, ::stride, ::stride])
-        if i % 24 == 0:
-            print(f'Prepared {i+1}/{len(entries)}: {e["id"]}', flush=True)
-    stats = {'condition': cond_mom.result(), 'residual': residual_mom.result(), 'predictors': d['predictors'],
-             'precip_log_scale': d['precip_log_scale'], 'wind_log_scale': d['wind_log_scale']}
+    root = Path(d['prepared'])
+    condition_moments, residual_moments = Moments(), Moments()
+    audit, skipped, written = [], 0, 0
+    for index, entry in enumerate(entries):
+        folder = root/entry['id']
+        if shard_complete(folder, static, len(d['predictors'])):
+            arrays = {name: np.load(folder/f'{name}.npy', mmap_mode='r') for name in SHARD_NAMES}
+            skipped += 1
+        else:
+            arrays = build_arrays(cfg, entry, static)
+            write_shard(root, entry['id'], arrays)
+            written += 1
+        if entry['split'] == 'train':
+            condition_moments.add(arrays['condition'][:, ::stride, ::stride])
+            residual_moments.add(arrays['residual'][:, ::stride, ::stride])
+        audit.append(audit_arrays(entry['id'], arrays['truth'], arrays['target'], arrays['baseline'], static))
+        if index % 24 == 0:
+            print(f'{label}: verified {index+1}/{len(entries)} {entry["id"]} '
+                  f'(written={written}, skipped={skipped})', flush=True)
+    return {'condition': condition_moments.state(), 'residual': residual_moments.state(),
+            'audit': audit, 'written': written, 'skipped': skipped}
+
+
+def finish_archive(cfg, entries, missing, gaps, static, condition_moments, residual_moments, audit):
+    d, root = cfg['data'], Path(cfg['data']['prepared'])
+    write_static(root, entries[0], static, d)
+    stats = {'condition': condition_moments.result(), 'residual': residual_moments.result(),
+             'predictors': d['predictors'], 'precip_log_scale': d['precip_log_scale'],
+             'wind_log_scale': d['wind_log_scale']}
+    write_json(root/'missing.json', missing)
+    write_json(root/'predictor_gaps.json', gaps)
     write_json(root/'stats.json', stats)
     write_json(root/'precip_audit.json', audit)
     fingerprint = hashlib.sha256(json.dumps({'data': d, 'entries': entries, 'stats': stats}, sort_keys=True).encode()).hexdigest()
-    write_json(root/'index.json', {'entries': entries, 'data_config': d, 'fingerprint': fingerprint, 'condition_channels': len(d['predictors'])+16,
+    write_json(root/'index.json', {'entries': entries, 'data_config': d, 'fingerprint': fingerprint,
+                                  'condition_channels': len(d['predictors'])+16,
                                   'conservation': 'native cell center-assigned footprint; represented LCC AREA; not polygon overlap'})
     return root
+
+
+def validate_manifest(cfg, entries, missing, require_splits):
+    d = cfg['data']
+    if missing and d['strict_missing']:
+        raise FileNotFoundError(f'{len(missing)} incomplete hourly pairs; adjust dates or explicitly disable strict_missing')
+    if not entries:
+        raise ValueError('No complete hours to prepare')
+    if require_splits and any(not any(e['split'] == split for e in entries) for split in ('train', 'val', 'test')):
+        raise ValueError('Need at least one complete hour in each train/val/test split')
+
+
+def prepare(cfg):
+    d, root = cfg['data'], Path(cfg['data']['prepared'])
+    root.mkdir(parents=True, exist_ok=True)
+    if (root/'index.json').exists():
+        raise FileExistsError(f'{root} already prepared; use a new directory to prevent stale shards/statistics')
+    ensure_work_signature(root, cfg)
+    entries, missing = manifest(cfg)
+    write_json(root/'missing.json', missing)
+    validate_manifest(cfg, entries, missing, require_splits=True)
+    gaps = predictor_gaps(entries, d['predictors'])
+    write_json(root/'predictor_gaps.json', gaps)
+    if gaps:
+        raise ValueError(f'{len(gaps)} regridded files lack required predictors or are unreadable; see {root}/predictor_gaps.json')
+    static = static_for(entries[0])
+    result = process_entries(cfg, entries, static)
+    condition_moments, residual_moments = Moments(), Moments()
+    condition_moments.merge(result['condition'])
+    residual_moments.merge(result['residual'])
+    return finish_archive(cfg, entries, missing, gaps, static, condition_moments,
+                          residual_moments, result['audit'])
+
+
+def prepare_month(cfg, month):
+    d, root = cfg['data'], Path(cfg['data']['prepared'])
+    root.mkdir(parents=True, exist_ok=True)
+    if (root/'index.json').exists():
+        with open(root/'index.json') as source:
+            index = json.load(source)
+        if index['data_config'] != d:
+            raise ValueError(f'{root} is complete for a different data configuration')
+        print(f'{root} is already complete; month {month} skipped', flush=True)
+        return root/'index.json'
+    ensure_work_signature(root, cfg)
+    entries, missing = manifest(cfg, month=month)
+    part = root/'_monthly'
+    part.mkdir(exist_ok=True)
+    write_json(part/f'{month}.issues.json', {'missing': missing})
+    validate_manifest(cfg, entries, missing, require_splits=False)
+    gaps = predictor_gaps(entries, d['predictors'])
+    write_json(part/f'{month}.issues.json', {'missing': missing, 'predictor_gaps': gaps})
+    if gaps:
+        raise ValueError(f'{len(gaps)} regridded files in {month} lack required inputs; see {part}/{month}.issues.json')
+    static = static_for(entries[0])
+    result = process_entries(cfg, entries, static, label=month)
+    metadata = {'month': month, 'signature': preparation_signature(cfg),
+                'grid_signature': grid_signature(static),
+                'entry_ids': [entry['id'] for entry in entries],
+                'missing': missing, **result}
+    destination = part/f'{month}.json'
+    write_json(destination, metadata)
+    print(f'{month} complete: written={result["written"]}, skipped={result["skipped"]}', flush=True)
+    return destination
+
+
+def finalize_prepare(cfg):
+    d, root = cfg['data'], Path(cfg['data']['prepared'])
+    if (root/'index.json').exists():
+        with open(root/'index.json') as source:
+            index = json.load(source)
+        if index['data_config'] != d:
+            raise ValueError(f'{root} is complete for a different data configuration')
+        return root
+    ensure_work_signature(root, cfg)
+    entries, missing = manifest(cfg)
+    validate_manifest(cfg, entries, missing, require_splits=True)
+    static = static_for(entries[0])
+    expected_grid = grid_signature(static)
+    condition_moments, residual_moments = Moments(), Moments()
+    audit, gaps = [], []
+    for month in sorted({entry['time'][:7] for entry in entries}):
+        path = root/'_monthly'/f'{month}.json'
+        if not path.exists():
+            raise FileNotFoundError(f'Month {month} is incomplete: {path} does not exist')
+        with open(path) as source:
+            metadata = json.load(source)
+        expected_ids = [entry['id'] for entry in entries if entry['time'].startswith(month)]
+        if metadata['signature'] != preparation_signature(cfg) or metadata['entry_ids'] != expected_ids:
+            raise ValueError(f'{path} does not match the current configuration/manifest')
+        if metadata['grid_signature'] != expected_grid:
+            raise ValueError(f'{path}: spatial grid differs from other months')
+        for entry_id in expected_ids:
+            if not shard_complete(root/entry_id, static, len(d['predictors'])):
+                raise ValueError(f'{root/entry_id}: monthly metadata exists but shard is incomplete')
+        condition_moments.merge(metadata['condition'])
+        residual_moments.merge(metadata['residual'])
+        audit.extend(metadata['audit'])
+        gaps.extend(metadata.get('predictor_gaps', []))
+    if len(audit) != len(entries):
+        raise ValueError('Monthly precipitation audit count does not match the manifest')
+    return finish_archive(cfg, entries, missing, gaps, static, condition_moments,
+                          residual_moments, audit)
 
 
 def prepare_predict(cfg, reference_archive):
