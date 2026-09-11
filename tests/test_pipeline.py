@@ -245,6 +245,10 @@ def test_train_resume_predict_evaluate(prepared, tmp_path, monkeypatch):
     ckpt = torch.load(ckpt_path, weights_only=True)
     assert ckpt['step'] > 0 and np.isfinite(ckpt['best'])
     uninterrupted = torch.load(Path(prepared['train']['output'])/'last.pt', weights_only=True)
+    assert (Path(prepared['train']['output'])/'epoch_0001.pt').is_file()
+    periodic = Path(prepared['train']['output'])/'epoch_0002.pt'
+    assert periodic.is_file()
+    assert torch.load(periodic, weights_only=True)['epoch'] == 1
     cfg = deepcopy(prepared)
     cfg['train']['output'] = str(tmp_path/'resumed')
     train(cfg, resume=epoch0)

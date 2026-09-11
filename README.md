@@ -134,7 +134,7 @@ python -m merraflow.cli train --config configs/discover.yaml --resume runs/cfm12
 RESUME=runs/cfm128_prectot/last.pt sbatch scripts/slurm_train_flow.sh
 ```
 
-Each training directory contains `config.json`, `stats.json`, append-only `history.jsonl`, `last.pt`, and (when validation improves) `best.pt`. A checkpoint contains the model and EMA weights, optimizer, scheduler, scaler, per-rank Torch RNG states, resolved configuration, statistics, and prepared-archive fingerprint. `best.pt` is selected by fixed EMA validation flow loss. Exact resume is at epoch boundaries with the same dataset, model, patch, training settings and number of ranks. Resume does not support changing the epoch schedule; start a distinct experiment for that. Training never uses the test split.
+Each training directory contains `config.json`, `stats.json`, append-only `history.jsonl`, `last.pt`, and (when validation improves) `best.pt`. It also writes a durable completed-epoch recovery point every `train.checkpoint_interval` epochs (five by default), e.g. `epoch_0005.pt`. A checkpoint contains the model and EMA weights, optimizer, scheduler, scaler, per-rank Torch RNG states, resolved configuration, statistics, and prepared-archive fingerprint. `best.pt` is selected by fixed EMA validation flow loss. Exact resume is at epoch boundaries with the same dataset, model, patch, training settings and number of ranks. Resume does not support changing the epoch schedule; start a distinct experiment for that. Training never uses the test split.
 
 ### Three-case, five-member best-model diagnostic
 

@@ -18,7 +18,8 @@ def load_config(path, allow_legacy_apcp=False):
         raise ValueError('Require 0 < stride <= patch size for complete coverage')
     if min(tr['batch_size'], tr['accumulate'], tr['epochs'], p['samples_per_epoch'], tr['val_batches']) <= 0:
         raise ValueError('Batch, accumulation, epochs, samples and validation count must be positive')
-    if tr['workers'] < 0 or not 0 <= tr['ema_decay'] < 1 or tr['learning_rate'] <= 0 or tr['grad_clip'] <= 0:
+    if (tr['workers'] < 0 or not 0 <= tr['ema_decay'] < 1 or tr['learning_rate'] <= 0 or
+            tr['grad_clip'] <= 0 or tr.get('checkpoint_interval', 5) <= 0):
         raise ValueError('Invalid worker count, EMA decay, learning rate or gradient clip')
     if tr['warmup_steps'] < 0 or not 0 <= tr['min_lr_ratio'] <= 1 or tr['weight_decay'] < 0:
         raise ValueError('Invalid learning rate schedule or weight decay')

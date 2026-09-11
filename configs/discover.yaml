@@ -38,6 +38,7 @@ train:
   device: auto
   seed: 2025
   epochs: 100
+  checkpoint_interval: 5
   batch_size: 2
   accumulate: 8
   workers: 2

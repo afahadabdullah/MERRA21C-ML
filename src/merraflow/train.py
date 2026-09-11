@@ -86,6 +86,10 @@ def train(cfg, resume=None):
             raise ValueError('Checkpoint dataset/model/patch mismatch')
         previous_train = {k: v for k, v in ckpt['config']['train'].items() if k not in ('output', 'device', 'workers')}
         current_train = {k: v for k, v in tr.items() if k not in ('output', 'device', 'workers')}
+        # Checkpoints written before periodic recovery points used the default of five.
+        # Treat that omitted setting as equivalent so a corrected pre-feature run remains resumable.
+        previous_train.setdefault('checkpoint_interval', 5)
+        current_train.setdefault('checkpoint_interval', 5)
         if previous_train != current_train or len(ckpt['rng']) != world:
             raise ValueError('Exact epoch-boundary resume requires same training settings and world size')
         base.load_state_dict(ckpt['model'])
@@ -176,6 +180,10 @@ def train(cfg, resume=None):
             atomic_save(out/'last.pt', payload)
             if improved:
                 atomic_save(out/'best.pt', payload)
+            # Completed-epoch recovery points are independent of validation skill.
+            # Names are one-based so epoch_0005.pt means five full epochs completed.
+            if (epoch+1) % tr.get('checkpoint_interval', 5) == 0:
+                atomic_save(out/f'epoch_{epoch+1:04d}.pt', payload)
             print(json.dumps(row), flush=True)
     if world > 1:
         dist.destroy_process_group()

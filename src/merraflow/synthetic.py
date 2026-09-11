@@ -21,7 +21,7 @@ def make_synthetic(root, template):
     d['splits'] = {'train': ['2025-08-31', '2025-09-01'], 'val': ['2025-09-01', '2025-09-01T02:00:00'], 'test': ['2025-09-01T02:00:00', '2025-09-01T04:00:00']}
     cfg['patch'].update(size=16, halo=4, stride=12, samples_per_epoch=8)
     cfg['model'].update(base_channels=8, channel_mult=[1, 2, 2], time_dim=32, activation_checkpointing=True)
-    cfg['train'].update(device='cpu', epochs=2, batch_size=2, accumulate=2, workers=0, precision='fp32', warmup_steps=0, val_batches=2, output=str(root/'run'))
+    cfg['train'].update(device='cpu', epochs=2, checkpoint_interval=1, batch_size=2, accumulate=2, workers=0, precision='fp32', warmup_steps=0, val_batches=2, output=str(root/'run'))
     cfg['inference'].update(members=3, steps=2, output=str(root/'predictions'))
     h, w = 36, 44
     yy, xx = np.mgrid[:h, :w]
