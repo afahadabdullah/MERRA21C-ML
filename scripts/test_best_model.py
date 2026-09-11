@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument('--config', default='configs/discover.yaml')
     parser.add_argument('--checkpoint', help='Default: <train.output>/best.pt')
     parser.add_argument('--output', help='Default: <train.output>/test_best_model_m<MEMBERS>')
+    parser.add_argument('--split', choices=('train', 'val', 'test'), default='test',
+                        help='Archive split to inspect; only test is held-out verification')
     parser.add_argument('--samples', type=int, default=3, help='Number of held-out test timestamps')
     parser.add_argument('--members', type=int, default=5, help='Generated members per timestamp')
     parser.add_argument('--timestamps', nargs='*', help='Optional test IDs/timestamps instead of evenly spaced cases')
@@ -76,8 +78,8 @@ def array2d(dataset, name):
     return value
 
 
-def select_entries(archive, count, requested=None, seed=317, storm_timestamp=HISTORICAL_STORM_ID):
-    entries = [entry for entry in archive.index['entries'] if entry['split'] == 'test']
+def select_entries(archive, count, requested=None, seed=317, storm_timestamp=HISTORICAL_STORM_ID, split='test'):
+    entries = [entry for entry in archive.index['entries'] if entry['split'] == split]
     if requested:
         selected = []
         for value in requested:
@@ -89,7 +91,7 @@ def select_entries(archive, count, requested=None, seed=317, storm_timestamp=HIS
             raise ValueError('Requested test timestamps must be unique')
         return selected, {'strategy': 'explicit timestamps'}
     if count < 1 or count > len(entries):
-        raise ValueError(f'Request 1..{len(entries)} held-out test samples')
+        raise ValueError(f'Request 1..{len(entries)} {split} samples')
     matches = [entry for entry in entries if storm_timestamp in (entry['id'], entry['time'])]
     if len(matches) != 1:
         raise ValueError(f'Historical storm case {storm_timestamp!r} is not uniquely available in the held-out archive')
@@ -318,8 +320,10 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
         axes[row, 4].text(.02, .02, f'{score_label} {scores[key]["ensemble_mean"]["rmse"]:.3g} {unit}',
                           transform=axes[row, 4].transAxes, fontsize=8,
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
-    fig.suptitle(f'MERRA21C-ML held-out test diagnostic · {entry["time"]} UTC\n'
+    diagnostic_kind = 'held-out test diagnostic' if entry['split'] == 'test' else 'qualitative in-sample diagnostic'
+    fig.suptitle(f'MERRA21C-ML {diagnostic_kind} · {entry["time"]} UTC\n'
                  f'{checkpoint.name} · {len(ensemble)} members · {label}'
+                 f'{" · qualitative in-sample case" if entry["split"] != "test" else ""}'
                  f'{" · documented 14 Dec 2025 coastal-low case" if historical_storm else ""}'
                  f'{" · LEGACY APCP" if legacy_apcp else ""}', fontsize=15, weight='bold')
     destination = output/f'test_{entry["id"]}{suffix}.png'
@@ -355,6 +359,7 @@ def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legac
     full_scores = variable_scores(archive, ensemble, truth, baseline, full_region)
     zoom_scores = variable_scores(archive, ensemble, truth, baseline, zoom_region)
     metrics = {'id': entry['id'], 'time': entry['time'], 'members': len(ensemble),
+               'split': entry['split'],
                'checkpoint': str(checkpoint.resolve()), 'checkpoint_sha256': checkpoint_sha256(checkpoint),
                'target_definition': 'legacy_apcp' if legacy_apcp else 'matched_hwt_prectot',
                'raw_lowres_definition': 'native GEOS-FP ~25 km fields; not the LCC interpolation used for RMSE',
@@ -435,7 +440,7 @@ def main():
         raise FileNotFoundError(f'Best checkpoint not found: {checkpoint}')
     archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=args.legacy_apcp)
     selected, selection = select_entries(archive, args.samples, args.timestamps, args.sample_seed,
-                                         args.storm_timestamp)
+                                         args.storm_timestamp, args.split)
     suffix = f'test_best_model_m{args.members}' + ('_legacy_apcp' if args.legacy_apcp else '')
     output = Path(args.output or Path(cfg['train']['output'])/suffix)
     prediction_root = output/'predictions'
@@ -455,7 +460,7 @@ def main():
                 path.unlink()
         # Test diagnostics are deliberately fresh: a supplied output directory is
         # reusable, but its member files never silently survive a new invocation.
-        predict(cfg, checkpoint, split='test', timestamp=entry['id'],
+        predict(cfg, checkpoint, split=args.split, timestamp=entry['id'],
                 legacy_apcp=args.legacy_apcp, overwrite=True)
         paths = sorted(prediction_root.glob(f'{entry["id"]}_m*.nc'))
         validate_reused_predictions(paths, checkpoint, cfg, archive, args.legacy_apcp)

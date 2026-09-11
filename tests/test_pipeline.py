@@ -51,6 +51,9 @@ def test_diagnostic_uses_native_geos_and_reserves_historical_case(prepared):
     raw = module.raw_geos_fields(selected[0])
     assert raw['values'].shape[0] == 4 and np.isfinite(raw['values']).all()
     assert selection['historical_storm_case']['id'] == selected[0]['id']
+    train_id = [entry for entry in archive.index['entries'] if entry['split'] == 'train'][0]['id']
+    train_selected, _ = module.select_entries(archive, 1, requested=[train_id], split='train')
+    assert train_selected[0]['id'] == train_id
 
 
 def test_stats_train_only_and_patches(prepared):

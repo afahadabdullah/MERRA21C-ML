@@ -148,6 +148,8 @@ sbatch --dependency=afterok:<TRAIN_JOB_ID> scripts/slurm_test_best_model.sh
 
 The default creates 15 generated fields (five members for each of three timestamps) under `runs/cfm128_prectot/test_best_model_m5`. Its first case is the fixed held-out timestamp `20251214_1230`: the [13–14 December 2025 Northeast coastal low](https://www.weather.gov/okx/20251213_14), for which NWS documented an intensifying coastal low and widespread snow around Long Island and the surrounding northeast. The remaining cases are seeded random held-out timestamps. Set `MEMBERS` to override the ensemble size (minimum two), `SAMPLES` to change the number of cases, `--sample-seed` to change the additional random choices, `--storm-timestamp` to use another documented held-out event, or pass explicit held-out IDs with `--timestamps`. The summary compares the interpolated LCC baseline against the ensemble mean; individual-member RMSE is retained separately. Each invocation regenerates its requested NetCDF members and removes stale members for those timestamps in its own diagnostic `predictions/` directory, so an existing diagnostic output is refreshed rather than reused.
 
+For a qualitative event in the training or validation archive, supply both `--split` and `--timestamps`. The title and metrics label it in-sample; do not use its RMSE as held-out skill.
+
 ### Historical APCP diagnostic
 
 The old model can be inspected with the same five-member, full-domain/zoom diagnostic, but it remains a **historical debugging result** because its targets use the invalid APCP pairing. It cannot be used for training, checkpoint selection, or comparison with the corrected PRECTOT run:
