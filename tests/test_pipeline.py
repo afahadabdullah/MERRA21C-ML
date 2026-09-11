@@ -128,6 +128,30 @@ def test_legacy_archives_and_partial_shards_are_rejected(prepared, tmp_path):
         ensure_work_signature(tmp_path, cfg)
 
 
+def test_legacy_archive_is_available_only_to_the_explicit_diagnostic(prepared):
+    root = Path(prepared['data']['prepared'])
+    index_path = root/'index.json'
+    original = json.loads(index_path.read_text())
+    legacy = dict(original)
+    legacy['format'] = 2
+    try:
+        from merraflow.config import write_json
+        write_json(index_path, legacy)
+        with pytest.raises(ValueError, match='Legacy prepared archive'):
+            Archive(root)
+        assert Archive(root, allow_legacy_apcp=True).shape == Archive(root, allow_legacy_apcp=True).static['area'].shape
+    finally:
+        from merraflow.config import write_json
+        write_json(index_path, original)
+
+
+def test_legacy_config_requires_explicit_diagnostic_opt_in():
+    path = Path(__file__).resolve().parents[1]/'configs/discover_legacy_apcp.yaml'
+    with pytest.raises(ValueError, match='legacy APCP'):
+        load_config(path)
+    assert load_config(path, allow_legacy_apcp=True)['data']['prepared'] == 'data/paired_hourly'
+
+
 def test_missing_files_are_reported(prepared):
     cfg = deepcopy(prepared)
     cfg['data']['end'] = '2025-09-01T04:30:00'

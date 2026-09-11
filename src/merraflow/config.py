@@ -5,7 +5,7 @@ import tempfile
 import yaml
 
 
-def load_config(path):
+def load_config(path, allow_legacy_apcp=False):
     with open(path) as f:
         cfg = yaml.safe_load(f)
     p, m, tr = cfg['patch'], cfg['model'], cfg['train']
@@ -29,10 +29,14 @@ def load_config(path):
         raise ValueError('Unknown precision')
     if cfg['data']['state_alignment'] != 'midpoint_snapshot':
         raise ValueError('Only explicitly declared midpoint_snapshot state alignment is implemented')
-    if cfg['data'].get('precip_source') != 'hwt_30mn_slv_LCC.PRECTOT':
+    legacy = cfg['data'].get('precip_source') != 'hwt_30mn_slv_LCC.PRECTOT'
+    if legacy and not allow_legacy_apcp:
         raise ValueError('Set data.precip_source: hwt_30mn_slv_LCC.PRECTOT and rebuild in a new '
                          'data.prepared directory; legacy APCP targets/statistics are incompatible')
-    if any(key in cfg['data'] for key in ('accumulation_timestamp', 'accumulation_hours')):
+    if legacy and (cfg['data'].get('accumulation_timestamp') != 'end' or
+                   cfg['data'].get('accumulation_hours') != 1):
+        raise ValueError('Legacy diagnostic requires the original end-labeled, one-hour APCP assumption')
+    if not legacy and any(key in cfg['data'] for key in ('accumulation_timestamp', 'accumulation_hours')):
         raise ValueError('Remove legacy accumulation settings: HR precipitation now uses same-time PRECTOT')
     return cfg
 

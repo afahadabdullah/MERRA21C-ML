@@ -21,10 +21,11 @@ def crop(array, y, x, size, halo=0):
 
 
 class Archive:
-    def __init__(self, root):
+    def __init__(self, root, allow_legacy_apcp=False):
         self.root = Path(root)
         self.index = read_json(self.root/'index.json')
-        if self.index.get('format') != PREPARATION_FORMAT:
+        legacy = self.index.get('format') in (None, 2)
+        if self.index.get('format') != PREPARATION_FORMAT and not (allow_legacy_apcp and legacy):
             raise ValueError('Legacy prepared archive: rebuild with matched HWT PRECTOT in a new '
                              'directory, recompute statistics and retrain; APCP targets cannot be reused')
         self.stats = read_json(self.root/'stats.json')

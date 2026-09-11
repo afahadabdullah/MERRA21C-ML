@@ -65,8 +65,8 @@ def sample_frame(model, archive, entry, cfg, device, seed):
     return result, raw[1], audit
 
 
-def predict(cfg, checkpoint, split='test', limit=None, timestamp=None):
-    archive = Archive(cfg['data']['prepared'])
+def predict(cfg, checkpoint, split='test', limit=None, timestamp=None, legacy_apcp=False):
+    archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=legacy_apcp)
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
     digest = hashlib.sha256()
     with open(checkpoint, 'rb') as source:
@@ -113,8 +113,12 @@ def predict(cfg, checkpoint, split='test', limit=None, timestamp=None):
             ds.attrs.update({'ensemble_member': member, 'seed': seed, 'checkpoint': str(Path(checkpoint).resolve()),
                              'checkpoint_epoch': ckpt['epoch'], 'checkpoint_sha256': checkpoint_hash,
                              'dataset_fingerprint': archive.index['fingerprint'],
-                             'precip_source': archive.index['data_config']['precip_source'],
-                             'target_alignment': 'Matched :30 HR snapshot approximates LR hourly mean; precipitation budget projection applied',
+                             'precip_source': archive.index['data_config'].get(
+                                 'precip_source', 'hwt_01hr_acc_LCC.APCP (legacy)'),
+                             'target_alignment': ('Legacy end-labeled APCP target; known invalid for scientific '
+                                                  'comparison' if legacy_apcp else
+                                                  'Matched :30 HR snapshot approximates LR hourly mean; precipitation budget projection applied'),
+                             'target_definition': 'legacy_apcp' if legacy_apcp else 'matched_hwt_prectot',
                              'conservation': archive.index['conservation'], 'conservation_audit': json.dumps(audit),
                              'split': split, 'patch_size': cfg['patch']['size'], 'patch_halo': cfg['patch']['halo'],
                              'patch_stride': cfg['patch']['stride'], 'ode_steps': cfg['inference']['steps'],

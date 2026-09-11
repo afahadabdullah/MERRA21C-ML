@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument('--timestamps', nargs='*', help='Optional test IDs/timestamps instead of evenly spaced cases')
     parser.add_argument('--zoom-fraction', type=float, default=.4,
                         help='Fraction of each grid dimension shown around the strongest HR precipitation event')
+    parser.add_argument('--legacy-apcp', action='store_true',
+                        help='Read only the old APCP archive/checkpoint for historical debugging; never use for new training')
     return parser.parse_args()
 
 
@@ -159,7 +161,7 @@ def crop_extent(extent, shape, region):
             y0+(y1-y0)*ys.start/h, y0+(y1-y0)*ys.stop/h)
 
 
-def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None):
+def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None, legacy_apcp=False):
     truth = np.asarray(archive.array(entry, 'truth'))
     baseline = np.asarray(archive.array(entry, 'baseline'))
     member, generated = ensemble[0], ensemble.mean(0)
@@ -170,7 +172,8 @@ def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None)
     else:
         extent, suffix, label = crop_extent(full_extent, truth.shape[1:], region), '_zoom', 'event-centered zoom'
     fig, axes = map_axes(4, 5, projection)
-    columns = ('Coarse baseline', 'Original HWT target', 'Individual member 0',
+    target_name = 'Legacy APCP HWT target' if legacy_apcp else 'Original HWT target'
+    columns = ('Coarse baseline', target_name, 'Individual member 0',
                f'{len(ensemble)}-member ensemble mean', 'Ensemble mean − HWT')
     for row, (key, display) in enumerate(zip(TARGETS, DISPLAY)):
         title, unit, convert, cmap = display
@@ -211,7 +214,8 @@ def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None)
                           transform=axes[row, 4].transAxes, fontsize=8,
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
     fig.suptitle(f'MERRA21C-ML held-out test diagnostic · {entry["time"]} UTC\n'
-                 f'{checkpoint.name} · {len(ensemble)} members · {label}', fontsize=15, weight='bold')
+                 f'{checkpoint.name} · {len(ensemble)} members · {label}'
+                 f'{" · LEGACY APCP" if legacy_apcp else ""}', fontsize=15, weight='bold')
     destination = output/f'test_{entry["id"]}{suffix}.png'
     fig.savefig(destination, dpi=180)
     plt.close(fig)
@@ -236,7 +240,7 @@ def variable_scores(archive, ensemble, truth, baseline, region):
     return scores
 
 
-def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction):
+def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legacy_apcp=False):
     truth = np.asarray(archive.array(entry, 'truth'))
     baseline = np.asarray(archive.array(entry, 'baseline'))
     full_region = (slice(None), slice(None))
@@ -245,12 +249,13 @@ def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction):
     zoom_scores = variable_scores(archive, ensemble, truth, baseline, zoom_region)
     metrics = {'id': entry['id'], 'time': entry['time'], 'members': len(ensemble),
                'checkpoint': str(checkpoint.resolve()), 'checkpoint_sha256': checkpoint_sha256(checkpoint),
+               'target_definition': 'legacy_apcp' if legacy_apcp else 'matched_hwt_prectot',
                'variables': full_scores,
                'zoom_grid_bounds': {'y': [zoom_region[0].start, zoom_region[0].stop],
                                     'x': [zoom_region[1].start, zoom_region[1].stop]},
                'zoom_variables': zoom_scores}
-    plot_maps(output, entry, archive, ensemble, checkpoint, full_scores)
-    plot_maps(output, entry, archive, ensemble, checkpoint, zoom_scores, zoom_region)
+    plot_maps(output, entry, archive, ensemble, checkpoint, full_scores, legacy_apcp=legacy_apcp)
+    plot_maps(output, entry, archive, ensemble, checkpoint, zoom_scores, zoom_region, legacy_apcp)
     return metrics
 
 
@@ -293,14 +298,15 @@ def plot_training_history(output, training_root):
     plt.close(fig)
 
 
-def validate_reused_predictions(paths, checkpoint, cfg, archive):
+def validate_reused_predictions(paths, checkpoint, cfg, archive, legacy_apcp=False):
     expected_checkpoint = str(checkpoint.resolve())
     expected = {'checkpoint': expected_checkpoint, 'ode_steps': cfg['inference']['steps'],
                 'patch_size': cfg['patch']['size'], 'patch_halo': cfg['patch']['halo'],
                 'patch_stride': cfg['patch']['stride'],
                 'dry_threshold_mm_h': cfg['inference']['dry_threshold'],
                 'checkpoint_sha256': checkpoint_sha256(checkpoint),
-                'dataset_fingerprint': archive.index['fingerprint']}
+                'dataset_fingerprint': archive.index['fingerprint'],
+                'target_definition': 'legacy_apcp' if legacy_apcp else 'matched_hwt_prectot'}
     for path in paths:
         with xr.open_dataset(path) as dataset:
             actual = {name: dataset.attrs.get(name) for name in expected}
@@ -312,13 +318,14 @@ def main():
     args = parse_args()
     if args.members < 2 or not 0 < args.zoom_fraction <= 1:
         raise ValueError('members must be at least 2 and zoom-fraction must be in (0, 1]')
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, allow_legacy_apcp=args.legacy_apcp)
     checkpoint = Path(args.checkpoint) if args.checkpoint else Path(cfg['train']['output'])/'best.pt'
     if not checkpoint.is_file():
         raise FileNotFoundError(f'Best checkpoint not found: {checkpoint}')
-    archive = Archive(cfg['data']['prepared'])
+    archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=args.legacy_apcp)
     selected = select_entries(archive, args.samples, args.timestamps)
-    output = Path(args.output or Path(cfg['train']['output'])/f'test_best_model_m{args.members}')
+    suffix = f'test_best_model_m{args.members}' + ('_legacy_apcp' if args.legacy_apcp else '')
+    output = Path(args.output or Path(cfg['train']['output'])/suffix)
     prediction_root = output/'predictions'
     output.mkdir(parents=True, exist_ok=True)
     prediction_root.mkdir(exist_ok=True)
@@ -330,11 +337,11 @@ def main():
         if paths and len(paths) != args.members:
             raise ValueError(f'{entry["id"]}: found {len(paths)} existing members, expected {args.members}')
         if not paths:
-            predict(cfg, checkpoint, split='test', timestamp=entry['id'])
+            predict(cfg, checkpoint, split='test', timestamp=entry['id'], legacy_apcp=args.legacy_apcp)
             paths = sorted(prediction_root.glob(f'{entry["id"]}_m*.nc'))
-        validate_reused_predictions(paths, checkpoint, cfg, archive)
+        validate_reused_predictions(paths, checkpoint, cfg, archive, args.legacy_apcp)
         ensemble, _ = load_members(paths, archive, entry)
-        report = plot_case(output, entry, archive, ensemble, checkpoint, args.zoom_fraction)
+        report = plot_case(output, entry, archive, ensemble, checkpoint, args.zoom_fraction, args.legacy_apcp)
         reports.append(report)
         print(f'Plotted held-out test case {entry["id"]}', flush=True)
     write_json(output/'metrics.json', {'selection': 'explicit' if args.timestamps else 'evenly spaced test timestamps',

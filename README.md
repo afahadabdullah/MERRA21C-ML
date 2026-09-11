@@ -148,6 +148,16 @@ sbatch --dependency=afterok:<TRAIN_JOB_ID> scripts/slurm_test_best_model.sh
 
 The default creates 15 generated fields (five members for each of three timestamps) under `runs/cfm128_prectot/test_best_model_m5`. Set `MEMBERS` to override the ensemble size (minimum two), `SAMPLES` to change the number of cases, or pass explicit held-out IDs with `--timestamps`. The summary compares the coarse baseline against the ensemble mean; individual-member RMSE is retained separately. Cached files are accepted only when their checkpoint SHA-256, archive fingerprint and sampler settings match; partial or stale member sets fail rather than mixing runs.
 
+### Historical APCP diagnostic
+
+The old model can be inspected with the same five-member, full-domain/zoom diagnostic, but it remains a **historical debugging result** because its targets use the invalid APCP pairing. It cannot be used for training, checkpoint selection, or comparison with the corrected PRECTOT run:
+
+```bash
+sbatch scripts/slurm_test_best_model_legacy_apcp.sh
+```
+
+This explicitly reads `configs/discover_legacy_apcp.yaml`, `data/paired_hourly`, and `runs/cfm128/best.pt`, then writes to `runs/cfm128/test_best_model_m5_legacy_apcp`. Its figures and metrics carry `target_definition: legacy_apcp`.
+
 ## Generate, evaluate and plot
 
 Start with a few validation hours to measure cost and ODE convergence:
