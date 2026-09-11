@@ -2,7 +2,7 @@
 #SBATCH --job-name=flow_prepare
 #SBATCH --account=s3292
 #SBATCH --qos=allnccs
-#SBATCH --array=1-12%10
+#SBATCH --array=1-12%14
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
