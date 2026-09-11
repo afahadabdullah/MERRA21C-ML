@@ -153,6 +153,20 @@ def native_extent(raw):
     return (lon[0]-dx/2, lon[-1]+dx/2, lat[0]-dy/2, lat[-1]+dy/2)
 
 
+def raw_for_region(raw, archive, region):
+    """Crop native pixels to the HWT geographic window for no-Cartopy plots."""
+    if region[0].start is None and region[1].start is None:
+        return raw
+    lat = archive.static['lat'][region]
+    lon = archive.static['lon'][region]
+    iy = np.flatnonzero((raw['lat'] >= np.nanmin(lat)) & (raw['lat'] <= np.nanmax(lat)))
+    ix = np.flatnonzero((raw['lon'] >= np.nanmin(lon)) & (raw['lon'] <= np.nanmax(lon)))
+    if not len(iy) or not len(ix):
+        raise ValueError('Event zoom does not overlap the native GEOS-FP map')
+    return {'values': raw['values'][:, iy[0]:iy[-1]+1, ix[0]:ix[-1]+1],
+            'lat': raw['lat'][iy[0]:iy[-1]+1], 'lon': raw['lon'][ix[0]:ix[-1]+1]}
+
+
 def source_projection(archive):
     """Reconstruct the HWT LCC projection retained in grid.nc when available."""
     if ccrs is None:
@@ -245,14 +259,17 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
     truth = np.asarray(archive.array(entry, 'truth'))
     member, generated = ensemble[0], ensemble.mean(0)
     projection, full_extent, origin = raster_geometry(archive)
-    if projection is None or ccrs is None:
-        raise RuntimeError('Cartopy and the HWT Lambert grid mapping are required to compare native GEOS-FP pixels')
-    raw_extent, raw_crs = native_extent(raw), ccrs.PlateCarree()
     if region is None:
         region = (slice(None), slice(None))
         extent, suffix, label = full_extent, '', 'full CONUS domain'
     else:
         extent, suffix, label = crop_extent(full_extent, truth.shape[1:], region), '_zoom', 'event-centered zoom'
+    # Cartopy can place both rasters on the common Lambert map.  Without it,
+    # retain each source grid honestly rather than pretending a native GEOS-FP
+    # raster shares HWT's projected pixel coordinates.
+    shown_raw = raw if projection is not None else raw_for_region(raw, archive, region)
+    raw_extent = native_extent(shown_raw)
+    raw_crs = ccrs.PlateCarree() if ccrs is not None else None
     fig, axes = map_axes(4, 5, projection)
     target_name = 'Legacy APCP HWT target' if legacy_apcp else 'Original HWT target'
     columns = ('Raw GEOS-FP (~25 km)', target_name, 'Individual member 0',
@@ -260,7 +277,7 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
     for row, (key, display) in enumerate(zip(TARGETS, DISPLAY)):
         title, unit, convert, cmap = display
         raw_value, truth_value, member_value, generated_value = map(
-            convert, (raw['values'][row], truth[row], member[row], generated[row]))
+            convert, (shown_raw['values'][row], truth[row], member[row], generated[row]))
         pooled = np.concatenate([raw_value.ravel(), truth_value.ravel(), member_value.ravel(), generated_value.ravel()])
         if key == 'precip':
             upper = max(float(np.quantile(pooled, .995)), .1)
@@ -284,6 +301,8 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
                              error_norm if column == 4 else norm, source_extent, extent, origin,
                              projection, source_crs, row, column)
             axes[row, column].set_title(f'{title}\n{columns[column]}', fontsize=10, weight='semibold')
+            if projection is None and column == 0:
+                axes[row, column].set(xlabel='Longitude', ylabel='Latitude')
             fig.colorbar(image, ax=axes[row, column], orientation='horizontal', pad=.035,
                          shrink=.82, label=unit)
         score_label = 'Full-domain RMSE' if suffix == '' else 'Zoom RMSE'
