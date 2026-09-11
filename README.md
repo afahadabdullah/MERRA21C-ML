@@ -138,7 +138,7 @@ Each training directory contains `config.json`, `stats.json`, append-only `histo
 
 ### Three-case, five-member best-model diagnostic
 
-After training finishes, generate five full-resolution members for three evenly spaced held-out test timestamps. Each diagnostic has coarse baseline, original HWT, one individual member, five-member ensemble mean, and ensemble-mean-minus-HWT columns. It writes both a full-domain map and an event-centered precipitation zoom using native-grid `imshow(..., interpolation='nearest')`, plus ensemble-mean area-weighted RMSE comparisons, training history, NetCDF samples, and machine-readable metrics:
+After training finishes, generate five full-resolution members for three held-out test timestamps. The first column is the original discrete GEOS-FP ~25 km field on its native latitude/longitude grid—not the bilinearly interpolated LCC baseline. The other columns are original HWT, one individual member, five-member ensemble mean, and ensemble-mean-minus-HWT. RMSE remains a fair same-grid comparison: it uses the interpolated LCC baseline, which is explicitly labelled in the plot. It writes both a full-domain map and an event-centered precipitation zoom using `imshow(..., interpolation='nearest')`, plus ensemble-mean area-weighted RMSE comparisons, training history, NetCDF samples, and machine-readable metrics:
 
 ```bash
 python scripts/test_best_model.py --config configs/discover.yaml --checkpoint runs/cfm128_prectot/best.pt
@@ -146,7 +146,7 @@ python scripts/test_best_model.py --config configs/discover.yaml --checkpoint ru
 sbatch --dependency=afterok:<TRAIN_JOB_ID> scripts/slurm_test_best_model.sh
 ```
 
-The default creates 15 generated fields (five members for each of three timestamps) under `runs/cfm128_prectot/test_best_model_m5`. Set `MEMBERS` to override the ensemble size (minimum two), `SAMPLES` to change the number of cases, or pass explicit held-out IDs with `--timestamps`. The summary compares the coarse baseline against the ensemble mean; individual-member RMSE is retained separately. Cached files are accepted only when their checkpoint SHA-256, archive fingerprint and sampler settings match; partial or stale member sets fail rather than mixing runs.
+The default creates 15 generated fields (five members for each of three timestamps) under `runs/cfm128_prectot/test_best_model_m5`. Its first case is selected from held-out data using a reproducible high-wind, low-sea-level-pressure signature; it is labelled *storm-like selected case*, not asserted to be a hurricane or named event. The remaining cases are seeded random held-out timestamps. Set `MEMBERS` to override the ensemble size (minimum two), `SAMPLES` to change the number of cases, `--sample-seed` to change the non-storm choices, or pass explicit held-out IDs with `--timestamps`. The summary compares the interpolated LCC baseline against the ensemble mean; individual-member RMSE is retained separately. Each invocation regenerates its requested NetCDF members and removes stale members for those timestamps in its own diagnostic `predictions/` directory, so an existing diagnostic output is refreshed rather than reused.
 
 ### Historical APCP diagnostic
 

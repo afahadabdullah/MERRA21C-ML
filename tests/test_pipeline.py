@@ -39,6 +39,19 @@ def test_pairing_crosses_month_and_split_validation(prepared):
         manifest(cfg)
 
 
+def test_diagnostic_uses_native_geos_and_reserves_storm_like_case(prepared):
+    import importlib.util
+    script = Path(__file__).resolve().parents[1]/'scripts'/'test_best_model.py'
+    spec = importlib.util.spec_from_file_location('test_best_model_for_test', script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    archive = Archive(prepared['data']['prepared'])
+    selected, selection = module.select_entries(archive, 2, seed=7)
+    raw = module.raw_geos_fields(selected[0])
+    assert raw['values'].shape[0] == 4 and np.isfinite(raw['values']).all()
+    assert selection['storm_like_case']['id'] == selected[0]['id']
+
+
 def test_stats_train_only_and_patches(prepared):
     a = Archive(prepared['data']['prepared'])
     entries = [e for e in a.index['entries'] if e['split'] == 'train']
@@ -256,6 +269,9 @@ def test_train_resume_predict_evaluate(prepared, tmp_path, monkeypatch):
     for key in uninterrupted['model']:
         torch.testing.assert_close(uninterrupted['model'][key], resumed['model'][key], rtol=0, atol=0)
     predict(prepared, ckpt_path, limit=1)
+    # General inference protects existing files by default, while explicit
+    # diagnostic refreshes can replace exactly matching output members.
+    predict(prepared, ckpt_path, limit=1, overwrite=True)
     dest = evaluate(prepared)
     report = json.loads((dest/'summary.json').read_text())
     assert report['hours_evaluated'] == 1 and len(report['missing_hours']) == 1

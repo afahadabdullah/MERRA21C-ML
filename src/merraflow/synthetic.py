@@ -39,6 +39,12 @@ def make_synthetic(root, template):
         ny, nx = np.mgrid[:len(nlat), :len(nlon)]
         native_pr = np.maximum(np.sin(nx*.8+phase)+np.cos(ny*.9), 0).astype('float32')*3
         native = xr.Dataset({'PRECTOT': (('time', 'lat', 'lon'), native_pr[None]/3600, {'units': 'kg m-2 s-1'})}, coords={'time': [np.datetime64(t)], 'lat': nlat, 'lon': nlon})
+        native_slv = xr.Dataset({
+            'T2M': (('time', 'lat', 'lon'), (287+phase+ny[None]*0+nx[None]*.2).astype('float32'), {'units': 'K'}),
+            'PS': (('time', 'lat', 'lon'), (100000-ny[None]*90-nx[None]*25).astype('float32'), {'units': 'Pa'}),
+            'U10M': (('time', 'lat', 'lon'), (4+phase+nx[None]*0).astype('float32'), {'units': 'm s-1'}),
+            'V10M': (('time', 'lat', 'lon'), (2+ny[None]*0).astype('float32'), {'units': 'm s-1'}),
+        }, coords={'time': [np.datetime64(t)], 'lat': nlat, 'lon': nlon})
         ref = native_pr.ravel()[source][groups]
         temp = (289-6*elevation/1000+np.sin(xx/18)+phase).astype('float32')
         u, v = np.full((h, w), 4+phase, dtype='float32'), np.full((h, w), 2, dtype='float32')
@@ -62,6 +68,7 @@ def make_synthetic(root, template):
         acc['time_bounds'] = (('time', 'bounds'), [[np.datetime64(t-timedelta(minutes=30)), np.datetime64(end)]])
         acc.time.attrs['bounds'] = 'time_bounds'
         paths = [(native, root/'native'/t.strftime('Y%Y/M%m')/f'f5295_fp.tavg1_2d_flx_Nx.{tag}z.nc4'),
+                 (native_slv, root/'native'/t.strftime('Y%Y/M%m')/f'f5295_fp.tavg1_2d_slv_Nx.{tag}z.nc4'),
                  (lr, root/'lr'/t.strftime('%Y%m')/f'f5295_fp.lowres_lcc_1hr.{tag}z.nc4'),
                  (hr, root/'hr'/'hwt_30mn_slv_LCC'/t.strftime('%Y%m')/f'Feature-c2160_L137.hwt_30mn_slv_LCC.{tag}z.nc4'),
                  (acc, root/'hr'/'hwt_01hr_acc_LCC'/end.strftime('%Y%m')/f'Feature-c2160_L137.hwt_01hr_acc_LCC.{etag}z.nc4')]

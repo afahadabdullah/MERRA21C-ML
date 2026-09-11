@@ -65,7 +65,7 @@ def sample_frame(model, archive, entry, cfg, device, seed):
     return result, raw[1], audit
 
 
-def predict(cfg, checkpoint, split='test', limit=None, timestamp=None, legacy_apcp=False):
+def predict(cfg, checkpoint, split='test', limit=None, timestamp=None, legacy_apcp=False, overwrite=False):
     archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=legacy_apcp)
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
     digest = hashlib.sha256()
@@ -92,7 +92,7 @@ def predict(cfg, checkpoint, split='test', limit=None, timestamp=None, legacy_ap
             # Stable across limits/order, reproducible for a timestamp and member.
             seed = int(np.random.SeedSequence([cfg['inference']['seed'], int(entry['id'].replace('_', '')), member]).generate_state(1)[0])
             dest = out/f'{entry["id"]}_m{member:03d}.nc'
-            if dest.exists():
+            if dest.exists() and not overwrite:
                 raise FileExistsError(f'{dest} exists; choose a new output directory')
             result, raw_pr, audit = sample_frame(model, archive, entry, cfg, device, seed)
             with xr.open_dataset(archive.root/'grid.nc') as source:

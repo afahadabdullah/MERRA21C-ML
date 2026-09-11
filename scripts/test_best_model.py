@@ -41,6 +41,8 @@ def parse_args():
     parser.add_argument('--samples', type=int, default=3, help='Number of held-out test timestamps')
     parser.add_argument('--members', type=int, default=5, help='Generated members per timestamp')
     parser.add_argument('--timestamps', nargs='*', help='Optional test IDs/timestamps instead of evenly spaced cases')
+    parser.add_argument('--sample-seed', type=int, default=317,
+                        help='Seed for non-storm held-out cases when --timestamps is omitted')
     parser.add_argument('--zoom-fraction', type=float, default=.4,
                         help='Fraction of each grid dimension shown around the strongest HR precipitation event')
     parser.add_argument('--legacy-apcp', action='store_true',
@@ -48,7 +50,71 @@ def parse_args():
     return parser.parse_args()
 
 
-def select_entries(archive, count, requested=None):
+def array2d(dataset, name):
+    """Load one finite field after removing singleton time-like dimensions."""
+    if name not in dataset:
+        raise KeyError(f'{name} is absent from {dataset.encoding.get("source", "dataset")}')
+    field = dataset[name]
+    for dim in tuple(field.dims):
+        if dim not in ('lat', 'lon', 'Ydim', 'Xdim', 'y', 'x'):
+            if field.sizes[dim] != 1:
+                raise ValueError(f'{name}: expected singleton {dim}, got {field.sizes[dim]}')
+            field = field.isel({dim: 0})
+    if set(field.dims) != {'lat', 'lon'}:
+        raise ValueError(f'{name}: expected native lat/lon grid, got {field.dims}')
+    value = np.asarray(field.transpose('lat', 'lon').values, dtype='float32')
+    if value.ndim != 2 or not np.isfinite(value).all():
+        raise ValueError(f'{name}: require finite 2D data')
+    return value
+
+
+def lcc_array2d(dataset, name):
+    """Read a low-resolution LCC field for lightweight event ranking."""
+    if name not in dataset:
+        return None
+    field = dataset[name]
+    for dim in tuple(field.dims):
+        if dim not in ('Ydim', 'Xdim', 'y', 'x'):
+            if field.sizes[dim] != 1:
+                return None
+            field = field.isel({dim: 0})
+    value = np.asarray(field.values, dtype='float32')
+    return value if value.ndim == 2 and np.isfinite(value).all() else None
+
+
+def storm_like_entry(archive, entries):
+    """Choose a reproducible high-wind, low-SLP candidate without event labels.
+
+    It is deliberately called storm-like: this ranks meteorological signatures,
+    and does not classify a tropical cyclone or assign an event name.
+    """
+    wind_rank = []
+    for entry in entries:
+        wind = np.asarray(archive.array(entry, 'baseline')[3, ::32, ::32])
+        wind_rank.append((float(np.quantile(wind, .99)), entry))
+    # Avoid opening thousands of NetCDF files.  Pressure sharpens a shortlist
+    # selected from the prepared wind input.
+    candidates = sorted(wind_rank, key=lambda item: item[0], reverse=True)[:min(24, len(entries))]
+    scored = []
+    for wind_p99, entry in candidates:
+        slp_deficit_hpa = None
+        with xr.open_dataset(entry['lr']) as dataset:
+            slp = lcc_array2d(dataset, 'SLP')
+        if slp is not None:
+            slp = slp[::32, ::32]
+            if np.nanmedian(slp) > 2_000:  # Pa → hPa
+                slp = slp/100
+            slp_deficit_hpa = float(max(0., np.nanmedian(slp)-np.nanquantile(slp, .02)))
+        # Wind retains priority; the SLP deficit prefers organized low-pressure systems.
+        score = wind_p99 + (.5*slp_deficit_hpa if slp_deficit_hpa is not None else 0.)
+        scored.append((score, wind_p99, slp_deficit_hpa, entry))
+    score, wind_p99, slp_deficit_hpa, entry = max(scored, key=lambda item: item[0])
+    return entry, {'id': entry['id'], 'score': score, 'wind_p99_m_s': wind_p99,
+                   'slp_deficit_hpa': slp_deficit_hpa,
+                   'description': 'high-wind, low-SLP storm-like signature; not an event classification'}
+
+
+def select_entries(archive, count, requested=None, seed=317):
     entries = [entry for entry in archive.index['entries'] if entry['split'] == 'test']
     if requested:
         selected = []
@@ -59,11 +125,16 @@ def select_entries(archive, count, requested=None):
             selected.append(matches[0])
         if len({entry['id'] for entry in selected}) != len(selected):
             raise ValueError('Requested test timestamps must be unique')
-        return selected
+        return selected, {'strategy': 'explicit timestamps'}
     if count < 1 or count > len(entries):
         raise ValueError(f'Request 1..{len(entries)} held-out test samples')
-    indices = np.rint(np.linspace(0, len(entries)-1, count)).astype(int)
-    return [entries[index] for index in indices]
+    storm, storm_metadata = storm_like_entry(archive, entries)
+    remaining = [entry for entry in entries if entry['id'] != storm['id']]
+    rng = np.random.default_rng(seed)
+    extra = [] if count == 1 else [remaining[index] for index in
+                                   sorted(rng.choice(len(remaining), size=count-1, replace=False))]
+    return [storm, *extra], {'strategy': 'one storm-like case plus seeded random held-out cases',
+                             'seed': seed, 'storm_like_case': storm_metadata}
 
 
 def checkpoint_sha256(path):
@@ -72,6 +143,46 @@ def checkpoint_sha256(path):
         for block in iter(lambda: source.read(8*1024*1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def native_slv_path(entry):
+    flx = Path(entry['native'])
+    name = flx.name.replace('tavg1_2d_flx_Nx.', 'tavg1_2d_slv_Nx.')
+    if name == flx.name:
+        raise ValueError(f'Cannot derive native GEOS-FP surface path from {flx}')
+    return flx.with_name(name)
+
+
+def conus_native(dataset):
+    if 'lat' not in dataset.coords or 'lon' not in dataset.coords:
+        raise ValueError(f'{dataset.encoding.get("source", "dataset")}: native GEOS-FP lat/lon coordinates are required')
+    normalized = dataset.assign_coords(lon=(dataset.lon+180) % 360-180).sortby('lon')
+    return normalized.sel(lat=slice(20., 55.), lon=slice(-130., -65.))
+
+
+def raw_geos_fields(entry):
+    """Load the original ~25 km GEOS-FP fields, never the LCC interpolation."""
+    slv_path, flx_path = native_slv_path(entry), Path(entry['native'])
+    missing = [str(path) for path in (slv_path, flx_path) if not path.is_file()]
+    if missing:
+        raise FileNotFoundError('Raw GEOS-FP map requested but source file(s) are missing: '+', '.join(missing))
+    with xr.open_dataset(slv_path) as slv_source, xr.open_dataset(flx_path) as flx_source:
+        slv, flx = conus_native(slv_source), conus_native(flx_source)
+        temp = array2d(slv, 'T2M')
+        pressure = array2d(slv, 'PS')
+        wind = np.hypot(array2d(slv, 'U10M'), array2d(slv, 'V10M'))
+        precip = np.maximum(array2d(flx, 'PRECTOT')*3600, 0.)
+        lat, lon = np.asarray(slv.lat.values), np.asarray(slv.lon.values)
+    return {'values': np.stack([temp, precip, pressure, wind]).astype('float32'),
+            'lat': lat, 'lon': lon}
+
+
+def native_extent(raw):
+    lon, lat = raw['lon'], raw['lat']
+    dx, dy = np.median(np.diff(lon)), np.median(np.diff(lat))
+    if not np.isfinite([dx, dy]).all() or dx <= 0 or dy <= 0:
+        raise ValueError('Cannot infer native GEOS-FP cell edges')
+    return (lon[0]-dx/2, lon[-1]+dx/2, lat[0]-dy/2, lat[-1]+dy/2)
 
 
 def source_projection(archive):
@@ -120,14 +231,14 @@ def map_axes(rows, columns, projection):
                         subplot_kw={'projection': projection})
 
 
-def draw_map(ax, values, cmap, norm, extent, origin, projection, row, column):
-    options = {'origin': origin, 'extent': extent, 'interpolation': 'nearest',
+def draw_map(ax, values, cmap, norm, source_extent, view_extent, origin, projection, source_crs, row, column):
+    options = {'origin': origin, 'extent': source_extent, 'interpolation': 'nearest',
                'cmap': cmap, 'norm': norm, 'rasterized': True, 'aspect': 'auto'}
     if ccrs is not None and projection is not None:
-        options['transform'] = projection
+        options['transform'] = source_crs
     image = ax.imshow(values, **options)
     if ccrs is not None and projection is not None:
-        ax.set_extent(extent, crs=projection)
+        ax.set_extent(view_extent, crs=projection)
         grid = ax.gridlines(draw_labels=True, linewidth=.2, color='.35', alpha=.35, linestyle=':')
         grid.top_labels = False
         grid.right_labels = False
@@ -161,11 +272,14 @@ def crop_extent(extent, shape, region):
             y0+(y1-y0)*ys.start/h, y0+(y1-y0)*ys.stop/h)
 
 
-def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None, legacy_apcp=False):
+def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=None, legacy_apcp=False,
+              storm_like=False):
     truth = np.asarray(archive.array(entry, 'truth'))
-    baseline = np.asarray(archive.array(entry, 'baseline'))
     member, generated = ensemble[0], ensemble.mean(0)
     projection, full_extent, origin = raster_geometry(archive)
+    if projection is None or ccrs is None:
+        raise RuntimeError('Cartopy and the HWT Lambert grid mapping are required to compare native GEOS-FP pixels')
+    raw_extent, raw_crs = native_extent(raw), ccrs.PlateCarree()
     if region is None:
         region = (slice(None), slice(None))
         extent, suffix, label = full_extent, '', 'full CONUS domain'
@@ -173,13 +287,13 @@ def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None,
         extent, suffix, label = crop_extent(full_extent, truth.shape[1:], region), '_zoom', 'event-centered zoom'
     fig, axes = map_axes(4, 5, projection)
     target_name = 'Legacy APCP HWT target' if legacy_apcp else 'Original HWT target'
-    columns = ('Coarse baseline', target_name, 'Individual member 0',
+    columns = ('Raw GEOS-FP (~25 km)', target_name, 'Individual member 0',
                f'{len(ensemble)}-member ensemble mean', 'Ensemble mean − HWT')
     for row, (key, display) in enumerate(zip(TARGETS, DISPLAY)):
         title, unit, convert, cmap = display
-        base_value, truth_value, member_value, generated_value = map(
-            convert, (baseline[row], truth[row], member[row], generated[row]))
-        pooled = np.concatenate([base_value.ravel(), truth_value.ravel(), member_value.ravel(), generated_value.ravel()])
+        raw_value, truth_value, member_value, generated_value = map(
+            convert, (raw['values'][row], truth[row], member[row], generated[row]))
+        pooled = np.concatenate([raw_value.ravel(), truth_value.ravel(), member_value.ravel(), generated_value.ravel()])
         if key == 'precip':
             upper = max(float(np.quantile(pooled, .995)), .1)
             norm = PowerNorm(gamma=.45, vmin=0, vmax=upper)
@@ -191,17 +305,21 @@ def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None,
         error = generated_value-truth_value
         error_limit = max(float(np.quantile(np.abs(error), .99)), 1e-6)
         error_norm = TwoSlopeNorm(vmin=-error_limit, vcenter=0, vmax=error_limit)
-        fields = (base_value, truth_value, member_value, generated_value, error)
-        for column, values in enumerate(fields):
-            image = draw_map(axes[row, column], values[region],
+        fields = ((raw_value, raw_extent, raw_crs),
+                  (truth_value[region], extent, projection),
+                  (member_value[region], extent, projection),
+                  (generated_value[region], extent, projection),
+                  (error[region], extent, projection))
+        for column, (values, source_extent, source_crs) in enumerate(fields):
+            image = draw_map(axes[row, column], values,
                              'RdBu_r' if column == 4 else cmap,
-                             error_norm if column == 4 else norm, extent, origin,
-                             projection, row, column)
+                             error_norm if column == 4 else norm, source_extent, extent, origin,
+                             projection, source_crs, row, column)
             axes[row, column].set_title(f'{title}\n{columns[column]}', fontsize=10, weight='semibold')
             fig.colorbar(image, ax=axes[row, column], orientation='horizontal', pad=.035,
                          shrink=.82, label=unit)
         score_label = 'Full-domain RMSE' if suffix == '' else 'Zoom RMSE'
-        axes[row, 0].text(.02, .02, f'{score_label} {scores[key]["baseline"]["rmse"]:.3g} {unit}',
+        axes[row, 0].text(.02, .02, f'LCC baseline {score_label} {scores[key]["baseline"]["rmse"]:.3g} {unit}',
                           transform=axes[row, 0].transAxes, fontsize=8,
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
         axes[row, 2].text(.02, .02, f'{score_label} {scores[key]["member_0"]["rmse"]:.3g} {unit}',
@@ -215,6 +333,7 @@ def plot_maps(output, entry, archive, ensemble, checkpoint, scores, region=None,
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
     fig.suptitle(f'MERRA21C-ML held-out test diagnostic · {entry["time"]} UTC\n'
                  f'{checkpoint.name} · {len(ensemble)} members · {label}'
+                 f'{" · storm-like selected case" if storm_like else ""}'
                  f'{" · LEGACY APCP" if legacy_apcp else ""}', fontsize=15, weight='bold')
     destination = output/f'test_{entry["id"]}{suffix}.png'
     fig.savefig(destination, dpi=180)
@@ -240,9 +359,10 @@ def variable_scores(archive, ensemble, truth, baseline, region):
     return scores
 
 
-def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legacy_apcp=False):
+def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legacy_apcp=False, selection=None):
     truth = np.asarray(archive.array(entry, 'truth'))
     baseline = np.asarray(archive.array(entry, 'baseline'))
+    raw = raw_geos_fields(entry)
     full_region = (slice(None), slice(None))
     zoom_region = event_window(truth[1], zoom_fraction)
     full_scores = variable_scores(archive, ensemble, truth, baseline, full_region)
@@ -250,12 +370,16 @@ def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legac
     metrics = {'id': entry['id'], 'time': entry['time'], 'members': len(ensemble),
                'checkpoint': str(checkpoint.resolve()), 'checkpoint_sha256': checkpoint_sha256(checkpoint),
                'target_definition': 'legacy_apcp' if legacy_apcp else 'matched_hwt_prectot',
+               'raw_lowres_definition': 'native GEOS-FP ~25 km fields; not the LCC interpolation used for RMSE',
                'variables': full_scores,
                'zoom_grid_bounds': {'y': [zoom_region[0].start, zoom_region[0].stop],
                                     'x': [zoom_region[1].start, zoom_region[1].stop]},
                'zoom_variables': zoom_scores}
-    plot_maps(output, entry, archive, ensemble, checkpoint, full_scores, legacy_apcp=legacy_apcp)
-    plot_maps(output, entry, archive, ensemble, checkpoint, zoom_scores, zoom_region, legacy_apcp)
+    storm_like = bool(selection and selection.get('storm_like_case', {}).get('id') == entry['id'])
+    plot_maps(output, entry, archive, raw, ensemble, checkpoint, full_scores,
+              legacy_apcp=legacy_apcp, storm_like=storm_like)
+    plot_maps(output, entry, archive, raw, ensemble, checkpoint, zoom_scores, zoom_region,
+              legacy_apcp, storm_like)
     return metrics
 
 
@@ -323,7 +447,7 @@ def main():
     if not checkpoint.is_file():
         raise FileNotFoundError(f'Best checkpoint not found: {checkpoint}')
     archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=args.legacy_apcp)
-    selected = select_entries(archive, args.samples, args.timestamps)
+    selected, selection = select_entries(archive, args.samples, args.timestamps, args.sample_seed)
     suffix = f'test_best_model_m{args.members}' + ('_legacy_apcp' if args.legacy_apcp else '')
     output = Path(args.output or Path(cfg['train']['output'])/suffix)
     prediction_root = output/'predictions'
@@ -334,18 +458,25 @@ def main():
     reports = []
     for entry in selected:
         paths = sorted(prediction_root.glob(f'{entry["id"]}_m*.nc'))
-        if paths and len(paths) != args.members:
-            raise ValueError(f'{entry["id"]}: found {len(paths)} existing members, expected {args.members}')
-        if not paths:
-            predict(cfg, checkpoint, split='test', timestamp=entry['id'], legacy_apcp=args.legacy_apcp)
-            paths = sorted(prediction_root.glob(f'{entry["id"]}_m*.nc'))
+        if paths:
+            print(f'Regenerating {len(paths)} existing diagnostic member(s) for {entry["id"]}', flush=True)
+            # This directory is owned by this diagnostic invocation.  Remove
+            # stale extra members when MEMBERS changed before atomically writing
+            # the requested member set below.
+            for path in paths:
+                path.unlink()
+        # Test diagnostics are deliberately fresh: a supplied output directory is
+        # reusable, but its member files never silently survive a new invocation.
+        predict(cfg, checkpoint, split='test', timestamp=entry['id'],
+                legacy_apcp=args.legacy_apcp, overwrite=True)
+        paths = sorted(prediction_root.glob(f'{entry["id"]}_m*.nc'))
         validate_reused_predictions(paths, checkpoint, cfg, archive, args.legacy_apcp)
         ensemble, _ = load_members(paths, archive, entry)
-        report = plot_case(output, entry, archive, ensemble, checkpoint, args.zoom_fraction, args.legacy_apcp)
+        report = plot_case(output, entry, archive, ensemble, checkpoint, args.zoom_fraction,
+                           args.legacy_apcp, selection)
         reports.append(report)
         print(f'Plotted held-out test case {entry["id"]}', flush=True)
-    write_json(output/'metrics.json', {'selection': 'explicit' if args.timestamps else 'evenly spaced test timestamps',
-                                      'samples': reports})
+    write_json(output/'metrics.json', {'selection': selection, 'samples': reports})
     plot_summary(output, reports)
     plot_training_history(output, Path(cfg['train']['output']))
     print(f'Best-model test diagnostics written to {output}', flush=True)
