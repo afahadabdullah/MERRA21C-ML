@@ -32,11 +32,11 @@ DISPLAY = (
     ('10 m wind speed', 'm s⁻¹', lambda x: x, 'magma'),
 )
 
-# NWS documented the rapidly deepening 28–29 December 2025 Great Lakes cyclone
-# across the Midwest, including severe storms, snow, and damaging wind.  This is
-# an explicit historical held-out case, not a data-driven archive search.
-HISTORICAL_STORM_ID = '20251228_2130'
-HISTORICAL_STORM_SOURCE = 'https://www.weather.gov/lot/2025_12_28_SevereWeather'
+# NWS documented an intensifying coastal low on 13–14 December 2025, with
+# widespread snow across Long Island and the adjacent northeast. This is an
+# explicit historical held-out case, not a data-driven archive search.
+HISTORICAL_STORM_ID = '20251214_1230'
+HISTORICAL_STORM_SOURCE = 'https://www.weather.gov/okx/20251213_14'
 
 
 def parse_args():
@@ -101,7 +101,7 @@ def select_entries(archive, count, requested=None, seed=317, storm_timestamp=HIS
     return [storm, *extra], {'strategy': 'one fixed documented storm case plus seeded random held-out cases',
                              'seed': seed,
                              'historical_storm_case': {'id': storm['id'],
-                                                       'event': '28–29 December 2025 Great Lakes cyclone',
+                                                       'event': '13–14 December 2025 Northeast coastal low',
                                                        'source': HISTORICAL_STORM_SOURCE}}
 
 
@@ -320,7 +320,7 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
     fig.suptitle(f'MERRA21C-ML held-out test diagnostic · {entry["time"]} UTC\n'
                  f'{checkpoint.name} · {len(ensemble)} members · {label}'
-                 f'{" · documented 28 Dec 2025 cyclone case" if historical_storm else ""}'
+                 f'{" · documented 14 Dec 2025 coastal-low case" if historical_storm else ""}'
                  f'{" · LEGACY APCP" if legacy_apcp else ""}', fontsize=15, weight='bold')
     destination = output/f'test_{entry["id"]}{suffix}.png'
     fig.savefig(destination, dpi=180)
