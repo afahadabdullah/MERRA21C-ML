@@ -20,9 +20,10 @@ conda activate "$ENV_DIR"
 cd "$PROJECT_DIR"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-test-matplotlib-${SLURM_JOB_ID}"
+extra_args=()
+if [[ -n "${CHECKPOINT:-}" ]]; then extra_args+=(--checkpoint "$CHECKPOINT"); fi
+if [[ -n "${OUTPUT:-}" ]]; then extra_args+=(--output "$OUTPUT"); fi
 srun python scripts/test_best_model.py \
   --config "${CONFIG:-configs/discover.yaml}" \
-  --checkpoint "${CHECKPOINT:-runs/cfm128/best.pt}" \
-  --output "${OUTPUT:-runs/cfm128/test_best_model}" \
   --samples "${SAMPLES:-3}" \
-  --members "${MEMBERS:-1}"
+  --members "${MEMBERS:-5}" "${extra_args[@]}"

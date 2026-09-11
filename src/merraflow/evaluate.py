@@ -25,7 +25,9 @@ def load_members(paths, archive, entry):
             members.append(values)
             audits.append(json.loads(ds.attrs['conservation_audit']))
             ids.append(ds.attrs['ensemble_member'])
-            signatures.append(tuple(ds.attrs[k] for k in ('checkpoint', 'checkpoint_epoch', 'patch_size', 'patch_halo', 'patch_stride', 'ode_steps', 'dry_threshold_mm_h')))
+            signatures.append(tuple(ds.attrs[k] for k in ('checkpoint', 'checkpoint_epoch', 'checkpoint_sha256',
+                                                          'patch_size', 'patch_halo', 'patch_stride',
+                                                          'ode_steps', 'dry_threshold_mm_h')))
     if len(set(ids)) != len(ids) or len(set(signatures)) != 1:
         raise ValueError('Duplicate ensemble member or mixed inference configurations')
     return np.stack(members), audits

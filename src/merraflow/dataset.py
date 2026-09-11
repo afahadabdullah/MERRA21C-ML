@@ -3,7 +3,7 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from .prepare import time_features
+from .prepare import time_features, PREPARATION_FORMAT
 from .physics import transform_target
 
 
@@ -24,6 +24,9 @@ class Archive:
     def __init__(self, root):
         self.root = Path(root)
         self.index = read_json(self.root/'index.json')
+        if self.index.get('format') != PREPARATION_FORMAT:
+            raise ValueError('Legacy prepared archive: rebuild with matched HWT PRECTOT in a new '
+                             'directory, recompute statistics and retrain; APCP targets cannot be reused')
         self.stats = read_json(self.root/'stats.json')
         with np.load(self.root/'static.npz') as f:
             self.static = {k: f[k] for k in f.files}

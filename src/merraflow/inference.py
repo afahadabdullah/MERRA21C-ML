@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import os
 import numpy as np
@@ -67,6 +68,11 @@ def sample_frame(model, archive, entry, cfg, device, seed):
 def predict(cfg, checkpoint, split='test', limit=None, timestamp=None):
     archive = Archive(cfg['data']['prepared'])
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
+    digest = hashlib.sha256()
+    with open(checkpoint, 'rb') as source:
+        for block in iter(lambda: source.read(8*1024*1024), b''):
+            digest.update(block)
+    checkpoint_hash = digest.hexdigest()
     if ckpt['fingerprint'] != archive.index['fingerprint'] or ckpt['stats'] != archive.stats:
         raise ValueError('Checkpoint and prepared dataset/statistics do not match')
     device = device_for(cfg['train']['device'])
@@ -97,20 +103,24 @@ def predict(cfg, checkpoint, split='test', limit=None, timestamp=None):
                 ds[k] = ds[k].isel(time=0, drop=True)
             for i, (name, unit) in enumerate(zip(TARGETS, UNITS)):
                 ds[name] = (('time', 'Ydim', 'Xdim'), result[i][None], {'units': unit, 'coordinates': 'lat lon',
-                            'cell_methods': 'time: mean' if name == 'precip' else 'time: point'})
+                            'cell_methods': 'time: point'})
                 if 'grid_mapping_variable' in ds.attrs:
                     ds[name].attrs['grid_mapping'] = ds.attrs['grid_mapping_variable']
             ds['precip_unconstrained'] = (('time', 'Ydim', 'Xdim'), raw_pr[None], {'units': 'mm h-1', 'long_name': 'Nonnegative generated precipitation before dry-threshold and budget projection'})
-            ds['time_bounds'] = (('time', 'bounds'), np.array([[np.datetime64(entry['time'])-np.timedelta64(30, 'm'), np.datetime64(entry['time'])+np.timedelta64(30, 'm')]]))
-            ds.time.attrs['bounds'] = 'time_bounds'
+            # These describe the LR conditioning window, not the HR snapshot target.
+            ds['lr_time_bounds'] = (('time', 'bounds'), np.array([[np.datetime64(entry['time'])-np.timedelta64(30, 'm'), np.datetime64(entry['time'])+np.timedelta64(30, 'm')]]),
+                                    {'long_name': 'Hourly averaging window of coarse conditioning fields'})
             ds.attrs.update({'ensemble_member': member, 'seed': seed, 'checkpoint': str(Path(checkpoint).resolve()),
-                             'checkpoint_epoch': ckpt['epoch'], 'dataset_fingerprint': archive.index['fingerprint'],
+                             'checkpoint_epoch': ckpt['epoch'], 'checkpoint_sha256': checkpoint_hash,
+                             'dataset_fingerprint': archive.index['fingerprint'],
+                             'precip_source': archive.index['data_config']['precip_source'],
+                             'target_alignment': 'Matched :30 HR snapshot approximates LR hourly mean; precipitation budget projection applied',
                              'conservation': archive.index['conservation'], 'conservation_audit': json.dumps(audit),
                              'split': split, 'patch_size': cfg['patch']['size'], 'patch_halo': cfg['patch']['halo'],
                              'patch_stride': cfg['patch']['stride'], 'ode_steps': cfg['inference']['steps'],
                              'dry_threshold_mm_h': cfg['inference']['dry_threshold']})
             ds.time.encoding.update(units='minutes since 1970-01-01', calendar='proleptic_gregorian')
-            ds.time_bounds.encoding.update(units='minutes since 1970-01-01', calendar='proleptic_gregorian')
+            ds.lr_time_bounds.encoding.update(units='minutes since 1970-01-01', calendar='proleptic_gregorian')
             encoding = {name: {'zlib': True, 'complevel': 2, 'dtype': 'float32'} for name in (*TARGETS, 'precip_unconstrained')}
             tmp = str(dest)+'.tmp'
             ds.to_netcdf(tmp, engine='h5netcdf', encoding=encoding)

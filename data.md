@@ -58,8 +58,8 @@ This document records the exact file paths, grid definitions, variables, and tem
 
 ---
 
-#### Collection 2: `hwt_01hr_acc_LCC` (Hourly Accumulated Fields)
-* **Cadence:** Hourly (`time_increment = 10000` minutes $\implies$ `0000z`, `0100z`, `0200z`, ...)
+#### Collection 2: `hwt_01hr_acc_LCC` (Accumulated Fields, Written Hourly)
+* **Cadence:** Hourly (`time_increment = 010000` in HHMMSS format; `0000z`, `0100z`, `0200z`, ...). Output cadence is not the accumulation/reset interval. This collection is not used by the corrected ML pipeline.
 * **Directory Pattern:**
   ```bash
   /gpfsm/dnb08/projects/p38/HWT/CONUS02KM/Feature-c2160_L137/holding/hwt_01hr_acc_LCC/YYYYMM/
@@ -69,7 +69,7 @@ This document records the exact file paths, grid definitions, variables, and tem
   Feature-c2160_L137.hwt_01hr_acc_LCC.YYYYMMDD_HH00z.nc4
   ```
 * **Key Variables:**
-  - `APCP`: Total precipitation accumulation over the 1-hour window ($\text{mm}$)
+  - `APCP`: Running total precipitation accumulation ($\text{mm}$). The supplied experiment HISTORY uses `ACCUMULATE` and `acc_interval: 1200000` (120 hours), not a one-hour total.
   - `ACPCP`: Deep convective precipitation accumulation ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
   - `NCPCP`: Non-anvil large scale precipitation accumulation ($\text{kg}\ \text{m}^{-2}\ \text{s}^{-1}$)
   - `SNOWACCUM`: Total snowfall accumulation ($\text{mm}$)
@@ -180,10 +180,10 @@ The runnable pipeline in `README.md` supersedes the initial two-target pairing t
 | Model output | Coarse source | Fine target | Pairing |
 | :--- | :--- | :--- | :--- |
 | `t2m` | regridded `T2M` | `TMP_2M` | LR hourly mean at :30 → HR midpoint state |
-| `precip` | native `PRECTOT` for budget; regridded `PRECTOT` for conditioning | hourly `APCP` | LR :30 → end-of-hour accumulation at the next :00 |
+| `precip` | native `PRECTOT` for budget; regridded `PRECTOT` for conditioning | `PRECTOT` in `hwt_30mn_slv_LCC` | LR :30 → HR :30 snapshot, as in `plot_diagnostics.py` |
 | `ps` | regridded `PS` | `PRES_SFC` | Same midpoint approximation as temperature |
 | `wind10m` | magnitude of regridded `U10M,V10M` | magnitude of `UGRD_10M,VGRD_10M` | Same midpoint approximation |
 
-Hourly APCP is converted from mm per hour-long window to mm/hour. It is used instead of an instantaneous high-resolution precipitation rate to match the coarse averaging window. The next-hour filename may lie in a new day, month, or year. Verify the archive's end-label convention; provided time bounds are checked. `HGT_SFC` is divided by gravity only when metadata indicates geopotential units; fields already in meters are retained. The new loader reads AREA/topography directly and does not depend on the legacy static-grid extraction assumptions.
+HR `PRECTOT` is converted from kg m-2 s-1 to mm/hour by multiplying by 3600. It comes from the same surface file and timestamp as the other HR targets, matching the diagnostic's field selection; the HR snapshot approximates, rather than exactly matches, the LR hourly mean. Accumulated APCP is not used. `HGT_SFC` is divided by gravity only when metadata indicates geopotential units; fields already in meters are retained. The new loader reads AREA/topography directly and does not depend on the legacy static-grid extraction assumptions.
 
 The code conserves native precipitation over explicitly defined, area-weighted LCC pixel footprints after stitching. See `docs/method.md` for the precise finite-volume definition, limitations at grid boundaries, and retained original-versus-constrained HR truth. No polygon-corner geometry has been verified in this repository.

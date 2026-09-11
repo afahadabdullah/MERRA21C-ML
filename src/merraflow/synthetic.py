@@ -54,9 +54,11 @@ def make_synthetic(root, template):
                      'UGRD_10M': (u+.7*np.sin(xx), 'm s-1'), 'VGRD_10M': (v+.5*np.cos(yy), 'm s-1'),
                      'HGT_SFC': (elevation*9.80665, 'm2 s-2'), 'AREA': (area, 'm2'),
                      'lats': (lat, 'degrees_north'), 'lons': (lon, 'degrees_east')}
-        hr = xr.Dataset({n: (('time', 'Ydim', 'Xdim'), a[None].astype('float32'), {'units': unit}) for n, (a, unit) in hr_fields.items()}, coords=coords)
         precip = ref*(1.25+.8*np.sin(xx*1.3)**2)+.1*(np.sin(yy)>0)
-        acc = xr.Dataset({'APCP': (('time', 'Ydim', 'Xdim'), precip[None].astype('float32'), {'units': 'mm'})}, coords={**coords, 'time': [np.datetime64(end)]})
+        hr_fields['PRECTOT'] = (precip/3600, 'kg m-2 s-1')
+        hr = xr.Dataset({n: (('time', 'Ydim', 'Xdim'), a[None].astype('float32'), {'units': unit}) for n, (a, unit) in hr_fields.items()}, coords=coords)
+        # Deliberately different decoy: the pipeline must never use accumulated APCP.
+        acc = xr.Dataset({'APCP': (('time', 'Ydim', 'Xdim'), (precip[None]*120).astype('float32'), {'units': 'mm'})}, coords={**coords, 'time': [np.datetime64(end)]})
         acc['time_bounds'] = (('time', 'bounds'), [[np.datetime64(t-timedelta(minutes=30)), np.datetime64(end)]])
         acc.time.attrs['bounds'] = 'time_bounds'
         paths = [(native, root/'native'/t.strftime('Y%Y/M%m')/f'f5295_fp.tavg1_2d_flx_Nx.{tag}z.nc4'),

@@ -85,12 +85,11 @@ def manifest(cfg, month=None):
     while t <= end:
         split = split_for(t, d['splits'])
         if split and (month is None or t.strftime('%Y-%m') == month):
-            tag, endtag = t.strftime('%Y%m%d_%H%M'), (t+timedelta(minutes=30)).strftime('%Y%m%d_%H%M')
+            tag = t.strftime('%Y%m%d_%H%M')
             hrroot = Path(d['highres_root'])
             paths = {
                 'lr': Path(d['lowres_lcc_root'])/t.strftime('%Y%m')/f'f5295_fp.lowres_lcc_1hr.{tag}z.nc4',
                 'hr': hrroot/'hwt_30mn_slv_LCC'/t.strftime('%Y%m')/f'Feature-c2160_L137.hwt_30mn_slv_LCC.{tag}z.nc4',
-                'acc': hrroot/'hwt_01hr_acc_LCC'/endtag[:6]/f'Feature-c2160_L137.hwt_01hr_acc_LCC.{endtag}z.nc4',
                 'native': Path(d['native_root'])/t.strftime('Y%Y/M%m')/f'f5295_fp.tavg1_2d_flx_Nx.{tag}z.nc4',
             }
             absent = [str(p) for p in paths.values() if not p.is_file()]
@@ -200,7 +199,7 @@ class Moments:
 
 
 SHARD_NAMES = ('condition', 'target', 'truth', 'baseline', 'residual')
-PREPARATION_FORMAT = 2
+PREPARATION_FORMAT = 3  # Same-time HWT surface PRECTOT, never accumulated APCP.
 
 
 def preparation_signature(cfg):
@@ -218,6 +217,8 @@ def ensure_work_signature(root, cfg):
         if actual != expected:
             raise ValueError(f'{root} contains shards from a different preparation configuration; use a new data.prepared directory')
     else:
+        if any(root.glob('*/truth.npy')):
+            raise ValueError(f'{root} contains unversioned shards; use a new data.prepared directory')
         write_json(path, expected)
 
 
@@ -304,10 +305,10 @@ def audit_arrays(entry_id, truth, target, baseline, static):
 def build_arrays(cfg, entry, static):
     d, t = cfg['data'], datetime.fromisoformat(entry['time'])
     with xr.open_dataset(entry['lr']) as lr, xr.open_dataset(entry['hr']) as hr, \
-            xr.open_dataset(entry['acc']) as acc, xr.open_dataset(entry['native']) as raw:
+            xr.open_dataset(entry['native']) as raw:
         native = sorted_native(raw)
         for ds, when, key in [(lr, t, 'lr'), (hr, t, 'hr'),
-                              (acc, t+timedelta(minutes=30), 'acc'), (native, t, 'native')]:
+                              (native, t, 'native')]:
             assert_time(ds, when, entry[key])
         for key, expected in [('native_lat', native.lat.values), ('native_lon', native.lon.values)]:
             if not np.array_equal(static[key], expected):
@@ -317,13 +318,9 @@ def build_arrays(cfg, entry, static):
                 raise ValueError(f'{entry["hr"]}: HR grid {name} changed within archive')
         if not np.allclose(((field(hr, 'lons')+180) % 360)-180, static['lon'], atol=1e-5):
             raise ValueError(f'{entry["hr"]}: HR longitude grid changed')
-        bounds = acc.time.attrs.get('bounds')
-        if bounds and bounds in acc:
-            values = acc[bounds].values.ravel()
-            expected = [np.datetime64(t-timedelta(minutes=30)), np.datetime64(t+timedelta(minutes=30))]
-            if len(values) != 2 or not np.array_equal(values, expected):
-                raise ValueError(f'{entry["acc"]}: APCP time bounds do not match the LR hourly window')
-        for ds, name, kind in [(native, 'PRECTOT', 'rate'), (acc, 'APCP', 'accum'),
+        if 'PRECTOT' not in hr:
+            raise ValueError(f'{entry["hr"]}: missing PRECTOT; accumulated APCP is not a rate fallback')
+        for ds, name, kind in [(native, 'PRECTOT', 'rate'), (hr, 'PRECTOT', 'rate'),
                                (hr, 'TMP_2M', 'temperature'), (hr, 'PRES_SFC', 'pressure'),
                                (lr, 'T2M', 'temperature'), (lr, 'PS', 'pressure')]:
             units(ds, name, kind)
@@ -334,9 +331,11 @@ def build_arrays(cfg, entry, static):
         if source_pr.min() < -1e-7:
             raise ValueError(f'{entry["native"]}: negative native precipitation')
         reference = np.maximum(source_pr, 0)[static['groups']]
-        precip = field(acc, 'APCP')/d['accumulation_hours']
+        # Same file, variable and conversion as plot_diagnostics.py. The :30
+        # HR snapshot approximates the LR hourly mean; it is not an accumulation.
+        precip = field(hr, 'PRECTOT')*3600
         if precip.min() < -1e-7:
-            raise ValueError(f'{entry["acc"]}: negative APCP')
+            raise ValueError(f'{entry["hr"]}: negative PRECTOT')
         target = np.stack([field(hr, 'TMP_2M'), np.maximum(precip, 0),
                            field(hr, 'PRES_SFC'), np.hypot(field(hr, 'UGRD_10M'), field(hr, 'VGRD_10M'))])
         baseline = np.stack([field(lr, 'T2M'), reference, field(lr, 'PS'),
@@ -402,8 +401,8 @@ def finish_archive(cfg, entries, missing, gaps, static, condition_moments, resid
     write_json(root/'predictor_gaps.json', gaps)
     write_json(root/'stats.json', stats)
     write_json(root/'precip_audit.json', audit)
-    fingerprint = hashlib.sha256(json.dumps({'data': d, 'entries': entries, 'stats': stats}, sort_keys=True).encode()).hexdigest()
-    write_json(root/'index.json', {'entries': entries, 'data_config': d, 'fingerprint': fingerprint,
+    fingerprint = hashlib.sha256(json.dumps({'format': PREPARATION_FORMAT, 'data': d, 'entries': entries, 'stats': stats}, sort_keys=True).encode()).hexdigest()
+    write_json(root/'index.json', {'format': PREPARATION_FORMAT, 'entries': entries, 'data_config': d, 'fingerprint': fingerprint,
                                   'condition_channels': len(d['predictors'])+16,
                                   'conservation': 'native cell center-assigned footprint; represented LCC AREA; not polygon overlap'})
     return root
@@ -447,7 +446,7 @@ def prepare_month(cfg, month):
     if (root/'index.json').exists():
         with open(root/'index.json') as source:
             index = json.load(source)
-        if index['data_config'] != d:
+        if index.get('format') != PREPARATION_FORMAT or index['data_config'] != d:
             raise ValueError(f'{root} is complete for a different data configuration')
         print(f'{root} is already complete; month {month} skipped', flush=True)
         return root/'index.json'
@@ -478,7 +477,7 @@ def finalize_prepare(cfg):
     if (root/'index.json').exists():
         with open(root/'index.json') as source:
             index = json.load(source)
-        if index['data_config'] != d:
+        if index.get('format') != PREPARATION_FORMAT or index['data_config'] != d:
             raise ValueError(f'{root} is complete for a different data configuration')
         return root
     ensure_work_signature(root, cfg)

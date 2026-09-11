@@ -320,7 +320,7 @@ def data_stage(fig, left, width, case):
 
 def alignment_stage(fig, left, width, case):
     panel_frame(fig, left, width, "B", "PAIR + ALIGN",
-                "exact hourly pairing • common HWT Lambert grid")
+                "matched :30 snapshots • common HWT Lambert grid")
     y = 0.752
     fig.lines.append(
         plt.Line2D(
@@ -329,9 +329,9 @@ def alignment_stage(fig, left, width, case):
         )
     )
     for position, time, note, color in [
-        (0.10, "00:00", "window start", MUTED),
-        (0.50, "00:30", "GEOS-FP + HWT state", BLUE),
-        (0.90, "01:00", "APCP end label", TEAL),
+        (0.10, "00:00", "LR window start", MUTED),
+        (0.50, "00:30", "HWT state + PRECTOT", BLUE),
+        (0.90, "01:00", "LR window end", TEAL),
     ]:
         px = left + position * width
         fig.patches.append(plt.Circle((px, y), 0.006, transform=fig.transFigure, color=color, zorder=3))

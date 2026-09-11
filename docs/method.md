@@ -7,7 +7,7 @@ The source information is GEOS-FP on a 0.25°×0.3125° grid. The existing bilin
 | Output | LR collection/variable | HR collection/variable | Physical units |
 |---|---|---|---|
 | t2m | slv `T2M` | 30mn slv `TMP_2M` | K |
-| precip | **native** flx `PRECTOT` | hourly acc `APCP` | mm/hour |
+| precip | **native** flx `PRECTOT` | 30mn slv `PRECTOT` at the same :30 timestamp | mm/hour |
 | ps | slv `PS` | 30mn slv `PRES_SFC` | Pa |
 | wind10m | slv `hypot(U10M,V10M)` | 30mn slv `hypot(UGRD_10M,VGRD_10M)` | m/s |
 
@@ -43,9 +43,9 @@ Related research demonstrates why physical constraints deserve explicit treatmen
 
 ## Temporal semantics
 
-GEOS-FP `tavg1` labels are assumed to denote hourly midpoints. The default pairing reads HR `APCP` at midpoint +30 minutes for a one-hour accumulation ending at that time. If accumulation bounds exist, they must exactly match the intended window. Without bounds, the configuration explicitly declares this archive convention and it must be checked on Discover. Instantaneous HR `PRECTOT` is not substituted silently for hourly precipitation.
+GEOS-FP `tavg1` labels are assumed to denote hourly midpoints. With `precip_source: hwt_30mn_slv_LCC.PRECTOT`, precipitation now uses the matched HR surface file at the same :30 timestamp and converts kg m-2 s-1 to mm/hour by multiplying by 3600, exactly as the legacy diagnostic does. There is no accumulated-APCP fallback. The previous assumption that hourly output meant one-hour accumulation was incorrect for the supplied experiment HISTORY (`ACCUMULATE`, `acc_interval: 1200000`). Legacy prepared archives/statistics must be rebuilt and models retrained.
 
-HR temperature/pressure/wind use the midpoint surface snapshot. This approximates the corresponding LR hourly mean and is a declared representativeness mismatch, not an exact time-mean match. Do not average arbitrary nearby snapshots and call it exact. If exact state averages become available, extend the manifest and unit-tested loader around their bounds.
+All HR targets, including precipitation, use the midpoint surface snapshot. This approximates the corresponding LR hourly mean and is a declared representativeness mismatch, not an exact time-mean match. Prediction variables are labeled `time: point`; `lr_time_bounds` describes only the coarse conditioning window. Do not average arbitrary nearby snapshots and call it exact. If exact state averages become available, extend the manifest and unit-tested loader around their bounds.
 
 ## Configuration selection and evaluation
 

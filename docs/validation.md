@@ -1,5 +1,16 @@
 # Validation record
 
+## PRECTOT target correction (2026-09-11)
+
+- **25 tests passed** on macOS ARM64 CPU with Python 3.12.14 and PyTorch 2.14.0 in an isolated temporary environment.
+- Regression coverage verifies exact same-time HWT surface `PRECTOT × 3600` truth values, no dependency on accumulated APCP files, rejection of missing/rate-unit-invalid/wrong-time HR fields, and rejection of legacy partial/completed archives. Monthly resume/finalization, train-only normalization, checkpoint resume, inference and evaluation also pass.
+- Full synthetic CLI smoke run passed: six prepared hours, two training epochs, three generated members, evaluation and diagnostic PNG generation. Maximum relative wet-footprint budget error was 1.40e-8.
+- Both production configurations load successfully; Python compilation, modified Slurm test-script syntax and whitespace checks pass.
+- The Discover source files were not available locally. These tests establish software behavior, not real-data meteorological accuracy. The checked-in workflow bitmap was not regenerated; its old APCP timeline is explicitly marked obsolete in the README.
+- The revised five-member test diagnostic was exercised end to end on the synthetic archive. It wrote five provenance-hashed NetCDF members, a five-column full-domain figure, an event-centered zoom with zoom-region RMSE, an ensemble-mean RMSE summary, training history and machine-readable full/zoom metrics using nearest-neighbor `imshow` rasterization.
+
+## Earlier baseline validation
+
 Local execution on 2026-09-09, macOS ARM64 CPU, Python 3.12.14, PyTorch 2.14.0. Dependencies were installed in an isolated temporary environment; the project was installed successfully in editable mode.
 
 ## Checks performed
