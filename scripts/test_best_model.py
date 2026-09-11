@@ -32,6 +32,12 @@ DISPLAY = (
     ('10 m wind speed', 'm s⁻¹', lambda x: x, 'magma'),
 )
 
+# NWS documented the rapidly deepening 28–29 December 2025 Great Lakes cyclone
+# across the Midwest, including severe storms, snow, and damaging wind.  This is
+# an explicit historical held-out case, not a data-driven archive search.
+HISTORICAL_STORM_ID = '20251228_2130'
+HISTORICAL_STORM_SOURCE = 'https://www.weather.gov/lot/2025_12_28_SevereWeather'
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -42,7 +48,9 @@ def parse_args():
     parser.add_argument('--members', type=int, default=5, help='Generated members per timestamp')
     parser.add_argument('--timestamps', nargs='*', help='Optional test IDs/timestamps instead of evenly spaced cases')
     parser.add_argument('--sample-seed', type=int, default=317,
-                        help='Seed for non-storm held-out cases when --timestamps is omitted')
+                        help='Seed for additional random held-out cases when --timestamps is omitted')
+    parser.add_argument('--storm-timestamp', default=HISTORICAL_STORM_ID,
+                        help='Fixed documented storm case used first when --timestamps is omitted')
     parser.add_argument('--zoom-fraction', type=float, default=.4,
                         help='Fraction of each grid dimension shown around the strongest HR precipitation event')
     parser.add_argument('--legacy-apcp', action='store_true',
@@ -68,53 +76,7 @@ def array2d(dataset, name):
     return value
 
 
-def lcc_array2d(dataset, name):
-    """Read a low-resolution LCC field for lightweight event ranking."""
-    if name not in dataset:
-        return None
-    field = dataset[name]
-    for dim in tuple(field.dims):
-        if dim not in ('Ydim', 'Xdim', 'y', 'x'):
-            if field.sizes[dim] != 1:
-                return None
-            field = field.isel({dim: 0})
-    value = np.asarray(field.values, dtype='float32')
-    return value if value.ndim == 2 and np.isfinite(value).all() else None
-
-
-def storm_like_entry(archive, entries):
-    """Choose a reproducible high-wind, low-SLP candidate without event labels.
-
-    It is deliberately called storm-like: this ranks meteorological signatures,
-    and does not classify a tropical cyclone or assign an event name.
-    """
-    wind_rank = []
-    for entry in entries:
-        wind = np.asarray(archive.array(entry, 'baseline')[3, ::32, ::32])
-        wind_rank.append((float(np.quantile(wind, .99)), entry))
-    # Avoid opening thousands of NetCDF files.  Pressure sharpens a shortlist
-    # selected from the prepared wind input.
-    candidates = sorted(wind_rank, key=lambda item: item[0], reverse=True)[:min(24, len(entries))]
-    scored = []
-    for wind_p99, entry in candidates:
-        slp_deficit_hpa = None
-        with xr.open_dataset(entry['lr']) as dataset:
-            slp = lcc_array2d(dataset, 'SLP')
-        if slp is not None:
-            slp = slp[::32, ::32]
-            if np.nanmedian(slp) > 2_000:  # Pa → hPa
-                slp = slp/100
-            slp_deficit_hpa = float(max(0., np.nanmedian(slp)-np.nanquantile(slp, .02)))
-        # Wind retains priority; the SLP deficit prefers organized low-pressure systems.
-        score = wind_p99 + (.5*slp_deficit_hpa if slp_deficit_hpa is not None else 0.)
-        scored.append((score, wind_p99, slp_deficit_hpa, entry))
-    score, wind_p99, slp_deficit_hpa, entry = max(scored, key=lambda item: item[0])
-    return entry, {'id': entry['id'], 'score': score, 'wind_p99_m_s': wind_p99,
-                   'slp_deficit_hpa': slp_deficit_hpa,
-                   'description': 'high-wind, low-SLP storm-like signature; not an event classification'}
-
-
-def select_entries(archive, count, requested=None, seed=317):
+def select_entries(archive, count, requested=None, seed=317, storm_timestamp=HISTORICAL_STORM_ID):
     entries = [entry for entry in archive.index['entries'] if entry['split'] == 'test']
     if requested:
         selected = []
@@ -128,13 +90,19 @@ def select_entries(archive, count, requested=None, seed=317):
         return selected, {'strategy': 'explicit timestamps'}
     if count < 1 or count > len(entries):
         raise ValueError(f'Request 1..{len(entries)} held-out test samples')
-    storm, storm_metadata = storm_like_entry(archive, entries)
+    matches = [entry for entry in entries if storm_timestamp in (entry['id'], entry['time'])]
+    if len(matches) != 1:
+        raise ValueError(f'Historical storm case {storm_timestamp!r} is not uniquely available in the held-out archive')
+    storm = matches[0]
     remaining = [entry for entry in entries if entry['id'] != storm['id']]
     rng = np.random.default_rng(seed)
     extra = [] if count == 1 else [remaining[index] for index in
                                    sorted(rng.choice(len(remaining), size=count-1, replace=False))]
-    return [storm, *extra], {'strategy': 'one storm-like case plus seeded random held-out cases',
-                             'seed': seed, 'storm_like_case': storm_metadata}
+    return [storm, *extra], {'strategy': 'one fixed documented storm case plus seeded random held-out cases',
+                             'seed': seed,
+                             'historical_storm_case': {'id': storm['id'],
+                                                       'event': '28–29 December 2025 Great Lakes cyclone',
+                                                       'source': HISTORICAL_STORM_SOURCE}}
 
 
 def checkpoint_sha256(path):
@@ -273,7 +241,7 @@ def crop_extent(extent, shape, region):
 
 
 def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=None, legacy_apcp=False,
-              storm_like=False):
+              historical_storm=False):
     truth = np.asarray(archive.array(entry, 'truth'))
     member, generated = ensemble[0], ensemble.mean(0)
     projection, full_extent, origin = raster_geometry(archive)
@@ -333,7 +301,7 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
     fig.suptitle(f'MERRA21C-ML held-out test diagnostic · {entry["time"]} UTC\n'
                  f'{checkpoint.name} · {len(ensemble)} members · {label}'
-                 f'{" · storm-like selected case" if storm_like else ""}'
+                 f'{" · documented 28 Dec 2025 cyclone case" if historical_storm else ""}'
                  f'{" · LEGACY APCP" if legacy_apcp else ""}', fontsize=15, weight='bold')
     destination = output/f'test_{entry["id"]}{suffix}.png'
     fig.savefig(destination, dpi=180)
@@ -375,11 +343,11 @@ def plot_case(output, entry, archive, ensemble, checkpoint, zoom_fraction, legac
                'zoom_grid_bounds': {'y': [zoom_region[0].start, zoom_region[0].stop],
                                     'x': [zoom_region[1].start, zoom_region[1].stop]},
                'zoom_variables': zoom_scores}
-    storm_like = bool(selection and selection.get('storm_like_case', {}).get('id') == entry['id'])
+    historical_storm = bool(selection and selection.get('historical_storm_case', {}).get('id') == entry['id'])
     plot_maps(output, entry, archive, raw, ensemble, checkpoint, full_scores,
-              legacy_apcp=legacy_apcp, storm_like=storm_like)
+              legacy_apcp=legacy_apcp, historical_storm=historical_storm)
     plot_maps(output, entry, archive, raw, ensemble, checkpoint, zoom_scores, zoom_region,
-              legacy_apcp, storm_like)
+              legacy_apcp, historical_storm)
     return metrics
 
 
@@ -447,7 +415,8 @@ def main():
     if not checkpoint.is_file():
         raise FileNotFoundError(f'Best checkpoint not found: {checkpoint}')
     archive = Archive(cfg['data']['prepared'], allow_legacy_apcp=args.legacy_apcp)
-    selected, selection = select_entries(archive, args.samples, args.timestamps, args.sample_seed)
+    selected, selection = select_entries(archive, args.samples, args.timestamps, args.sample_seed,
+                                         args.storm_timestamp)
     suffix = f'test_best_model_m{args.members}' + ('_legacy_apcp' if args.legacy_apcp else '')
     output = Path(args.output or Path(cfg['train']['output'])/suffix)
     prediction_root = output/'predictions'

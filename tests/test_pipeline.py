@@ -39,17 +39,18 @@ def test_pairing_crosses_month_and_split_validation(prepared):
         manifest(cfg)
 
 
-def test_diagnostic_uses_native_geos_and_reserves_storm_like_case(prepared):
+def test_diagnostic_uses_native_geos_and_reserves_historical_case(prepared):
     import importlib.util
     script = Path(__file__).resolve().parents[1]/'scripts'/'test_best_model.py'
     spec = importlib.util.spec_from_file_location('test_best_model_for_test', script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     archive = Archive(prepared['data']['prepared'])
-    selected, selection = module.select_entries(archive, 2, seed=7)
+    expected = [entry for entry in archive.index['entries'] if entry['split'] == 'test'][0]['id']
+    selected, selection = module.select_entries(archive, 2, seed=7, storm_timestamp=expected)
     raw = module.raw_geos_fields(selected[0])
     assert raw['values'].shape[0] == 4 and np.isfinite(raw['values']).all()
-    assert selection['storm_like_case']['id'] == selected[0]['id']
+    assert selection['historical_storm_case']['id'] == selected[0]['id']
 
 
 def test_stats_train_only_and_patches(prepared):
