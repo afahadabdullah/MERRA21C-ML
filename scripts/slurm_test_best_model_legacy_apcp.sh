@@ -17,8 +17,11 @@
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
 ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"
+# Conda's deactivation hooks are not nounset-safe when an interactive env is inherited.
+set +u
 source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.sh
 conda activate "$ENV_DIR"
+set -u
 cd "$PROJECT_DIR"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-test-legacy-matplotlib-${SLURM_JOB_ID}"
