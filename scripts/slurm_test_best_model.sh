@@ -26,6 +26,11 @@ export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-test-matplotlib-${SLURM_JOB_ID}"
 extra_args=()
 if [[ -n "${CHECKPOINT:-}" ]]; then extra_args+=(--checkpoint "$CHECKPOINT"); fi
 if [[ -n "${OUTPUT:-}" ]]; then extra_args+=(--output "$OUTPUT"); fi
+if [[ -n "${SPLIT:-}" ]]; then extra_args+=(--split "$SPLIT"); fi
+if [[ -n "${TIMESTAMPS:-}" ]]; then
+  read -r -a timestamp_args <<< "$TIMESTAMPS"
+  extra_args+=(--timestamps "${timestamp_args[@]}")
+fi
 srun python scripts/test_best_model.py \
   --config "${CONFIG:-configs/discover.yaml}" \
   --samples "${SAMPLES:-3}" \
