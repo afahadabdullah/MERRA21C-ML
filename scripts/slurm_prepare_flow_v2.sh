@@ -2,7 +2,6 @@
 #SBATCH --job-name=prepare_v2
 #SBATCH --account=s3292
 #SBATCH --qos=allnccs
-#SBATCH --array=1-12%14
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -21,5 +20,13 @@ set -u
 cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
-printf -v MONTH '%s-%02d' "${PREP_YEAR:-2025}" "$SLURM_ARRAY_TASK_ID"
+: "${PREP_MONTHS:?Submit through submit_pipeline_v2.sh or submit_prepare_flow_v2.sh}"
+: "${SLURM_ARRAY_TASK_ID:?Submit as an array job through submit_pipeline_v2.sh or submit_prepare_flow_v2.sh}"
+read -r -a prep_months <<< "$PREP_MONTHS"
+if (( SLURM_ARRAY_TASK_ID < 1 || SLURM_ARRAY_TASK_ID > ${#prep_months[@]} )); then
+  echo 'Preparation task index is outside the submitted month list' >&2
+  exit 1
+fi
+MONTH="${prep_months[SLURM_ARRAY_TASK_ID-1]}"
+echo "Preparation task $SLURM_ARRAY_TASK_ID: $MONTH"
 python -m merraflow.cli_v2 prepare --config "${CONFIG:-configs/discover_v2.yaml}" --month "$MONTH"

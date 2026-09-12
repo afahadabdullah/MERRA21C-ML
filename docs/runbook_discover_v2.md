@@ -1,5 +1,9 @@
 # Discover v2 runbook
 
+For all 12 training months from December 2024 through November 2025, use the
+[annual runbook](runbook_discover_annual_v2.md) and its separate config/output paths.
+The commands below retain the original 2025 experiment.
+
 The supplied setup uses the existing 2025 inputs, one static NetCDF for ocean,
 land and lakes, and one A100 per training job. It prepares a separate v2 archive,
 trains regression for 30 epochs, then trains flow for 100 epochs using the best

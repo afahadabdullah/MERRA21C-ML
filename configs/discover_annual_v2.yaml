@@ -1,0 +1,97 @@
+# Annual v2: all 12 training months; Dec 2025-Mar 2026 validation/test.
+# Availability through March 31 must pass the Discover coverage check.
+data:
+  lowres_lcc_root: /gpfsm/dnb10/projects/p311/ML_downscaling/data/lowres_lcc_1hr
+  native_root: /gpfsm/dnb06/projects/p174/f5295_fp/diag
+  highres_root: /gpfsm/dnb08/projects/p38/HWT/CONUS02KM/Feature-c2160_L137/holding
+  prepared: data/paired_hourly_annual_v2
+  start: '2024-12-01T00:30:00'
+  end: '2026-03-31T23:30:00'
+  splits:
+    train:
+    - '2024-12-01'
+    - '2025-12-01'
+    val:
+    - '2025-12-03'
+    - '2026-02-01'
+    test:
+    - '2026-02-03'
+    - '2026-04-01'
+  predictors:
+  - PRECTOT
+  - U10M
+  - V10M
+  - TQV
+  - QV2M
+  - SLP
+  - OMEGA500
+  precip_source: hwt_30mn_slv_LCC.PRECTOT
+  state_alignment: midpoint_snapshot
+  strict_missing: true
+  conserve_training_precip: false
+  stats_stride: 8
+  precip_log_scale: 1.0
+  static:
+    path: data/static_grid/hwt_surface_fractions_v2.nc
+    ocean: FROCEAN
+    lake: FRLAKE
+    require_lake: true
+    lat: lats
+    lon: lons
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 8192
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 32
+  detail_fraction: 0.4
+model:
+  base_channels: 32
+  channel_mult:
+  - 1
+  - 2
+  - 4
+  - 4
+  time_dim: 128
+  activation_checkpointing: true
+  blocks_per_level: 2
+  attention_heads: 4
+train:
+  device: auto
+  seed: 2025
+  checkpoint_interval: 5
+  batch_size: 2
+  accumulate: 8
+  workers: 2
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  warmup_steps: 500
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.999
+  val_batches: 32
+  channel_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+  output: runs/merraflow_annual_v2
+  regression_epochs: 30
+  flow_epochs: 100
+  calibration_batches: 128
+inference:
+  members: 8
+  steps: 24
+  seed: 317
+  output: runs/merraflow_annual_v2/predictions_v2
+  conserve_precip: false
+  blend: weighted
+version: v2
+loss:
+  regression_gradient: 0.1
+  regression_multiscale: 0.1
+  flow_gradient: 0.05

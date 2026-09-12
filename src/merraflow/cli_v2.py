@@ -6,7 +6,7 @@ from .config_v2 import load_config_v2
 def main():
     parser = argparse.ArgumentParser(description='MERRAflow v2: regression + residual flow')
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('audit', 'prepare', 'prepare-finalize', 'prepare-predict', 'train', 'predict', 'evaluate', 'plot'):
+    for name in ('coverage', 'audit', 'prepare-months', 'prepare', 'prepare-finalize', 'prepare-predict', 'train', 'predict', 'evaluate', 'plot'):
         p = sub.add_parser(name)
         p.add_argument('--config', required=True)
         if name == 'prepare':
@@ -46,7 +46,15 @@ def main():
         print(diagnostics_v2(cfg))
         return
     cfg = load_config_v2(args.config)
-    if args.command == 'audit':
+    if args.command == 'coverage':
+        from .audit_v2 import coverage_v2
+        coverage_v2(cfg)
+        return
+    elif args.command == 'prepare-months':
+        from .prepare_v2 import preparation_months
+        print(' '.join(preparation_months(cfg)))
+        return
+    elif args.command == 'audit':
         from .audit_v2 import audit_v2
         audit_v2(cfg)
         return

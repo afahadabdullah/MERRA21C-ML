@@ -6,6 +6,9 @@ through `python -m merraflow.cli_v2`, without changing the installed v1 entry po
 
 1. Prepare original HWT PRECTOT, T2M, pressure, and signed U/V targets. Never
    project precipitation during preparation or prediction. Retain budget audits.
+   Support calendar-derived monthly arrays across years. The annual preset fits
+   normalization on December 2024–November 2025 training hours and records monthly
+   contributions; later validation/test never contribute to normalization.
 2. Read coordinate-validated FROCEAN and required FRLAKE from one GSHHG-derived
    static file on the HWT grid; derive land as one minus ocean minus lake.
    Include elevation, terrain slopes, signed distance to water, coordinates and area.

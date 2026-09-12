@@ -3,6 +3,7 @@
 Copied orchestration is intentionally isolated from the running v1 pipeline.
 """
 from datetime import datetime, timedelta
+from collections import Counter
 from pathlib import Path
 import hashlib
 import json
@@ -68,7 +69,8 @@ def split_for(t, splits):
     return hits[0] if hits else None
 
 
-def manifest(cfg, month=None):
+def requested_hours(cfg):
+    """Yield requested midpoint times and splits without accessing source files."""
     d = cfg['data']
     # Validate ranges independently of which files happen to exist.
     ranges = sorted((datetime.fromisoformat(v[0]), datetime.fromisoformat(v[1]), k) for k, v in d['splits'].items())
@@ -76,6 +78,27 @@ def manifest(cfg, month=None):
         raise ValueError('Provide nonempty train, val and test half-open ranges')
     if any(ranges[i][1] > ranges[i+1][0] for i in range(len(ranges)-1)):
         raise ValueError('Split ranges overlap')
+    start, end = datetime.fromisoformat(d['start']), datetime.fromisoformat(d['end'])
+    if start.minute != 30 or end.minute != 30 or start > end:
+        raise ValueError('Inclusive data start/end must be hourly midpoint timestamps (:30)')
+    t = start
+    while t <= end:
+        split = split_for(t, d['splits'])
+        if split:
+            yield t, split
+        t += timedelta(hours=1)
+
+
+def preparation_months(cfg):
+    """Calendar months containing requested hours, including all configured years."""
+    months = sorted({t.strftime('%Y-%m') for t, _ in requested_hours(cfg)})
+    if not months:
+        raise ValueError('No requested hours in the configured splits')
+    return months
+
+
+def manifest(cfg, month=None):
+    d = cfg['data']
     if month is not None:
         try:
             parsed_month = datetime.strptime(month, '%Y-%m')
@@ -84,13 +107,8 @@ def manifest(cfg, month=None):
         if parsed_month.strftime('%Y-%m') != month:
             raise ValueError('Month must use zero-padded YYYY-MM')
     entries, missing = [], []
-    start, end = datetime.fromisoformat(d['start']), datetime.fromisoformat(d['end'])
-    if start.minute != 30 or end.minute != 30 or start > end:
-        raise ValueError('Inclusive data start/end must be hourly midpoint timestamps (:30)')
-    t = start
-    while t <= end:
-        split = split_for(t, d['splits'])
-        if split and (month is None or t.strftime('%Y-%m') == month):
+    for t, split in requested_hours(cfg):
+        if month is None or t.strftime('%Y-%m') == month:
             tag = t.strftime('%Y%m%d_%H%M')
             hrroot = Path(d['highres_root'])
             paths = {
@@ -98,12 +116,12 @@ def manifest(cfg, month=None):
                 'hr': hrroot/'hwt_30mn_slv_LCC'/t.strftime('%Y%m')/f'Feature-c2160_L137.hwt_30mn_slv_LCC.{tag}z.nc4',
                 'native': Path(d['native_root'])/t.strftime('Y%Y/M%m')/f'f5295_fp.tavg1_2d_flx_Nx.{tag}z.nc4',
             }
-            absent = [str(p) for p in paths.values() if not p.is_file()]
+            absent = {key: str(path) for key, path in paths.items() if not path.is_file()}
             if absent:
-                missing.append({'time': t.isoformat(), 'missing': absent})
+                missing.append({'time': t.isoformat(), 'missing': list(absent.values()),
+                                'sources': list(absent)})
             else:
                 entries.append({'time': t.isoformat(), 'id': tag, 'split': split, **{k: str(v.resolve()) for k, v in paths.items()}})
-        t += timedelta(hours=1)
     return entries, missing
 
 
@@ -413,10 +431,21 @@ def process_entries(cfg, entries, static, label='all'):
 def finish_archive(cfg, entries, missing, gaps, static, condition_moments, residual_moments, audit):
     validate_config_v2(cfg)
     d, root = cfg['data'], Path(cfg['data']['prepared'])
+    training = [entry for entry in entries if entry['split'] == 'train']
+    samples_per_hour = static['area'][::d['stats_stride'], ::d['stats_stride']].size
+    expected_samples = len(training)*samples_per_hour
+    if not training or condition_moments.n != expected_samples or residual_moments.n != expected_samples:
+        raise ValueError('Normalization statistics must include every training hour and no validation/test hours')
     write_static(root, entries[0], static, d)
     stats = {'condition': condition_moments.result(), 'residual': residual_moments.result(),
              'predictors': d['predictors'], 'precip_log_scale': d['precip_log_scale'],
-             'target_channels': ['t2m', 'precip', 'ps', 'u10m', 'v10m']}
+             'target_channels': ['t2m', 'precip', 'ps', 'u10m', 'v10m'],
+             'training_coverage': {'split': 'train', 'hours': len(training),
+                                   'hours_by_month': dict(sorted(Counter(e['time'][:7] for e in training).items())),
+                                   'first_hour': min(e['time'] for e in training),
+                                   'last_hour': max(e['time'] for e in training),
+                                   'spatial_stride': d['stats_stride'],
+                                   'samples_per_hour_per_channel': int(samples_per_hour)}}
     write_json(root/'missing_v2.json', missing)
     write_json(root/'predictor_gaps_v2.json', gaps)
     write_json(root/'stats_v2.json', stats)

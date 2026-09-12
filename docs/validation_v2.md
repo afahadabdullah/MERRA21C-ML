@@ -39,3 +39,37 @@ Not validated locally: the generated Discover NetCDF's numerical contents,
 CUDA/BF16/DDP execution, A100 memory/cost, or improvement on actual held-out HWT
 events. The included preflight, benchmark and validation commands support those checks.
 No remote training job was inspected, modified, stopped or submitted.
+
+## Annual preset (December 2024–November 2025 training)
+
+Added after the 42-test record above: `configs/discover_annual_v2.yaml`,
+config-derived preparation months, `coverage`, `prepare-months`, the
+training-coverage block in `stats_v2.json`, the month-list regridding helpers,
+and the annual runbook.
+
+- New tests: `tests/test_calendar_v2.py` (annual split boundaries, month
+  schedule, overlap rejection) and, in `tests/test_pipeline_v2.py`, a 12-month
+  monthly-statistics merge, coverage by missing source, and the predictor
+  spot-check. The suite is **45 test functions**; the first four new tests were
+  run in the session that added them, in a temporary CPU environment.
+- Verified in this workspace, without a Python environment for the full suite:
+  `bash -n` on every script; `py_compile` on the changed modules; the annual
+  calendar replayed directly, giving 8,760 train / 1,440 val / 1,368 test hours,
+  11,568 paired hours, 16 preparation months, both two-day gaps excluded and
+  overlapping splits rejected; `coverage_v2` exercised against a stubbed
+  manifest, producing valid JSON, correct per-month missing-source counts and
+  one sampled entry per month with paired data; and the submission helper's
+  prefixed `STAGE`/`RESUME`/`REGRESSION_CHECKPOINT` assignments confirmed to
+  reach `sbatch --export=ALL` without leaking afterwards, using a stub `sbatch`.
+- `scripts/repair_lowres_predictors_v2.py` was exercised against a stubbed
+  manifest and gap list: report-only leaves files in place and exits nonzero,
+  `--move-aside` renames only the incomplete outputs, and `--month` restricts
+  the scan. It has no test in the suite and deletes nothing.
+- Re-run `python -m pytest -q` in the project environment before relying on the
+  combined 45-test count; it has not been executed in one workspace as a whole.
+
+Not validated: whether Discover actually holds paired inputs through March 31,
+2026, whether the 2024-12 and 2026 months have been regridded with QV2M, SLP and
+OMEGA500, and the roughly 2.3 TiB the annual archive needs. The `coverage`
+command reports the first two; the quota must be checked directly.
+

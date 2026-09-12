@@ -134,6 +134,74 @@ def test_train_only_statistics_v2(prepared_v2):
     values = np.concatenate([a.array(e, 'residual')[:, ::2, ::2].reshape(5, -1)
                              for e in a.index['entries'] if e['split'] == 'train'], axis=1)
     np.testing.assert_allclose(a.rm.ravel(), values.mean(1), rtol=1e-5, atol=1e-5)
+    coverage = a.stats['training_coverage']
+    assert coverage['hours'] == 2
+    assert coverage['hours_by_month'] == {'2025-08': 2}
+
+
+def test_monthly_statistics_merge_twelve_training_months_v2(prepared_v2, tmp_path, monkeypatch):
+    from merraflow import prepare_v2 as preparation
+    cfg = deepcopy(prepared_v2)
+    cfg['data']['prepared'] = str(tmp_path/'annual_v2')
+    annual = load_config_v2('configs/discover_annual_v2.yaml')
+    for name in ('start', 'end', 'splits'):
+        cfg['data'][name] = annual['data'][name]
+    archive = ArchiveV2(prepared_v2['data']['prepared'])
+    static = archive.static
+    months = preparation.preparation_months(cfg)
+    entries = [dict(archive.index['entries'][0], time=f'{month}-15T00:30:00',
+                    id=f'{month.replace("-", "")}15_0030',
+                    split='train' if i < 12 else 'val' if i < 14 else 'test')
+               for i, month in enumerate(months)]
+    monkeypatch.setattr(preparation, 'manifest', lambda cfg, month=None:
+                        ([e for e in entries if month is None or e['time'].startswith(month)], []))
+    monkeypatch.setattr(preparation, 'static_for', lambda entry, cfg: static)
+
+    def arrays(cfg, entry, static):
+        i = entries.index(entry)
+        value = i+1 if entry['split'] == 'train' else 1e6
+        return {name: np.full((len(cfg['data']['predictors']) if name == 'condition' else
+                              1 if name == 'native_reference' else 5, *static['area'].shape),
+                             value, dtype='float32') for name in preparation.SHARD_NAMES}
+
+    monkeypatch.setattr(preparation, 'build_arrays', arrays)
+    for month in months:
+        prepare_month(cfg, month)
+    finalize_prepare(cfg)
+    stats = json.loads((Path(cfg['data']['prepared'])/'stats_v2.json').read_text())
+    expected = np.arange(1, 13)
+    for name in ('condition', 'residual'):
+        np.testing.assert_allclose(stats[name]['mean'], expected.mean())
+        np.testing.assert_allclose(stats[name]['std'], expected.std())
+    assert stats['training_coverage']['hours_by_month'] == dict.fromkeys(months[:12], 1)
+    assert stats['training_coverage']['hours'] == 12
+
+
+def test_coverage_identifies_missing_source_v2(tmp_path):
+    from merraflow.audit_v2 import coverage_v2
+    from merraflow.prepare_v2 import manifest
+    cfg = load_config_v2(make_synthetic_v2(tmp_path/'coverage_v2', load_config_v2('configs/discover_v2.yaml')))
+    entries, _ = manifest(cfg)
+    Path(entries[0]['lr']).unlink()
+    result = coverage_v2(cfg)
+    assert result['expected_hours'] == 6 and result['paired_hours'] == 5
+    assert result['incomplete_hours'] == 1 and not result['all_requested_pairs_present']
+    assert result['months'][0]['missing_by_source'] == {'lr': 1, 'hr': 0, 'native': 0}
+    assert result['example_missing_paths'] == {'lr': entries[0]['lr']}
+    spot = result['predictor_spot_check']
+    assert spot['months_sampled'] == sum(1 for month in result['months'] if month['paired_hours'])
+    assert spot['gaps'] == [] and spot['all_sampled_months_have_predictors']
+
+
+def test_coverage_spot_check_reports_absent_predictor_v2(tmp_path):
+    from merraflow.audit_v2 import coverage_v2
+    cfg = load_config_v2(make_synthetic_v2(tmp_path/'spot_v2', load_config_v2('configs/discover_v2.yaml')))
+    cfg['data']['predictors'] = cfg['data']['predictors']+['OMEGA700']
+    result = coverage_v2(cfg)
+    assert result['all_requested_pairs_present']
+    spot = result['predictor_spot_check']
+    assert not spot['all_sampled_months_have_predictors']
+    assert spot['gaps'][0]['missing'] == ['OMEGA700']
 
 
 def test_gradient_loss_distinguishes_detail_v2():

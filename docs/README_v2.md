@@ -29,7 +29,7 @@ CorrDiff's EDM method. The attention implementation uses [PyTorch SDPA](https://
 
 ## Surface fields: one ocean/land/lake file
 
-All three production presets read the generated static NetCDF on the HWT LCC
+All production presets read the generated static NetCDF on the HWT LCC
 grid. These are GSHHG-derived geographic fractions, not native GEOS surface
 fractions. The PNG is a preview; preparation reads the full-resolution NetCDF.
 
@@ -86,6 +86,28 @@ and should not be compared numerically to one another.
 
 ## Run on Discover
 
+For December 2024–November 2025 training with later validation/test through
+March 2026, use `configs/discover_annual_v2.yaml` and the
+[annual runbook](runbook_discover_annual_v2.md). It checks that normalization
+uses all 12 training months. Actual availability of the expanded inputs must be
+checked on Discover first:
+
+```bash
+python -m merraflow.cli_v2 coverage --config configs/discover_annual_v2.yaml
+```
+
+This reports paired hours by month and source and opens one regridded file per
+month to confirm the configured predictors are present. Months that lack only
+regridded predictors are produced with
+`REGRID_MONTHS='2024-12 2026-01' bash scripts/submit_regrid_months_v2.sh`, which
+runs the existing regridder over an arbitrary month list; the fixed-2025
+regridding scripts are unchanged. Regridding skips outputs that already hold the
+v1 required variables, so files predating QV2M/SLP/OMEGA500 are skipped rather
+than repaired; `scripts/repair_lowres_predictors_v2.py` lists them and, with
+`--move-aside`, stages them for rebuilding. The regridded archive is shared with
+v1 and stores every optional state variable the GEOS source has. The annual
+prepared archive needs roughly 2.3 TiB and does not reuse the 2025 one.
+
 For the complete copy/paste workflow, follow the
 [Discover runbook](runbook_discover_v2.md). From the project root,
 `bash scripts/submit_pipeline_v2.sh` activates the existing conda environment,
@@ -122,9 +144,11 @@ python -m merraflow.cli_v2 prepare --config configs/discover_v2.yaml
 bash scripts/submit_prepare_flow_v2.sh
 ```
 
-The array helper defaults to 2025, as do the supplied data ranges. Set PREP_YEAR
-and the configuration together for another year; a multi-year archive needs an
-array for each applicable year before finalization. Preparation resumes complete
+Both submission helpers derive the preparation months from `CONFIG`, including
+multiple years and excluding months with no requested split hours. The selected
+month list is passed to the array; task numbers index this list. There is no
+`PREP_YEAR` setting. `discover_v2.yaml` requests 12 tasks and
+`discover_annual_v2.yaml` requests 16. Preparation resumes complete
 shards and refuses incompatible metadata. Changes to external static-file bytes
 invalidate resumable preparation. Full preparation checks predictors on all
 paired hours. The read-only audit checks representative hours only.
@@ -219,10 +243,14 @@ alone is not failure of a probabilistic model.
 
 ## Limits and validation
 
-The supplied split remains January–August training, September–mid-October
-validation, late October–December test. More epochs cannot supply missing
-seasonal regimes. Add real multi-year/all-season data through revised explicit
-time ranges when available; no such data are invented here. HR midpoint snapshots
+The original `discover_v2.yaml` split remains January–August 2025 training,
+September–mid-October validation, and late October–December test. The additional
+annual preset trains December 2024–November 2025, validates December 3, 2025–January
+31, 2026, and tests February 3–March 31, 2026, retaining two-day gaps. This covers
+all training months but mainly cool-season validation/test. It does not establish
+all-season held-out skill, and the additional input availability is unverified.
+Normalization uses all training hours only; `stats_v2.json.training_coverage`
+records which months contributed. HR midpoint snapshots
 still approximate LR hourly means. Removing projection enables HWT bias correction
 but does not eliminate timing/representativeness differences or guarantee physical
 water-budget closure. Flow samples can deviate from native totals; reports show it.
