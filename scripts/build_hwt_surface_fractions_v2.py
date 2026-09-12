@@ -77,7 +77,7 @@ def gshhg_geometries(lon: np.ndarray, lat: np.ndarray, scale: str):
     """Read only GSHHG polygons that can intersect the HWT domain."""
     from cartopy.io import shapereader
     from shapely.geometry import GeometryCollection
-    from shapely import union_all
+    from shapely import make_valid, union_all
 
     west, east = float(lon.min())-.25, float(lon.max())+.25
     south, north = float(lat.min())-.25, float(lat.max())+.25
@@ -85,15 +85,24 @@ def gshhg_geometries(lon: np.ndarray, lat: np.ndarray, scale: str):
     for level in range(1, 5):
         source = shapereader.gshhs(scale=scale, level=level)
         selected = []
+        repaired = 0
         for record in shapereader.Reader(source).records():
-            left, bottom, right, top = record.geometry.bounds
+            geometry = record.geometry
+            left, bottom, right, top = geometry.bounds
             if right >= west and left <= east and top >= south and bottom <= north:
-                selected.append(record.geometry)
+                if not geometry.is_valid:
+                    geometry = make_valid(geometry)
+                    repaired += 1
+                selected.append(geometry)
         if level == 1 and not selected:
             raise ValueError(f'GSHHG has no land polygons overlapping the HWT grid; '
                              f'polygon longitude range {west:.2f}..{east:.2f}, '
                              f'latitude range {south:.2f}..{north:.2f}')
+        # Repair invalid source polygons before merging overlaps; GEOS point
+        # containment also requires the combined geometry to be topologically valid.
         result[level] = union_all(selected) if selected else GeometryCollection()
+        print(f'GSHHG level {level}: {len(selected)} overlapping polygons, '
+              f'{repaired} repaired', flush=True)
     return result
 
 
