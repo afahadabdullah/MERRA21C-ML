@@ -13,7 +13,7 @@ or testing.
 |---|---|
 | Targets | Original HWT midpoint T2M, PRECTOT, pressure and signed U/V; precipitation is never budget-adjusted |
 | Baseline | Bilinear coarse precipitation, T2M, pressure and U/V; native precipitation is saved separately for audits |
-| Static conditions | Existing elevation/coordinates/area plus FROCEAN, land/non-ocean fraction, optional lake fraction, lake-availability flag, grid-axis terrain slopes and signed distance to water |
+| Static conditions | Existing elevation/coordinates/area plus ocean, land and lake fractions from one static file, lake-availability flag, grid-axis terrain slopes and signed distance to water |
 | Dynamics | PRECTOT, U10M, V10M, TQV, QV2M, SLP and OMEGA500; full preparation rejects missing inputs |
 | Regression | Multiscale conditional U-Net predicts the predictable transformed residual from the coarse baseline |
 | Generation | A second U-Net learns flow matching on the remaining residual around the frozen best regression EMA |
@@ -27,38 +27,37 @@ The decomposition is inspired by [CorrDiff](https://www.nature.com/articles/s432
 This is a conditional **flow matching** implementation, not a reproduction of
 CorrDiff's EDM method. The attention implementation uses [PyTorch SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention).
 
-## Surface fields: FROCEAN
+## Surface fields: one ocean/land/lake file
 
-The default config reads `FROCEAN` from the first complete HWT surface file for
-each preparation partition (`data.static.path: first_hr`). This is the variable
-identified for this dataset, but its presence on Discover has not been verified
-from this local workspace. If it is in a separate static file, set
-`data.static.path` to that file. The loader requires latitude/longitude arrays
-matching the HWT grid, finite fractions in [0,1], and consistent surface fractions.
-It never constructs an ocean mask from elevation.
-
-`FRLAKE` is used if available. **FROCEAN alone cannot distinguish inland lakes
-from land.** When FRLAKE is absent, v2 emits a warning, sets a lake-availability
-conditioning channel to zero, and explicitly labels the remaining fraction as
-non-ocean in NetCDF metadata. The zero lake channel is then a missing-data
-placeholder, not a declaration that there are no lakes. Set
-`data.static.require_lake: true` to require lake information. If your static file
-uses different names, change the mapping. A file with disjoint solid-land and
-lake fractions can instead use:
+All three production presets read the generated static NetCDF on the HWT LCC
+grid. These are GSHHG-derived geographic fractions, not native GEOS surface
+fractions. The PNG is a preview; preparation reads the full-resolution NetCDF.
 
 ```yaml
 static:
-  path: /path/to/hwt_surface_v2.nc
-  land: land_fraction
-  lake: lake_fraction
+  path: data/static_grid/hwt_surface_fractions_v2.nc
+  ocean: FROCEAN
+  lake: FRLAKE
+  require_lake: true
   lat: lats
   lon: lons
 ```
 
-With this mapping, remove `ocean` from the config. Do not treat percent units or
-a categorical land-use index as a fraction. Regrid and validate such data
-explicitly before preparation. Distance is measured in grid pixels, and slopes
-are along LCC grid axes using geographic center spacing, not true east/north.
+The generator writes `FRLAND`, `FRLAKE` and `FROCEAN` in this one file. The loader
+reads ocean and lake, derives land as `1 - FROCEAN - FRLAKE`, and checks finite
+fractions in [0,1] and latitude/longitude agreement with HWT. Missing `FRLAKE`
+now fails in the supplied presets. Mixed coastal cells retain fractional cover;
+the generator defaults to 16 sub-cell samples per HWT cell. Keep the generated
+file unchanged throughout preparation and training.
+
+The loader still supports explicit alternative configurations with land/lake
+fields, or optional lakes, but these are not the production defaults. Do not
+pass category labels or percentages as fractions. Distance is measured in grid
+pixels, and slopes are along LCC grid axes using geographic center spacing.
+
+The [Discover runbook](runbook_discover_v2.md) includes the exact environment,
+static-file checks, submission and recovery commands. The static NetCDF is
+generated on Discover and is not downloaded by `git pull`.
 
 ## Losses and why they do not simply sharpen every image
 
@@ -87,9 +86,17 @@ and should not be compared numerically to one another.
 
 ## Run on Discover
 
-Use the existing project environment (PyTorch >=2.3 and existing project
-dependencies). No environment upgrade is needed for the running v1 job. If the
-project is not installed editable, set `PYTHONPATH="$PWD/src"` in the new shell.
+For the complete copy/paste workflow, follow the
+[Discover runbook](runbook_discover_v2.md). From the project root,
+`bash scripts/submit_pipeline_v2.sh` activates the existing conda environment,
+audits the inputs, then queues preparation, finalization, regression and flow
+with `afterok` dependencies. All v2 jobs import `src` from the checked-out project.
+The fresh regression job first benchmarks both stages for five scratch steps
+on its allocated GPU, then trains. Failed dependencies cancel downstream jobs.
+
+The commands below describe the individual stages. Use Bash and the existing
+project environment (PyTorch >=2.3 and project dependencies). Set
+`PYTHONPATH="$PWD/src"` when running the CLI directly.
 
 First check representative inputs without writing prepared data:
 
@@ -122,7 +129,8 @@ shards and refuses incompatible metadata. Changes to external static-file bytes
 invalidate resumable preparation. Full preparation checks predictors on all
 paired hours. The read-only audit checks representative hours only.
 
-Benchmark before committing GPU time:
+The fresh regression batch job runs this benchmark automatically. To run it
+separately, use a GPU allocation:
 
 ```bash
 python scripts/benchmark_v2.py --config configs/discover_v2.yaml --steps 5

@@ -31,10 +31,10 @@ data:
   stats_stride: 8
   precip_log_scale: 1.0
   static:
-    path: first_hr
+    path: data/static_grid/hwt_surface_fractions_v2.nc
     ocean: FROCEAN
     lake: FRLAKE
-    require_lake: false
+    require_lake: true
     lat: lats
     lon: lons
 patch:

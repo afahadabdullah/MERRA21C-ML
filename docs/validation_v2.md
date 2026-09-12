@@ -22,7 +22,20 @@ on CPU. This records software validation, not measured meteorological improvemen
 - SHA-256 comparison confirms all 43 pre-existing source/config/script/test files
   are unchanged. All new maintained file basenames contain `v2`.
 
-Not validated locally: Discover source FROCEAN location/availability, CUDA/BF16/DDP
-execution, A100 memory/cost, or improvement on actual held-out HWT events. The
-included preflight, benchmark and validation commands support those next checks.
+The generated GSHHG surface preview supplied from Discover was inspected at
+domain scale: coastlines and the Great Lakes are visibly separated. The actual
+Discover NetCDF has not been read locally. Production presets now require
+FROCEAN and FRLAKE from that one file; the runbook checks stored fractions and
+the preflight verifies alignment against HWT before submission.
+
+After static-file integration, the full CPU suite passes **42 tests** (11.36 s),
+including preflight rejection of missing pairs/empty splits and surface-fraction
+reporting. Bash syntax checks pass for all v2 batch/submission scripts. The new
+submission helper's four-job dependency chain, zero-submission behavior on
+audit failure, and preservation of job IDs on partial submission failure were
+checked using a mocked scheduler; no real jobs were queued.
+
+Not validated locally: the generated Discover NetCDF's numerical contents,
+CUDA/BF16/DDP execution, A100 memory/cost, or improvement on actual held-out HWT
+events. The included preflight, benchmark and validation commands support those checks.
 No remote training job was inspected, modified, stopped or submitted.

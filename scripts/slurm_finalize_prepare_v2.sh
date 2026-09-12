@@ -17,5 +17,6 @@ source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.
 conda activate "$ENV_DIR"
 set -u
 cd "$PROJECT_DIR"
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 python -m merraflow.cli_v2 prepare-finalize --config "${CONFIG:-configs/discover_v2.yaml}"

@@ -1,4 +1,4 @@
-# V2 only. Read FROCEAN from HWT; override static.path if it lives in a separate file.
+# V2 only. Ocean and lake fractions share one GSHHG-derived HWT-grid static file.
 data:
   lowres_lcc_root: /gpfsm/dnb10/projects/p311/ML_downscaling/data/lowres_lcc_1hr
   native_root: /gpfsm/dnb06/projects/p174/f5295_fp/diag
@@ -31,10 +31,10 @@ data:
   stats_stride: 8
   precip_log_scale: 1.0
   static:
-    path: first_hr
+    path: data/static_grid/hwt_surface_fractions_v2.nc
     ocean: FROCEAN
     lake: FRLAKE
-    require_lake: false
+    require_lake: true
     lat: lats
     lon: lons
 patch:

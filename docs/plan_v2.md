@@ -6,8 +6,8 @@ through `python -m merraflow.cli_v2`, without changing the installed v1 entry po
 
 1. Prepare original HWT PRECTOT, T2M, pressure, and signed U/V targets. Never
    project precipitation during preparation or prediction. Retain budget audits.
-2. Read coordinate-validated HWT FROCEAN (and FRLAKE when available); record lake
-   availability explicitly. Also accept a separate mapped land/lake fraction file.
+2. Read coordinate-validated FROCEAN and required FRLAKE from one GSHHG-derived
+   static file on the HWT grid; derive land as one minus ocean minus lake.
    Include elevation, terrain slopes, signed distance to water, coordinates and area.
    Add QV2M, SLP and OMEGA500 to the available coarse predictor set.
 3. Train a deterministic multiscale conditional U-Net, freeze its best EMA weights,

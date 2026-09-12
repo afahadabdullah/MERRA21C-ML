@@ -25,6 +25,7 @@ source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.
 conda activate "$ENV_DIR"
 set -u
 cd "$PROJECT_DIR"
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-matplotlib-${SLURM_JOB_ID}"
 CONFIG="${CONFIG:-configs/discover_v2.yaml}"
@@ -32,6 +33,11 @@ NPROC=$(python -c 'import torch; print(torch.cuda.device_count())')
 if (( NPROC < 1 )); then
   echo 'No CUDA GPUs visible in this allocation' >&2
   exit 1
+fi
+# Check both stages on a real prepared batch in the GPU allocation before a
+# fresh regression run. This measures scratch steps, not full-run headroom.
+if [[ "${STAGE:-regression}" == regression && -z "${RESUME:-}" ]]; then
+  srun python scripts/benchmark_v2.py --config "$CONFIG" --steps 5
 fi
 args=(--config "$CONFIG" --stage "${STAGE:-regression}")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi

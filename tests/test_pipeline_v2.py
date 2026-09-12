@@ -83,6 +83,31 @@ def test_frocean_with_optional_lakes_v2(prepared_v2, tmp_path):
     np.testing.assert_allclose(result['land_fraction'], a.static['land_fraction'])
 
 
+def test_preflight_rejects_incomplete_manifest_v2(prepared_v2, monkeypatch):
+    from merraflow import audit_v2
+    from merraflow.prepare_v2 import manifest
+    entries, missing = manifest(prepared_v2)
+    assert not missing
+    monkeypatch.setattr(audit_v2, 'manifest', lambda cfg: (entries, [{'missing': ['absent.nc4']}]))
+    with pytest.raises(FileNotFoundError, match='incomplete hourly pairs'):
+        audit_v2.audit_v2(prepared_v2)
+    monkeypatch.setattr(audit_v2, 'manifest', lambda cfg: ([e for e in entries if e['split'] != 'test'], []))
+    with pytest.raises(ValueError, match='each train/val/test split'):
+        audit_v2.audit_v2(prepared_v2)
+
+
+def test_preflight_reports_surface_fractions_v2(prepared_v2):
+    from merraflow.audit_v2 import audit_v2
+    result = audit_v2(prepared_v2)
+    assert result['lake_fraction_known']
+    assert result['surface_file'] == prepared_v2['data']['static']['path']
+    fractions = result['surface_fractions']
+    assert set(fractions) == {'land_fraction', 'lake_fraction', 'ocean_fraction'}
+    for values in fractions.values():
+        assert 0 <= values['min'] <= values['mean'] <= values['max'] <= 1
+    assert sum(values['mean'] for values in fractions.values()) == pytest.approx(1)
+
+
 def test_patch_proposals_and_context_v2(prepared_v2):
     cfg = prepared_v2
     data = PatchDatasetV2(cfg['data']['prepared'], 'train', cfg['patch'], 10, 17)

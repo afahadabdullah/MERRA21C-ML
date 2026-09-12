@@ -19,6 +19,7 @@ source /discover/nobackup/projects/GEOS_MITgcm/afahad/conda/etc/profile.d/conda.
 conda activate "$ENV_DIR"
 set -u
 cd "$PROJECT_DIR"
+export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 printf -v MONTH '%s-%02d' "${PREP_YEAR:-2025}" "$SLURM_ARRAY_TASK_ID"
 python -m merraflow.cli_v2 prepare --config "${CONFIG:-configs/discover_v2.yaml}" --month "$MONTH"
