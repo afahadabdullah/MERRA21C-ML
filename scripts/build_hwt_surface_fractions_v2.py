@@ -48,6 +48,11 @@ def load_hwt_grid(path: Union[str, Path], lat_name: str, lon_name: str):
     return lat, lon, dims, coords
 
 
+def gshhg_longitudes(lon: np.ndarray) -> np.ndarray:
+    """Convert HWT 0-360 longitudes to the -180..180 convention of GSHHG."""
+    return (lon+180) % 360-180
+
+
 def sample_coordinates(lat: np.ndarray, lon: np.ndarray, first_row: int, last_row: int, supersample: int):
     """Bilinearly interpolate lat/lon at sub-cell centers in index space."""
     height, width = lat.shape
@@ -85,7 +90,9 @@ def gshhg_geometries(lon: np.ndarray, lat: np.ndarray, scale: str):
             if right >= west and left <= east and top >= south and bottom <= north:
                 selected.append(record.geometry)
         if level == 1 and not selected:
-            raise ValueError('GSHHG has no land polygons overlapping the HWT grid')
+            raise ValueError(f'GSHHG has no land polygons overlapping the HWT grid; '
+                             f'polygon longitude range {west:.2f}..{east:.2f}, '
+                             f'latitude range {south:.2f}..{north:.2f}')
         result[level] = union_all(selected) if selected else GeometryCollection()
     return result
 
@@ -187,8 +194,12 @@ def main():
         import cartopy
         cartopy.config['pre_existing_data_dir'] = Path(args.cartopy_data_dir)
     lat, lon, dims, coords = load_hwt_grid(args.grid, args.lat, args.lon)
-    levels = gshhg_geometries(lon, lat, args.scale)
-    values = fractions(lat, lon, levels, args.supersample, args.chunk_rows)
+    polygon_lon = gshhg_longitudes(lon)
+    print(f'HWT grid {lat.shape}: raw longitude {lon.min():.2f}..{lon.max():.2f}, '
+          f'GSHHG longitude {polygon_lon.min():.2f}..{polygon_lon.max():.2f}, '
+          f'latitude {lat.min():.2f}..{lat.max():.2f}', flush=True)
+    levels = gshhg_geometries(polygon_lon, lat, args.scale)
+    values = fractions(lat, polygon_lon, levels, args.supersample, args.chunk_rows)
     print(write_output(args.output, lat, lon, dims, coords, values, args.grid, args.scale, args.supersample))
     if args.plot:
         print(write_plot(args.plot, values))
