@@ -53,8 +53,8 @@ regridded predictors (`lr`), HWT labels (`hr`), and native GEOS precipitation
 (`native`), and example missing paths are printed. A month existing in one archive
 does not prove the other two are complete. `predictor_spot_check` additionally
 opens one regridded file per month and lists any configured predictor it lacks,
-because the regridder writes QV2M, SLP and OMEGA500 only when the GEOS source
-provides them. Check `all_requested_pairs_present: true`, `paired_hours: 11568`
+because the regridder writes optional state variables such as QV2M and SLP only
+when the GEOS source provides them. Check `all_requested_pairs_present: true`, `paired_hours: 11568`
 and `predictor_spot_check.all_sampled_months_have_predictors: true` before
 proceeding. Preparation still validates every paired hour, not one per month.
 The submission preflight additionally checks sample NetCDF contents and the mask.
@@ -83,8 +83,8 @@ and prints the single-month command that creates them. Tasks run at most six at
 a time and write into `data/lowres_lcc_1hr/YYYYMM`.
 
 Regridding skips any existing output that holds the v1 required variables
-(`T2M`, `U10M`, `V10M`, `PS`, `TQV`, `PRECTOT`), so a file written before QV2M,
-SLP and OMEGA500 were emitted is skipped rather than repaired. Staging those
+(`T2M`, `U10M`, `V10M`, `PS`, `TQV`, `PRECTOT`), so a file written before QV2M
+and SLP were emitted is skipped rather than repaired. Staging those
 files aside is what makes the array rebuild them:
 
 ```bash

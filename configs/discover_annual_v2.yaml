@@ -24,7 +24,6 @@ data:
   - TQV
   - QV2M
   - SLP
-  - OMEGA500
   precip_source: hwt_30mn_slv_LCC.PRECTOT
   state_alignment: midpoint_snapshot
   strict_missing: true

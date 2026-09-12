@@ -299,7 +299,7 @@ def test_monthly_and_unlabeled_v2(tmp_path):
     a, reference = ArchiveV2(inference['data']['prepared']), ArchiveV2(root)
     assert a.stats == reference.stats and a.index['fingerprint'] == reference.index['fingerprint']
     assert not (a.root/a.index['entries'][0]['id']/'truth_v2.npy').exists()
-    assert a.inputs(a.index['entries'][0], 0, 0, cfg['patch'])[0].shape[0] == 31
+    assert a.inputs(a.index['entries'][0], 0, 0, cfg['patch'])[0].shape[0] == 30
 
 
 def test_namespace_and_conservation_guards_v2(prepared_v2):

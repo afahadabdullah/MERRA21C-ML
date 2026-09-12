@@ -69,7 +69,12 @@ and the annual runbook.
   combined 45-test count; it has not been executed in one workspace as a whole.
 
 Not validated: whether Discover actually holds paired inputs through March 31,
-2026, whether the 2024-12 and 2026 months have been regridded with QV2M, SLP and
-OMEGA500, and the roughly 2.3 TiB the annual archive needs. The `coverage`
+2026, whether the 2024-12 and 2026 months have been regridded with QV2M and SLP,
+and the roughly 2.3 TiB the annual archive needs. The `coverage`
 command reports the first two; the quota must be checked directly.
 
+OMEGA500 was removed from every v2 preset after a scan of the regridded archive:
+`repair_lowres_predictors_v2.py` found all 24 hours of January 8, 2025 lacking
+only that variable, and preparation fails a whole month on any predictor gap.
+The v2 dynamic set is now PRECTOT, U10M, V10M, TQV, QV2M and SLP, so the
+condition tensor holds 30 channels instead of 31.

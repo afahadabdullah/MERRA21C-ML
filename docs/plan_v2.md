@@ -12,7 +12,8 @@ through `python -m merraflow.cli_v2`, without changing the installed v1 entry po
 2. Read coordinate-validated FROCEAN and required FRLAKE from one GSHHG-derived
    static file on the HWT grid; derive land as one minus ocean minus lake.
    Include elevation, terrain slopes, signed distance to water, coordinates and area.
-   Add QV2M, SLP and OMEGA500 to the available coarse predictor set.
+   Add QV2M and SLP to the available coarse predictor set; OMEGA500 is excluded
+   because the hourly GEOS-FP stream does not carry it for every hour.
 3. Train a deterministic multiscale conditional U-Net, freeze its best EMA weights,
    calibrate residual scales on training patches, then train a residual flow U-Net.
    Use two residual blocks per scale, bottleneck self/cross attention and a wider

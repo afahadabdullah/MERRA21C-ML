@@ -1,8 +1,8 @@
 """Find regridded hours that predate a v2 predictor and stage them for rebuilding.
 
 The regridder's own resume check accepts a file that holds the v1 required
-variables, so an output written before QV2M, SLP or OMEGA500 were emitted is
-skipped rather than repaired. This reports such files for a v2 config and, with
+variables, so an output written before an optional state variable such as QV2M
+or SLP was emitted is skipped rather than repaired. This reports such files for a v2 config and, with
 --move-aside, renames them so a regridding re-run recreates them. Nothing is
 deleted, and no job is submitted.
 """

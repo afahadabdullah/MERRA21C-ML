@@ -14,7 +14,7 @@ or testing.
 | Targets | Original HWT midpoint T2M, PRECTOT, pressure and signed U/V; precipitation is never budget-adjusted |
 | Baseline | Bilinear coarse precipitation, T2M, pressure and U/V; native precipitation is saved separately for audits |
 | Static conditions | Existing elevation/coordinates/area plus ocean, land and lake fractions from one static file, lake-availability flag, grid-axis terrain slopes and signed distance to water |
-| Dynamics | PRECTOT, U10M, V10M, TQV, QV2M, SLP and OMEGA500; full preparation rejects missing inputs |
+| Dynamics | PRECTOT, U10M, V10M, TQV, QV2M and SLP; full preparation rejects missing inputs |
 | Regression | Multiscale conditional U-Net predicts the predictable transformed residual from the coarse baseline |
 | Generation | A second U-Net learns flow matching on the remaining residual around the frozen best regression EMA |
 | Architecture | Two residual blocks per scale, spatial conditions at every encoder scale, bilinear decoder upsampling, bottleneck self-attention and cross-attention to broader context |
@@ -59,6 +59,13 @@ The [Discover runbook](runbook_discover_v2.md) includes the exact environment,
 static-file checks, submission and recovery commands. The static NetCDF is
 generated on Discover and is not downloaded by `git pull`.
 
+OMEGA500 is deliberately excluded. The GEOS-FP `tavg1_2d_slv_Nx` stream does not
+carry it for every hour — January 8, 2025 is missing all 24 — and preparation
+rejects a whole month on any predictor gap, so requiring it would cost training
+hours for one conditioning channel. This is an availability decision, not a
+measured feature-importance result; add it back through an ablation if the
+stream is later complete.
+
 ## Losses and why they do not simply sharpen every image
 
 Training targets are five standardized transformed residuals. Only precipitation
@@ -102,7 +109,7 @@ regridded predictors are produced with
 `REGRID_MONTHS='2024-12 2026-01' bash scripts/submit_regrid_months_v2.sh`, which
 runs the existing regridder over an arbitrary month list; the fixed-2025
 regridding scripts are unchanged. Regridding skips outputs that already hold the
-v1 required variables, so files predating QV2M/SLP/OMEGA500 are skipped rather
+v1 required variables, so files predating QV2M/SLP are skipped rather
 than repaired; `scripts/repair_lowres_predictors_v2.py` lists them and, with
 `--move-aside`, stages them for rebuilding. The regridded archive is shared with
 v1 and stores every optional state variable the GEOS source has. The annual
