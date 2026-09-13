@@ -226,15 +226,34 @@ SHARD_NAMES = ('condition', 'target', 'truth', 'baseline', 'residual', 'native_r
 PREPARATION_FORMAT = 'v2'  # Same-time HWT surface PRECTOT, never accumulated APCP.
 
 
-def preparation_signature(cfg):
-    payload = {'format': PREPARATION_FORMAT, 'data': cfg['data']}
+# Which hours are requested and how they are labeled. No stored array depends on
+# these, so changing them keeps existing shards; finalization revalidates each
+# month's entry list and training-hour contribution instead of trusting a hash.
+SCHEDULE_KEYS = ('start', 'end', 'splits')
+
+
+def content_config(data):
+    """The part of the data configuration that stored arrays actually depend on."""
+    return {key: value for key, value in data.items() if key not in SCHEDULE_KEYS}
+
+
+def static_fingerprint(cfg):
+    """SHA-256 of the external surface file, or None when it is taken from the first HR hour."""
     source = cfg['data']['static']['path']
-    if source != 'first_hr':
-        digest = hashlib.sha256()
-        with open(source, 'rb') as f:
-            for chunk in iter(lambda: f.read(8*1024*1024), b''):
-                digest.update(chunk)
-        payload['static_sha256'] = digest.hexdigest()
+    if source == 'first_hr':
+        return None
+    digest = hashlib.sha256()
+    with open(source, 'rb') as f:
+        for chunk in iter(lambda: f.read(8*1024*1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def preparation_signature(cfg):
+    payload = {'format': PREPARATION_FORMAT, 'data': content_config(cfg['data'])}
+    fingerprint = static_fingerprint(cfg)
+    if fingerprint is not None:
+        payload['static_sha256'] = fingerprint
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -242,17 +261,25 @@ def ensure_work_signature(root, cfg):
     if (root/'index.json').exists() or (root/'_preparation.json').exists():
         raise ValueError('V1 archive detected; use a separate v2 preparation directory')
     path = root/'_preparation_v2.json'
-    expected = {'format': PREPARATION_FORMAT, 'signature': preparation_signature(cfg),
-                'data_config': cfg['data']}
+    fingerprint = static_fingerprint(cfg)
+    record = {'format': PREPARATION_FORMAT, 'signature': preparation_signature(cfg),
+              'static_sha256': fingerprint, 'data_config': cfg['data']}
     if path.exists():
         with open(path) as source:
             actual = json.load(source)
-        if actual != expected:
+        # Predictors, roots, transforms, statistics stride and the surface bytes
+        # decide shard contents. A record written before static_sha256 was stored
+        # separately cannot be byte-checked; its months are still revalidated.
+        if (actual.get('format') != PREPARATION_FORMAT
+                or content_config(actual.get('data_config', {})) != content_config(cfg['data'])
+                or actual.get('static_sha256', fingerprint) != fingerprint):
             raise ValueError(f'{root} contains shards from a different preparation configuration; use a new data.prepared directory')
+        if actual != record:
+            write_json(path, record)
     else:
         if any(root.glob('*/truth_v2.npy')):
             raise ValueError(f'{root} contains unversioned shards; use a new data.prepared directory')
-        write_json(path, expected)
+        write_json(path, record)
 
 
 def static_for(entry, cfg):
@@ -541,16 +568,27 @@ def finalize_prepare(cfg):
     static = static_for(entries[0], cfg)
     condition_moments, residual_moments = Moments(), Moments()
     audit, gaps = [], []
+    samples_per_hour = static['area'][::d['stats_stride'], ::d['stats_stride']].size
     for month in sorted({entry['time'][:7] for entry in entries}):
         path = root/'_monthly_v2'/f'{month}_v2.json'
         if not path.exists():
             raise FileNotFoundError(f'Month {month} is incomplete: {path} does not exist')
         with open(path) as source:
             metadata = json.load(source)
-        expected_ids = [entry['id'] for entry in entries if entry['time'].startswith(month)]
-        if metadata['signature'] != preparation_signature(cfg) or metadata['entry_ids'] != expected_ids:
-            raise ValueError(f'{path} does not match the current configuration/manifest')
-        month_entry = next(entry for entry in entries if entry['time'].startswith(month))
+        month_entries = [entry for entry in entries if entry['time'].startswith(month)]
+        expected_ids = [entry['id'] for entry in month_entries]
+        if metadata['entry_ids'] != expected_ids:
+            raise ValueError(f'{path} does not match the current manifest for {month}')
+        # Moments are merged across months, so each month must contribute exactly
+        # its own training hours under the current splits. This is what allows a
+        # changed split boundary to reuse shards prepared under the previous one.
+        training_hours = sum(entry['split'] == 'train' for entry in month_entries)
+        expected_samples = training_hours*samples_per_hour
+        if metadata['condition']['n'] != expected_samples or metadata['residual']['n'] != expected_samples:
+            raise ValueError(f'{path}: stored normalization moments cover {metadata["condition"]["n"]} samples, '
+                             f'not the {expected_samples} of this month\'s {training_hours} training hours; '
+                             f're-run preparation for {month}')
+        month_entry = month_entries[0]
         month_static = static_for(month_entry, cfg)
         if metadata['grid_signature'] != grid_signature(month_static):
             raise ValueError(f'{path}: source grid changed after this month was prepared')

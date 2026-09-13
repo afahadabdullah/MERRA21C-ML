@@ -204,6 +204,37 @@ def test_coverage_spot_check_reports_absent_predictor_v2(tmp_path):
     assert spot['gaps'][0]['missing'] == ['OMEGA700']
 
 
+def test_schedule_change_keeps_shards_but_content_change_does_not_v2(prepared_v2, tmp_path):
+    from merraflow.prepare_v2 import ensure_work_signature, preparation_signature
+    cfg = deepcopy(prepared_v2)
+    cfg['data']['prepared'] = str(tmp_path)
+    ensure_work_signature(tmp_path, cfg)
+    schedule = deepcopy(cfg)
+    schedule['data']['end'] = '2025-12-31T23:30:00'
+    schedule['data']['splits']['test'] = [cfg['data']['splits']['test'][0], '2025-12-31']
+    assert preparation_signature(schedule) == preparation_signature(cfg)
+    ensure_work_signature(tmp_path, schedule)
+    record = json.loads((tmp_path/'_preparation_v2.json').read_text())
+    assert record['data_config']['end'] == '2025-12-31T23:30:00'
+    assert record['signature'] == preparation_signature(cfg)
+    content = deepcopy(cfg)
+    content['data']['precip_log_scale'] = cfg['data']['precip_log_scale']*2
+    with pytest.raises(ValueError, match='different preparation configuration'):
+        ensure_work_signature(tmp_path, content)
+
+
+def test_finalize_rejects_month_moments_from_other_hours_v2(tmp_path):
+    cfg = load_config_v2(make_synthetic_v2(tmp_path/'stale_v2', load_config_v2('configs/discover_v2.yaml')))
+    prepare_month(cfg, '2025-08')
+    prepare_month(cfg, '2025-09')
+    path = Path(cfg['data']['prepared'])/'_monthly_v2'/'2025-08_v2.json'
+    metadata = json.loads(path.read_text())
+    metadata['condition']['n'] += 1
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match='training hours'):
+        finalize_prepare(cfg)
+
+
 def test_gradient_loss_distinguishes_detail_v2():
     area, importance = torch.ones(1, 16, 16), torch.ones(1)
     low = torch.ones(1, 5, 16, 16)

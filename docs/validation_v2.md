@@ -54,8 +54,8 @@ and the annual runbook.
   run in the session that added them, in a temporary CPU environment.
 - Verified in this workspace, without a Python environment for the full suite:
   `bash -n` on every script; `py_compile` on the changed modules; the annual
-  calendar replayed directly, giving 8,760 train / 1,440 val / 1,368 test hours,
-  11,568 paired hours, 16 preparation months, both two-day gaps excluded and
+  calendar replayed directly, giving 8,760 train / 1,440 val / 816 test hours,
+  11,016 paired hours, 16 preparation months, both two-day gaps excluded and
   overlapping splits rejected; `coverage_v2` exercised against a stubbed
   manifest, producing valid JSON, correct per-month missing-source counts and
   one sampled entry per month with paired data; and the submission helper's
@@ -68,9 +68,7 @@ and the annual runbook.
 - Re-run `python -m pytest -q` in the project environment before relying on the
   combined 45-test count; it has not been executed in one workspace as a whole.
 
-Not validated: whether Discover actually holds paired inputs through March 31,
-2026, whether the 2024-12 and 2026 months have been regridded with QV2M and SLP,
-and the roughly 2.3 TiB the annual archive needs. The `coverage`
+Not validated: the roughly 2.1 TiB the annual archive needs. The `coverage`
 command reports the first two; the quota must be checked directly.
 
 OMEGA500 was removed from every v2 preset after a scan of the regridded archive:
@@ -78,3 +76,26 @@ OMEGA500 was removed from every v2 preset after a scan of the regridded archive:
 only that variable, and preparation fails a whole month on any predictor gap.
 The v2 dynamic set is now PRECTOT, U10M, V10M, TQV, QV2M and SLP, so the
 condition tensor holds 30 channels instead of 31.
+
+## Preparation is keyed on content, not on the calendar
+
+Discover preparation showed the GEOS-FP source ending at 2026-03-08 23:30, which
+shortened the test split to 816 hours after fifteen of sixteen months had already
+been prepared. `preparation_signature` now covers only what stored arrays depend
+on — predictors, roots, transforms, statistics stride and the surface bytes — and
+`SCHEDULE_KEYS` (`start`, `end`, `splits`) are excluded, so a changed split
+boundary reuses existing shards. Two checks replace the discarded hash equality:
+finalization already compared each month's `entry_ids` against the current
+manifest, and it now also requires each month's stored moments to cover exactly
+that month's training hours under the current splits, backed by the existing
+whole-archive count check in `finish_archive`.
+
+Exercised directly against the real functions in this workspace (xarray and scipy
+stubbed; neither is used by these code paths): a fresh record is written; a
+split/end-only change keeps the signature stable and refreshes the stored record;
+a changed predictor list is rejected; changed surface-file bytes are rejected; a
+legacy record written before `static_sha256` was stored separately migrates
+instead of failing; loose unversioned shards are still rejected. A legacy record
+cannot be byte-checked against the surface file, which is stated in the code.
+Two pytest cases cover the guard and a tampered month; neither has been run in a
+full environment from here.

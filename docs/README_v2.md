@@ -113,7 +113,7 @@ v1 required variables, so files predating QV2M/SLP are skipped rather
 than repaired; `scripts/repair_lowres_predictors_v2.py` lists them and, with
 `--move-aside`, stages them for rebuilding. The regridded archive is shared with
 v1 and stores every optional state variable the GEOS source has. The annual
-prepared archive needs roughly 2.3 TiB and does not reuse the 2025 one.
+prepared archive needs roughly 2.1 TiB and does not reuse the 2025 one.
 
 For the complete copy/paste workflow, follow the
 [Discover runbook](runbook_discover_v2.md). From the project root,
@@ -157,7 +157,11 @@ month list is passed to the array; task numbers index this list. There is no
 `PREP_YEAR` setting. `discover_v2.yaml` requests 12 tasks and
 `discover_annual_v2.yaml` requests 16. Preparation resumes complete
 shards and refuses incompatible metadata. Changes to external static-file bytes
-invalidate resumable preparation. Full preparation checks predictors on all
+invalidate resumable preparation, while changed dates or split boundaries do not:
+shards are keyed on predictors, roots, transforms, statistics stride and the
+surface bytes. Re-run preparation for the months whose hours changed; finalization
+rejects any month whose stored moments no longer match its training hours under
+the current splits. Full preparation checks predictors on all
 paired hours. The read-only audit checks representative hours only.
 
 The fresh regression batch job runs this benchmark automatically. To run it
@@ -253,7 +257,9 @@ alone is not failure of a probabilistic model.
 The original `discover_v2.yaml` split remains January–August 2025 training,
 September–mid-October validation, and late October–December test. The additional
 annual preset trains December 2024–November 2025, validates December 3, 2025–January
-31, 2026, and tests February 3–March 31, 2026, retaining two-day gaps. This covers
+31, 2026, and tests February 3–March 8, 2026, retaining two-day gaps. The test
+split ends where GEOS-FP does; held-out seasons from other years are a later
+experiment and do not change training or validation here. This covers
 all training months but mainly cool-season validation/test. It does not establish
 all-season held-out skill, and the additional input availability is unverified.
 Normalization uses all training hours only; `stats_v2.json.training_coverage`
