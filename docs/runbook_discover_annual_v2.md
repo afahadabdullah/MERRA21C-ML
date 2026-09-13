@@ -153,24 +153,50 @@ sacct -u "$USER" --starttime today --format=JobID,JobName,State,Elapsed,ExitCode
 ls -lt logs_v2
 ```
 
-One A100, 12 hours per stage. If regression times out, wait for its dependent
-flow job to be canceled, then:
+One A100, 12 hours per stage. Flow starts after the regression job ends in any
+state (`afterany`). It requires an existing `best_v2.pt` to start; a timed-out
+regression job can still provide one. The running regression job is unchanged.
+For the already queued jobs 58370700 and 58370701, deploy the updated code to
+Discover, then replace the pending flow job before it starts. Slurm stores the
+batch script at submission, so changing the file or dependency on 58370701
+would not add automatic continuation to that queued job:
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+bash -c 'test "$(squeue -h -j 58370701 -o %T)" = PENDING && scancel 58370701 && env CONFIG=configs/discover_annual_v2.yaml STAGE=flow RESUME= REGRESSION_CHECKPOINT=runs/merraflow_annual_v2/regression_v2/best_v2.pt sbatch --export=ALL --job-name=flow_v2 --dependency=afterany:58370700 scripts/slurm_train_flow_v2.sh'
+```
+
+If regression needs another 12-hour session before flow starts, submit its
+existing resume command and make a new flow job depend on that new job:
 
 ```bash
 test -f runs/merraflow_annual_v2/regression_v2/last_v2.pt
 reg_job=$(env CONFIG=configs/discover_annual_v2.yaml STAGE=regression RESUME=runs/merraflow_annual_v2/regression_v2/last_v2.pt REGRESSION_CHECKPOINT= sbatch --parsable --export=ALL --job-name=regression_v2 scripts/slurm_train_flow_v2.sh)
 reg_job=${reg_job%%;*}
-env CONFIG=configs/discover_annual_v2.yaml STAGE=flow RESUME= REGRESSION_CHECKPOINT=runs/merraflow_annual_v2/regression_v2/best_v2.pt sbatch --export=ALL --job-name=flow_v2 --dependency="afterok:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh
+env CONFIG=configs/discover_annual_v2.yaml STAGE=flow RESUME= REGRESSION_CHECKPOINT=runs/merraflow_annual_v2/regression_v2/best_v2.pt sbatch --export=ALL --job-name=flow_v2 --dependency="afterany:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh
 ```
 
-Flow alone:
+If automatic submission fails, resume flow manually:
 
 ```bash
 test -f runs/merraflow_annual_v2/flow_v2/last_v2.pt
 env CONFIG=configs/discover_annual_v2.yaml STAGE=flow RESUME=runs/merraflow_annual_v2/flow_v2/last_v2.pt REGRESSION_CHECKPOINT= sbatch --export=ALL --job-name=flow_v2 scripts/slurm_train_flow_v2.sh
 ```
 
-Keep config, GPU count and archive unchanged when resuming. After flow finishes:
+Flow checks Slurm's remaining wall time after every completed epoch. At 40
+minutes or less, or when the last epoch suggests another would not fit safely,
+it stops and the batch script submits one continuation with an `afterany`
+dependency on the current job. The next job resumes `last_v2.pt`. The 40-minute
+threshold can be changed with `FLOW_STOP_MINUTES`; no epoch count per job is
+fixed. Every completed epoch is saved as `last_v2.pt`; epoch 5, 10, ... also
+have durable recovery files and one-member, full-domain PNG comparisons in
+`flow_v2/plots_v2/`.
+The plots compare low-resolution input, regression, flow, HWT reference, and flow
+error for the same validation timestamp, using the production sampler.
+
+Keep config, GPU count and archive unchanged when resuming. Do not increase
+`flow_epochs` between sessions: the checkpoint's optimizer schedule expects the
+original 100-epoch target. After flow finishes:
 
 ```bash
 env CONFIG=configs/discover_annual_v2.yaml CHECKPOINT=runs/merraflow_annual_v2/flow_v2/best_v2.pt SPLIT=val LIMIT=4 sbatch --export=ALL scripts/slurm_predict_v2.sh

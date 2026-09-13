@@ -321,12 +321,20 @@ def test_no_inference_conservation_v2(prepared_v2):
     np.testing.assert_allclose(result, owned, rtol=1e-5, atol=1e-4)
 
 
-def test_two_stages_resume_predict_evaluate_v2(prepared_v2, tmp_path):
+def test_two_stages_resume_predict_evaluate_v2(prepared_v2, tmp_path, monkeypatch):
     cfg = deepcopy(prepared_v2)
     cfg['train']['output'] = str(tmp_path/'run_v2')
     cfg['inference']['output'] = str(tmp_path/'predictions_v2')
     mean = train_v2(cfg, 'regression')
+    monkeypatch.setenv('FLOW_PLOT_INTERVAL', '1')
+    monkeypatch.setattr('merraflow.train_v2.flow_time_left_seconds', lambda: 30*60)
     flow = train_v2(cfg, 'flow', regression_checkpoint=mean)
+    flow_dir = Path(cfg['train']['output'])/'flow_v2'
+    assert torch.load(flow_dir/'last_v2.pt', weights_only=True)['epoch'] == 0
+    assert len(list((flow_dir/'plots_v2').glob('epoch_0001_*_v2.png'))) == 1
+    monkeypatch.setattr('merraflow.train_v2.flow_time_left_seconds', lambda: None)
+    flow = train_v2(cfg, 'flow', resume=flow_dir/'last_v2.pt')
+    assert len(list((flow_dir/'plots_v2').glob('epoch_0002_*_v2.png'))) == 1
     for stage in ('regression', 'flow'):
         last = torch.load(Path(cfg['train']['output'])/f'{stage}_v2'/'last_v2.pt', weights_only=True)
         resumed_cfg = deepcopy(cfg)

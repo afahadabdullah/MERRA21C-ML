@@ -143,7 +143,7 @@ resume and a new dependent flow job:
 test -f runs/merraflow_v2/regression_v2/last_v2.pt
 reg_job=$(STAGE=regression RESUME=runs/merraflow_v2/regression_v2/last_v2.pt REGRESSION_CHECKPOINT= sbatch --parsable --export=ALL --job-name=regression_v2 scripts/slurm_train_flow_v2.sh)
 reg_job=${reg_job%%;*}
-STAGE=flow RESUME= REGRESSION_CHECKPOINT=runs/merraflow_v2/regression_v2/best_v2.pt sbatch --export=ALL --job-name=flow_v2 --dependency="afterok:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh
+STAGE=flow RESUME= REGRESSION_CHECKPOINT=runs/merraflow_v2/regression_v2/best_v2.pt sbatch --export=ALL --job-name=flow_v2 --dependency="afterany:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh
 ```
 
 If flow times out after regression completed, resume flow alone:

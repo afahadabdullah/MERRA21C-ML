@@ -55,6 +55,6 @@ final_job="$(submit --dependency="afterok:$prep_job" --kill-on-invalid-dep=yes s
 printf 'Finalization: %s\n' "$final_job" | tee -a "$submission_log"
 reg_job="$(STAGE=regression RESUME= REGRESSION_CHECKPOINT= submit --job-name=regression_v2 --dependency="afterok:$final_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh)"
 printf 'Regression: %s\n' "$reg_job" | tee -a "$submission_log"
-flow_job="$(STAGE=flow RESUME= REGRESSION_CHECKPOINT="$run_dir/regression_v2/best_v2.pt" submit --job-name=flow_v2 --dependency="afterok:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh)"
+flow_job="$(STAGE=flow RESUME= REGRESSION_CHECKPOINT="$run_dir/regression_v2/best_v2.pt" submit --job-name=flow_v2 --dependency="afterany:$reg_job" --kill-on-invalid-dep=yes scripts/slurm_train_flow_v2.sh)"
 printf 'Flow: %s\n' "$flow_job" | tee -a "$submission_log"
-echo 'Submitted. Follow squeue and logs_v2; failed dependencies cancel downstream jobs.'
+echo 'Submitted. Follow squeue and logs_v2; flow starts after regression ends if a regression checkpoint exists.'

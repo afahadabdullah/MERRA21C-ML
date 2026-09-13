@@ -29,6 +29,23 @@ export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-matplotlib-${SLURM_JOB_ID}"
 CONFIG="${CONFIG:-configs/discover_v2.yaml}"
+if [[ "${STAGE:-regression}" == flow ]]; then
+  # A new submission resumes the same flow run automatically.
+  flow_dir="$(python - "$CONFIG" <<'PY'
+import sys
+from pathlib import Path
+from merraflow.config_v2 import load_config_v2
+print(Path(load_config_v2(sys.argv[1])['train']['output'])/'flow_v2')
+PY
+)"
+  if [[ -z "${RESUME:-}" && -f "$flow_dir/last_v2.pt" ]]; then
+    RESUME="$flow_dir/last_v2.pt"
+  fi
+  if [[ -z "${RESUME:-}" && ! -f "${REGRESSION_CHECKPOINT:-}" ]]; then
+    echo 'Flow needs a completed regression checkpoint; none was found.' >&2
+    exit 1
+  fi
+fi
 NPROC=$(python -c 'import torch; print(torch.cuda.device_count())')
 if (( NPROC < 1 )); then
   echo 'No CUDA GPUs visible in this allocation' >&2
@@ -43,3 +60,27 @@ args=(--config "$CONFIG" --stage "${STAGE:-regression}")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi
 if [[ -n "${RESUME:-}" ]]; then args+=(--resume "$RESUME"); fi
 srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.cli_v2 train "${args[@]}"
+if [[ "${STAGE:-regression}" == flow ]]; then
+  # Training has returned at an epoch boundary. Read the durable checkpoint,
+  # not history.jsonl, which can be one record ahead after an interrupted save.
+  progress="$(python - "$CONFIG" "$flow_dir/last_v2.pt" <<'PY'
+import sys
+import torch
+from merraflow.config_v2 import load_config_v2
+cfg = load_config_v2(sys.argv[1])
+ckpt = torch.load(sys.argv[2], map_location='cpu', weights_only=True)
+if ckpt['version'] != 'v2' or ckpt['stage'] != 'flow':
+    raise ValueError('Expected a v2 flow checkpoint before continuation')
+print(ckpt['epoch']+1, cfg['train']['flow_epochs'])
+PY
+)"
+  read -r completed target <<< "$progress"
+  if (( completed < target )); then
+    next_job="$(env CONFIG="$CONFIG" STAGE=flow RESUME="$flow_dir/last_v2.pt" \
+      REGRESSION_CHECKPOINT= sbatch --parsable --export=ALL --job-name=flow_v2 \
+      --dependency="afterany:${SLURM_JOB_ID}" scripts/slurm_train_flow_v2.sh)"
+    echo "Flow completed $completed/$target epochs; continuation queued as ${next_job%%;*}"
+  else
+    echo "Flow training complete at $completed/$target epochs; no continuation submitted"
+  fi
+fi

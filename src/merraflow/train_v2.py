@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import os
+import subprocess
+import time
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -16,6 +18,7 @@ from .dataset_v2 import PatchDatasetV2
 from .model_v2 import UNetV2, regression_v2
 from .loss_v2 import loss_v2, core_v2
 from .train import device_for, autocast, to_device, atomic_save
+from .slurm_time_v2 import flow_time_left_seconds
 
 
 def file_hash_v2(path):
@@ -143,7 +146,29 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         print(f'V2 {stage}: {sum(x.numel() for x in base.parameters()):,} parameters; world={world}; '
               f'effective_batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
     names = ('total', 'value', 'gradient', 'multiscale', 't2m', 'precip', 'ps', 'u10m', 'v10m')
+    plot_interval = None
+    stop_minutes = None
+    if stage == 'flow':
+        # Wall-time controls do not change the 100-epoch learning-rate schedule.
+        stop_minutes = int(os.getenv('FLOW_STOP_MINUTES', '40'))
+        plot_interval = int(os.getenv('FLOW_PLOT_INTERVAL', '5'))
+        if stop_minutes < 1 or plot_interval < 1:
+            raise ValueError('FLOW_STOP_MINUTES and FLOW_PLOT_INTERVAL must be positive')
+        if rank == 0:
+            print(f'Flow job: resume at epoch {start+1} of {epochs}; stop near '
+                  f'{stop_minutes} minutes remaining; full-domain validation plot '
+                  f'every {plot_interval} epochs', flush=True)
+            if start and start % plot_interval == 0 and not list(
+                    (out/'plots_v2').glob(f'epoch_{start:04d}_*_v2.png')):
+                # A wall-time kill can land after the checkpoint but during
+                # plotting. Recreate that comparison before advancing.
+                from .flow_progress_v2 import plot_flow_progress_v2
+                path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema,
+                                             flow_scale, device, start, out)
+                print(f'Recovered full-domain flow comparison: {path}', flush=True)
+    longest_flow_epoch = 0.
     for epoch in range(start, epochs):
+        epoch_started = time.monotonic() if stage == 'flow' else None
         data.epoch = epoch
         if sampler:
             sampler.set_epoch(epoch)
@@ -218,6 +243,37 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
             if (epoch+1) % tr['checkpoint_interval'] == 0:
                 atomic_save(out/f'epoch_{epoch+1:04d}_v2.pt', payload)
             print(json.dumps(row), flush=True)
+            if stage == 'flow' and (epoch+1) % plot_interval == 0:
+                from .flow_progress_v2 import plot_flow_progress_v2
+                path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema, flow_scale,
+                                             device, epoch+1, out)
+                print(f'Full-domain flow comparison: {path}', flush=True)
+        if stage == 'flow' and epoch+1 < epochs:
+            stop_for_time = False
+            if rank == 0:
+                elapsed = time.monotonic()-epoch_started
+                longest_flow_epoch = max(longest_flow_epoch, elapsed)
+                try:
+                    remaining = flow_time_left_seconds()
+                except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                    # Keep the completed checkpoint and hand off if the Slurm
+                    # query is unavailable, rather than risk an unplanned kill.
+                    print(f'Slurm time-left query failed: {exc}; stopping flow session', flush=True)
+                    stop_for_time = True
+                else:
+                    if remaining is not None:
+                        # Also avoid starting an epoch that is unlikely to fit.
+                        needed = max(stop_minutes*60, 1.2*longest_flow_epoch+600)
+                        stop_for_time = remaining <= needed
+                        print(f'Flow time remaining: {remaining/60:.1f} min; '
+                              f'next-epoch reserve: {needed/60:.1f} min; '
+                              f'continue={not stop_for_time}', flush=True)
+            if world > 1:
+                signal = torch.tensor([int(stop_for_time)], device=device)
+                dist.broadcast(signal, src=0)
+                stop_for_time = bool(signal.item())
+            if stop_for_time:
+                break
     if world > 1:
         dist.destroy_process_group()
     # A resumed run may have an earlier best in the original directory.
