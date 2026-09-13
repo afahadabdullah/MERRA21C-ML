@@ -130,7 +130,22 @@ PY
 
 Training starts only after finalization succeeds.
 
-## 5. Monitor, resume, predict
+## 5. Proposal cache
+
+Required before training, or the loader recomputes rain scores per sample and the
+GPU sits idle:
+
+```bash
+python scripts/build_proposal_cache_v2.py \
+  --config configs/discover_annual_v2.yaml --workers 16
+```
+
+Reads one channel per prepared hour, writes
+`data/paired_hourly_annual_v2/_proposals_v2/size128_stride32.npy` (~74 MB for
+11,016 hours). Rerun after adding hours, or with `--force`. A mismatched cache is
+ignored rather than misread.
+
+## 6. Monitor, resume, predict
 
 ```bash
 squeue -u "$USER"

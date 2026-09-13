@@ -62,7 +62,7 @@ train:
   checkpoint_interval: 5
   batch_size: 2
   accumulate: 8
-  workers: 2
+  workers: 12
   learning_rate: 0.0002
   weight_decay: 0.01
   warmup_steps: 500

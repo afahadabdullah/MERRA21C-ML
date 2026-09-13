@@ -78,6 +78,12 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     sampler = DistributedSampler(data, world, rank, seed=tr['seed']) if world > 1 else None
     vsampler = DistributedSampler(val, world, rank, shuffle=False) if world > 1 else None
     kwargs = dict(batch_size=tr['batch_size'], num_workers=tr['workers'], pin_memory=device.type == 'cuda')
+    if tr['workers']:
+        # Deeper prefetch keeps the GPU fed while workers read patches. Workers are
+        # deliberately NOT persistent: each epoch's patch locations come from
+        # ``data.epoch``, which is set on this copy of the dataset, so surviving
+        # workers would keep resampling the first epoch's locations.
+        kwargs.update(prefetch_factor=tr.get('prefetch', 4))
     loader = DataLoader(data, sampler=sampler, shuffle=False, **kwargs)
     vloader = DataLoader(val, sampler=vsampler, shuffle=False, **kwargs)
     nc = data.archive.index['condition_channels']

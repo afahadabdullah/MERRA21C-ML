@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=4
+#SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs_v2/flow_%j_v2.log

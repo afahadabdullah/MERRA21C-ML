@@ -99,3 +99,30 @@ instead of failing; loose unversioned shards are still rejected. A legacy record
 cannot be byte-checked against the surface file, which is stated in the code.
 Two pytest cases cover the guard and a tampered month; neither has been run in a
 full environment from here.
+
+
+## Training throughput
+
+The first annual regression job reached 2 epochs in 7.7 hours on one A100 while
+its own benchmark measured 0.060 s per optimizer step, i.e. about 5 minutes of
+GPU work per 512-step epoch. The loader was the bottleneck: `proposal()` read a
+full precipitation field and ran a float64 double cumsum for nearly every sample,
+because `DataLoader` workers are rebuilt each epoch and each kept a private
+cache. Measured ~0.85 s per sample with two workers.
+
+Changes: `scripts/build_proposal_cache_v2.py` precomputes the rain scores once per
+(archive, patch size, sampling stride) and `PatchDatasetV2` memory-maps them;
+`crop_v2` reads interior windows by slicing instead of fancy indexing, which
+dominated the 576-pixel context view; `train.workers` 2 to 12 with
+`--cpus-per-gpu=16`; batch 8 with `accumulate: 2` for an unchanged effective batch
+of 16; `prefetch_factor` 4. Persistent workers were tried and rejected: epoch
+patch locations come from `data.epoch` on the parent dataset, so persistent
+workers would resample the first epoch's locations for the whole run.
+
+Verified here against the real functions (torch, xarray and scipy stubbed; none
+are used by these paths): `crop_v2` matches `crop` exactly on interior and
+boundary-clipped windows; the cache loads as a memmap and is ignored when the
+stride, grid or file is wrong; float32 storage costs 6e-8 relative error on a
+sampling weight. Two pytest cases cover both. The end-to-end speedup has not been
+measured on Discover — compare the first epoch's wall time against the 3.8 hours
+above before trusting the fix.\n

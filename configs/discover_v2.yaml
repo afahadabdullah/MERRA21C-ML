@@ -60,9 +60,9 @@ train:
   device: auto
   seed: 2025
   checkpoint_interval: 5
-  batch_size: 2
-  accumulate: 8
-  workers: 2
+  batch_size: 8
+  accumulate: 2
+  workers: 12
   learning_rate: 0.0002
   weight_decay: 0.01
   warmup_steps: 500

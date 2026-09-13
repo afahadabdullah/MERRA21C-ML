@@ -235,6 +235,46 @@ def test_finalize_rejects_month_moments_from_other_hours_v2(tmp_path):
         finalize_prepare(cfg)
 
 
+def test_crop_v2_matches_reference_crop_v2():
+    from merraflow.dataset import crop
+    from merraflow.dataset_v2 import crop_v2
+    field = np.random.default_rng(3).normal(size=(6, 120, 160)).astype('float32')
+    for y, x, size, halo in [(40, 60, 32, 8), (0, 0, 32, 0), (0, 0, 32, 8),
+                             (88, 128, 32, 0), (100, 140, 32, 16), (60, 80, 64, 0)]:
+        np.testing.assert_array_equal(crop_v2(field, y, x, size, halo), crop(field, y, x, size, halo))
+
+
+def test_proposal_cache_matches_computed_scores_v2(prepared_v2):
+    from merraflow.dataset_v2 import PatchDatasetV2, proposal_cache_paths
+    cfg = deepcopy(prepared_v2)
+    root = Path(cfg['data']['prepared'])
+    plain = PatchDatasetV2(root, 'train', cfg['patch'], 4, seed=0)
+    assert plain.cached_scores is None and plain.detail
+    entries = [e for e in plain.archive.index['entries'] if e['split'] == 'train']
+    ids = [e['id'] for e in entries]
+    scores = np.stack([plain.rain_score(e) for e in entries]).astype('float32')
+    expected = {e['id']: plain.proposal(e).copy() for e in entries}
+    scores_path, meta_path = proposal_cache_paths(root, cfg['patch'])
+    scores_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(scores_path, scores)
+    meta_path.write_text(json.dumps({'size': cfg['patch']['size'],
+                                     'sampling_stride': cfg['patch']['sampling_stride'],
+                                     'candidates': int(len(plain.yy)),
+                                     'shape': list(plain.archive.shape), 'ids': ids}))
+    try:
+        cached = PatchDatasetV2(root, 'train', cfg['patch'], 4, seed=0)
+        assert cached.cached_scores is not None and cached.cached_rows == {i: r for r, i in enumerate(ids)}
+        for entry in entries:
+            np.testing.assert_allclose(cached.proposal(entry), expected[entry['id']], rtol=1e-5, atol=1e-8)
+        # A cache built for another candidate grid must be ignored, not misread.
+        meta = json.loads(meta_path.read_text())
+        meta_path.write_text(json.dumps({**meta, 'sampling_stride': meta['sampling_stride']+1}))
+        assert PatchDatasetV2(root, 'train', cfg['patch'], 4, seed=0).cached_scores is None
+    finally:
+        scores_path.unlink()
+        meta_path.unlink()
+
+
 def test_gradient_loss_distinguishes_detail_v2():
     area, importance = torch.ones(1, 16, 16), torch.ones(1)
     low = torch.ones(1, 5, 16, 16)

@@ -66,6 +66,34 @@ hours for one conditioning channel. This is an availability decision, not a
 measured feature-importance result; add it back through an ablation if the
 stream is later complete.
 
+## Throughput: build the proposal cache before training
+
+Patch sampling needs box means of `log1p(rain)` over the fixed candidate grid for
+whichever hour a sample draws. Computed inside the loader that costs a full-field
+read and a float64 double cumsum **per sample**, because workers are rebuilt each
+epoch and each holds its own cache, so nearly every draw misses. On the annual
+archive that left the A100 idle about 98% of the time: 0.06 s of GPU work per
+optimizer step against roughly 0.85 s of loading per sample.
+
+The scores depend only on the archive and on `patch.size`/`patch.sampling_stride`,
+so build them once:
+
+```bash
+python scripts/build_proposal_cache_v2.py --config configs/discover_annual_v2.yaml --workers 16
+```
+
+This writes `_proposals_v2/size<size>_stride<stride>.npy` plus a `.json` listing
+the hours it covers (about 6.7 KB per hour at the 128/32 default). Training
+memory-maps it; a missing or mismatched cache silently falls back to computing
+the same value, so the run is never wrong, only slower. Rerun it after preparing
+more hours, or with `--force`.
+
+Two settings matter alongside it. `train.workers` is 12 and the training job asks
+for `--cpus-per-gpu=16`; the default batch is 8 with `accumulate: 2`, keeping the
+effective batch at 16 while cutting loader round trips. Workers are deliberately
+not persistent: epoch patch locations come from `data.epoch` on the parent
+dataset, so surviving workers would resample the first epoch forever.
+
 ## Losses and why they do not simply sharpen every image
 
 Training targets are five standardized transformed residuals. Only precipitation
