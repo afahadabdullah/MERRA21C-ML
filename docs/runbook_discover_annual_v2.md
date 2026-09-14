@@ -239,3 +239,19 @@ Use a fresh `OUTPUT` directory for another checkpoint or rerun; the script
 refuses to mix or overwrite prediction members. The default `SPLIT=test` is
 for final evaluation after validation-based checkpoint choice. A single
 validation image or timestamp is not a held-out test result.
+
+To include the 23 February 2026 event in a five-case test diagnostic, set
+`SAMPLES=5 INCLUDE_DATE=2026-02-23`. The script selects that UTC day's hour
+with the highest domain-area-weighted HWT precipitation, then draws four test
+hours from other dates using the fixed seed. `metrics_v2.json` records the selected hour
+and selection rule. Because one case is chosen using observed precipitation,
+the five-case average is an event-focused diagnostic, not a random estimate of
+overall test skill:
+
+```bash
+env CONFIG=configs/discover_annual_v2.yaml \
+    CHECKPOINT=runs/merraflow_annual_v2/flow_v2/best_v2.pt \
+    SPLIT=test SAMPLES=5 MEMBERS=5 INCLUDE_DATE=2026-02-23 \
+    OUTPUT=runs/merraflow_annual_v2/best_flow_feb23_five_cases_v2 \
+    sbatch --export=ALL scripts/slurm_test_best_model_v2.sh
+```

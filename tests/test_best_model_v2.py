@@ -38,3 +38,30 @@ def test_zoom_stays_inside_small_domain_and_contains_rain_event():
     ys, xs = DIAGNOSTIC.event_window(rain, .4)
     assert 0 <= ys.start < 21 < ys.stop <= rain.shape[0]
     assert 0 <= xs.start < 37 < xs.stop <= rain.shape[1]
+
+
+def test_include_date_selects_wettest_hour_then_four_other_test_hours():
+    class Archive:
+        static = {'area': np.ones((2, 2))}
+        index = {'entries': [
+            {'id': f'20260223_{hour:02d}30', 'time': f'2026-02-23T{hour:02d}:30:00', 'split': 'test'}
+            for hour in (0, 6, 12)
+        ] + [
+            {'id': f'20260224_{hour:02d}30', 'time': f'2026-02-24T{hour:02d}:30:00', 'split': 'test'}
+            for hour in (0, 6, 12, 18)
+        ]}
+
+        def array(self, entry, name):
+            assert name == 'truth'
+            field = np.zeros((5, 2, 2))
+            field[1] = 10 if entry['id'] == '20260223_1230' else 1
+            return field
+
+    selected, meta = DIAGNOSTIC.select_entries(Archive(), 'test', 5, None, 317, '2026-02-23')
+    assert len(selected) == len({e['id'] for e in selected}) == 5
+    assert selected[0]['id'] == meta['event_id'] == '20260223_1230'
+    assert meta['event_mean_precip_mm_h'] == 10
+    assert all(e['split'] == 'test' for e in selected)
+    assert sum(e['time'].startswith('2026-02-23') for e in selected) == 1
+    with pytest.raises(ValueError, match='No test entries'):
+        DIAGNOSTIC.select_entries(Archive(), 'test', 5, None, 317, '2026-02-25')

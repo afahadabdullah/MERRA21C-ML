@@ -27,6 +27,7 @@ args=(--config "${CONFIG:-configs/discover_annual_v2.yaml}"
       --split "${SPLIT:-test}" --samples "${SAMPLES:-3}" --members "${MEMBERS:-5}")
 if [[ -n "${CHECKPOINT:-}" ]]; then args+=(--checkpoint "$CHECKPOINT"); fi
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi
+if [[ -n "${INCLUDE_DATE:-}" ]]; then args+=(--include-date "$INCLUDE_DATE"); fi
 if [[ -n "${TIMESTAMPS:-}" ]]; then
   read -r -a timestamp_args <<< "$TIMESTAMPS"
   args+=(--timestamps "${timestamp_args[@]}")

@@ -21,11 +21,13 @@ from merraflow.physics_v2 import TARGETS_V2, UNITS_V2
 from merraflow.train_v2 import file_hash_v2
 
 
-def select_entries(archive, split, count, timestamps, seed):
+def select_entries(archive, split, count, timestamps, seed, include_date=None):
     entries = [e for e in archive.index['entries'] if e['split'] == split]
     if not entries:
         raise ValueError(f'No {split} entries in the v2 archive')
     if timestamps:
+        if include_date:
+            raise ValueError('--timestamps and --include-date cannot be combined')
         selected = []
         for stamp in timestamps:
             matches = [e for e in entries if stamp in (e['id'], e['time'])]
@@ -37,9 +39,29 @@ def select_entries(archive, split, count, timestamps, seed):
         return selected, {'strategy': 'explicit timestamps'}
     if not 1 <= count <= len(entries):
         raise ValueError(f'Choose 1..{len(entries)} {split} samples')
+    event = None
+    selection = {'strategy': 'seeded random', 'seed': seed}
+    if include_date:
+        candidates = [e for e in entries if e['time'].startswith(include_date+'T')]
+        if not candidates:
+            raise ValueError(f'No {split} entries on {include_date}')
+        area = np.asarray(archive.static['area'], dtype='float64')
+        area_total = area.sum()
+        if area_total <= 0:
+            raise ValueError('Archive has no positive grid area')
+        def mean_rain(entry):
+            rain = archive.array(entry, 'truth')[1]
+            return float(np.sum(rain*area)/area_total)
+        event = max(candidates, key=mean_rain)
+        selection = {'strategy': 'highest area-weighted HWT precipitation on requested date, plus seeded random hours',
+                     'seed': seed, 'event_date': include_date, 'event_id': event['id'],
+                     'event_mean_precip_mm_h': mean_rain(event)}
+    remaining = [e for e in entries if event is None or not e['time'].startswith(include_date+'T')]
+    if count-int(event is not None) > len(remaining):
+        raise ValueError(f'Not enough other {split} hours for {count} samples')
     rng = np.random.default_rng(seed)
-    indices = sorted(rng.choice(len(entries), size=count, replace=False))
-    return [entries[i] for i in indices], {'strategy': 'seeded random', 'seed': seed}
+    indices = sorted(rng.choice(len(remaining), size=count-int(event is not None), replace=False))
+    return ([event] if event is not None else [])+[remaining[i] for i in indices], selection
 
 
 def event_window(rain, fraction):
@@ -156,6 +178,7 @@ def main():
     parser.add_argument('--samples', type=int, default=3)
     parser.add_argument('--members', type=int, default=5)
     parser.add_argument('--timestamps', nargs='+', help='Exact IDs or ISO timestamps in the selected split')
+    parser.add_argument('--include-date', help='Include the wettest HWT hour on this UTC date (YYYY-MM-DD), then sample remaining cases')
     parser.add_argument('--sample-seed', type=int, default=317)
     parser.add_argument('--zoom-fraction', type=float, default=.4)
     args = parser.parse_args()
@@ -169,7 +192,8 @@ def main():
     if ckpt['stage'] != 'flow':
         raise ValueError('Use a v2 flow checkpoint for this diagnostic')
     archive = ArchiveV2(cfg['data']['prepared'])
-    selected, selection = select_entries(archive, args.split, args.samples, args.timestamps, args.sample_seed)
+    selected, selection = select_entries(archive, args.split, args.samples, args.timestamps,
+                                         args.sample_seed, args.include_date)
     digest = file_hash_v2(checkpoint)
     out = Path(args.output or Path(cfg['train']['output'])/f'test_best_model_{checkpoint.stem}_m{args.members}_{digest[:12]}_v2')
     if out.exists() and any(out.iterdir()):
