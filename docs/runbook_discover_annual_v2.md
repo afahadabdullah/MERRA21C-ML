@@ -206,3 +206,36 @@ Select on validation, then evaluate the untouched February–March test split. A
 December 2025 event is validation here, not test. See the
 [general runbook](runbook_discover_v2.md) for log naming, partial submission
 failures and restart limits.
+
+For a v1-style, independent multi-member diagnostic, use the dedicated v2 job
+after choosing a flow checkpoint on validation. It samples three seeded,
+previously unseen test hours by default and saves full-domain and rain-event
+zoom maps, area-weighted RMSE for the coarse baseline, regression, one flow
+member and ensemble mean, precipitation skill, and training curves:
+
+```bash
+mkdir -p logs_v2
+env CONFIG=configs/discover_annual_v2.yaml \
+    CHECKPOINT=runs/merraflow_annual_v2/flow_v2/best_v2.pt \
+    SPLIT=test SAMPLES=3 MEMBERS=5 \
+    sbatch --export=ALL scripts/slurm_test_best_model_v2.sh
+```
+
+The default output is `runs/merraflow_annual_v2/test_best_model_<checkpoint>_m5_<hash>_v2/`.
+It contains `metrics_v2.json`, `rmse_summary_v2.png`, per-hour `*_full_v2.png`
+and `*_zoom_v2.png`, and the generated NetCDF members. The selected timestamps
+and checkpoint SHA-256 are recorded in JSON. To inspect the December 3 epoch
+plot's hour with several members, run a **validation** diagnostic separately:
+
+```bash
+env CONFIG=configs/discover_annual_v2.yaml \
+    CHECKPOINT=runs/merraflow_annual_v2/flow_v2/epoch_0025_v2.pt \
+    SPLIT=val TIMESTAMPS=20251203_0030 MEMBERS=5 \
+    OUTPUT=runs/merraflow_annual_v2/epoch25_validation_v2 \
+    sbatch --export=ALL scripts/slurm_test_best_model_v2.sh
+```
+
+Use a fresh `OUTPUT` directory for another checkpoint or rerun; the script
+refuses to mix or overwrite prediction members. The default `SPLIT=test` is
+for final evaluation after validation-based checkpoint choice. A single
+validation image or timestamp is not a held-out test result.
