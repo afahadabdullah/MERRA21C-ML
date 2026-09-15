@@ -260,3 +260,8 @@ env CONFIG=configs/discover_annual_v2.yaml \
 The `unset` makes submission safe from a login shell or an existing interactive
 Slurm allocation; otherwise `--export=ALL` can carry that allocation's memory
 variables into the new batch job and make its internal `srun` reject them.
+
+For the completed five-case run, use the [precipitation audit](precip_audit_v2.md)
+to inspect saved member amounts, wet areas, upper tails, spatial-scale errors,
+spectra, calibration and possible displacement. It runs as a CPU compute job
+and reuses `best_flow_feb23_five_cases_v2/predictions_v2`.
