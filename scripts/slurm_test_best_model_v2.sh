@@ -23,6 +23,10 @@ cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-test-v2-${SLURM_JOB_ID}"
+# A job submitted from an interactive Slurm allocation can inherit its memory
+# request alongside this job's --mem-per-gpu value. srun rejects multiple
+# SLURM_MEM_PER_* variables even though sbatch accepted the new allocation.
+unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 args=(--config "${CONFIG:-configs/discover_annual_v2.yaml}"
       --split "${SPLIT:-test}" --samples "${SAMPLES:-3}" --members "${MEMBERS:-5}")
 if [[ -n "${CHECKPOINT:-}" ]]; then args+=(--checkpoint "$CHECKPOINT"); fi

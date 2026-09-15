@@ -249,9 +249,14 @@ the five-case average is an event-focused diagnostic, not a random estimate of
 overall test skill:
 
 ```bash
+unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE SLURM_MEM_PER_GPU
 env CONFIG=configs/discover_annual_v2.yaml \
     CHECKPOINT=runs/merraflow_annual_v2/flow_v2/best_v2.pt \
     SPLIT=test SAMPLES=5 MEMBERS=5 INCLUDE_DATE=2026-02-23 \
     OUTPUT=runs/merraflow_annual_v2/best_flow_feb23_five_cases_v2 \
     sbatch --export=ALL scripts/slurm_test_best_model_v2.sh
 ```
+
+The `unset` makes submission safe from a login shell or an existing interactive
+Slurm allocation; otherwise `--export=ALL` can carry that allocation's memory
+variables into the new batch job and make its internal `srun` reject them.
