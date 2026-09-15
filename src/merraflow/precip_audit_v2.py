@@ -99,6 +99,34 @@ def lag_scan(prediction, truth, area, radius=3):
             'interpretation': 'Prediction sampled at HWT coordinate plus offset; diagnostic only, common interior'}
 
 
+def log_space_audit(fields, area, scale):
+    """Compare decoded log corrections, including the correction HWT needs."""
+    log_truth = np.log1p(np.asarray(fields['HWT'], dtype='float64')/scale)
+    log_regression = np.log1p(np.asarray(fields['regression'], dtype='float64')/scale)
+    records = {}
+    for name, field in fields.items():
+        log_field = np.log1p(np.asarray(field, dtype='float64')/scale)
+        correction = log_field-log_regression
+        peak = np.unravel_index(np.argmax(field), field.shape)
+        records[name] = {
+            'scores_vs_HWT_log_space': deterministic_scores(log_field, log_truth, area),
+            'correction_from_regression': {
+                'mean': weighted_mean(correction, area),
+                'rms': float(np.sqrt(weighted_mean(correction**2, area))),
+                'min': float(correction.min()), 'max': float(correction.max()),
+                'area_fraction_ge': {str(t): weighted_mean(correction >= t, area) for t in (1., 2., 3.)}},
+            'max_rainfall_pixel': {
+                'y': int(peak[0]), 'x': int(peak[1]), 'rain_mm_h': float(field[peak]),
+                'HWT_mm_h': float(fields['HWT'][peak]), 'regression_mm_h': float(fields['regression'][peak]),
+                'log_correction_from_regression': float(correction[peak])}}
+    return {'precip_log_scale_mm_h': float(scale), 'fields': records,
+            'interpretation': 'At each pixel, (P + scale)/(Preg + scale) = exp(log correction). '
+                              'HWT correction is the observed correction relative to regression.',
+            'limits': 'Computed from decoded, nonnegative rainfall. Negative pre-clipping endpoints cannot be recovered. '
+                      'Flow-mean log is log of the physical ensemble mean, not mean member log. '
+                      'Saved rainfall alone cannot validate checkpoint flow_scale or raw ODE endpoints.'}
+
+
 def audit_case(ensemble, regression, baseline, truth, area, patch, precip_scale):
     validate_fields(ensemble, regression, baseline, truth, area)
     if not np.isfinite(precip_scale) or precip_scale <= 0:
@@ -148,12 +176,77 @@ def audit_case(ensemble, regression, baseline, truth, area, patch, precip_scale)
     decoded_log_mean = np.expm1(log_members.mean(0))*precip_scale
     gap = ensemble.mean(0)-decoded_log_mean
     return {'members': len(ensemble), 'profiles': profiles, 'scores': scores,
+            'log_space': log_space_audit(fields, area, precip_scale),
             'probabilistic': probabilistic, 'rank_histogram': rank_histogram(ensemble, truth, area),
             'regional': regional, 'coarsened': coarsened, 'spectra': spectra,
             'precipitation_skill': rain_skill, 'displacement_on_8_pixel_blocks': displacement,
             'postdecode_log_residual_shrinkage': amplitude,
             'jensen_gap': {'mean_mm_h': weighted_mean(gap, area),
                            'note': 'Arithmetic member mean minus decoded mean log rainfall; expected from convexity, not proof of excess variance'}}
+
+
+def identity_differences(reference, actual):
+    return {name: {'reference': reference[name], 'actual': actual[name]}
+            for name in IDENTITY_KEYS if reference[name] != actual[name]}
+
+
+def describe_differences(reference, actual):
+    return '; '.join(f'{name}: {values["reference"]!r} -> {values["actual"]!r}'
+                     for name, values in identity_differences(reference, actual).items())
+
+
+def member_identity(ds, path, entry, fingerprint, member):
+    """Check lightweight metadata before loading any rainfall arrays."""
+    if (ds.attrs.get('version') != 'v2' or ds.attrs.get('stage') != 'flow'
+            or ds.attrs.get('dataset_fingerprint') != fingerprint
+            or ds.attrs.get('split') != entry['split'] or ds.attrs.get('ensemble_member') != member
+            or ds.sizes.get('time') != 1 or 'time' not in ds.coords
+            or ds.time.values[0] != np.datetime64(entry['time'])):
+        raise ValueError(f'{path}: incompatible v2 member/archive/time/split')
+    if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed')):
+        raise ValueError(f'{path}: missing sampler/checkpoint provenance')
+    return {name: ds.attrs[name].item() if isinstance(ds.attrs[name], np.generic) else ds.attrs[name]
+            for name in IDENTITY_KEYS}
+
+
+def preflight(entries, root, fingerprint, expected_members):
+    """Check all member metadata and partition hours by exact saved identity."""
+    plans, groups, count = [], [], expected_members
+    for entry in entries:
+        paths = list(root.glob(f'{entry["id"]}_m*_v2.nc'))
+
+        def number(path):
+            match = re.fullmatch(re.escape(entry['id'])+r'_m(\d+)_v2.nc', path.name)
+            if not match:
+                raise ValueError(f'Invalid member filename: {path}')
+            return int(match[1])
+
+        paths.sort(key=number)
+        if [number(p) for p in paths] != list(range(len(paths))):
+            raise ValueError(f'{entry["id"]}: missing or repeated member numbers')
+        if len(paths) < 2 or (count is not None and len(paths) != count):
+            raise ValueError(f'{entry["id"]}: incomplete ensemble or fewer than two members')
+        count = len(paths)
+        identity, seeds = None, []
+        for member, path in enumerate(paths):
+            with xr.open_dataset(path) as ds:
+                key = member_identity(ds, path, entry, fingerprint, member)
+                if identity is not None and key != identity:
+                    raise ValueError(f'{path}: mixed checkpoint or sampler settings within {entry["id"]}; '
+                                     f'compared with {paths[0]}: {describe_differences(identity, key)}. '
+                                     'Grouping cannot repair a mixed ensemble.')
+                identity = key
+                seeds.append(int(ds.attrs['seed']))
+        if len(set(seeds)) != count:
+            raise ValueError(f'{entry["id"]}: repeated member seeds')
+        group = next((g for g in groups if g['identity'] == identity), None)
+        if group is None:
+            group = {'id': f'group_{len(groups)+1:03d}', 'identity': identity, 'timestamps': [],
+                     'differences_from_first_group': identity_differences(groups[0]['identity'], identity) if groups else {}}
+            groups.append(group)
+        group['timestamps'].append(entry['id'])
+        plans.append({'entry': entry, 'paths': paths, 'identity': identity, 'seeds': seeds, 'group': group['id']})
+    return plans, groups, count
 
 
 def load_members(paths, entry, fingerprint, static, expected_members=None):
@@ -163,17 +256,9 @@ def load_members(paths, entry, fingerprint, static, expected_members=None):
     members, regression, identity, seeds = [], None, None, []
     for member, path in enumerate(paths):
         with xr.open_dataset(path) as ds:
-            if (ds.attrs.get('version') != 'v2' or ds.attrs.get('stage') != 'flow'
-                    or ds.attrs.get('dataset_fingerprint') != fingerprint
-                    or ds.attrs.get('split') != entry['split'] or ds.attrs.get('ensemble_member') != member
-                    or ds.sizes.get('time') != 1 or ds.time.values[0] != np.datetime64(entry['time'])):
-                raise ValueError(f'{path}: incompatible v2 member/archive/time/split')
-            if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed')):
-                raise ValueError(f'{path}: missing sampler/checkpoint provenance')
-            key = {name: ds.attrs[name].item() if isinstance(ds.attrs[name], np.generic) else ds.attrs[name]
-                   for name in IDENTITY_KEYS}
+            key = member_identity(ds, path, entry, fingerprint, member)
             if identity is not None and key != identity:
-                raise ValueError(f'{path}: mixed checkpoint or sampler settings')
+                raise ValueError(f'{path}: mixed checkpoint or sampler settings; {describe_differences(identity, key)}')
             identity = key
             seeds.append(int(ds.attrs['seed']))
             for name in ('lat', 'lon'):
@@ -193,7 +278,8 @@ def load_members(paths, entry, fingerprint, static, expected_members=None):
     return np.stack(members), regression, identity, seeds
 
 
-def run_audit(cfg, predictions, output=None, split='test', timestamps=None, members=None, plots=True):
+def run_audit(cfg, predictions, output=None, split='test', timestamps=None, members=None, plots=True,
+              group_by_identity=False):
     if split not in ('val', 'test'):
         raise ValueError('Audit requires val or test')
     root, archive_root = Path(predictions), Path(cfg['data']['prepared'])
@@ -220,32 +306,69 @@ def run_audit(cfg, predictions, output=None, split='test', timestamps=None, memb
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'{out} is not empty; choose a fresh --output')
     out.mkdir(parents=True, exist_ok=True)
-    reports, identity, count = [], None, members
-    for entry in entries:
-        paths = list(root.glob(f'{entry["id"]}_m*_v2.nc'))
-        def number(path):
-            match = re.fullmatch(re.escape(entry['id'])+r'_m(\d+)_v2.nc', path.name)
-            if not match:
-                raise ValueError(f'Invalid member filename: {path}')
-            return int(match[1])
-        paths.sort(key=number)
-        if [number(p) for p in paths] != list(range(len(paths))):
-            raise ValueError(f'{entry["id"]}: missing or repeated member numbers')
+    plans, groups, count = preflight(entries, root, index['fingerprint'], members)
+    provenance = {'split': split, 'members': count, 'archive_fingerprint': index['fingerprint'],
+                  'groups': groups, 'cases': [
+                      {'id': p['entry']['id'], 'group': p['group'], 'seeds': p['seeds'],
+                       'prediction_files': [str(path.resolve()) for path in p['paths']]} for p in plans]}
+    write_json(out/'provenance_v2.json', provenance)
+    differences = [f'{g["id"]} ({", ".join(g["timestamps"])}), compared with '
+                   f'{groups[0]["id"]} ({", ".join(groups[0]["timestamps"])}): '
+                   f'{describe_differences(groups[0]["identity"], g["identity"])}' for g in groups[1:]]
+    print(f'Provenance preflight: {len(plans)} hours, {len(groups)} compatible group(s).', flush=True)
+    for difference in differences:
+        print(difference, flush=True)
+    if len(groups) > 1 and not group_by_identity:
+        raise ValueError('Mixed checkpoint or sampler settings across timestamps:\n' + '\n'.join(differences)
+                         + f'\nDetails: {out}/provenance_v2.json. No case metrics computed. '
+                         'Use --group-by-identity (batch: GROUP_BY_IDENTITY=1) with a fresh output directory '
+                         'to audit groups separately, or select matching --timestamps.')
+    reports = []
+    for plan in plans:
+        entry, paths = plan['entry'], plan['paths']
         ensemble, regression, key, seeds = load_members(paths, entry, index['fingerprint'], static, count)
-        if identity is not None and key != identity:
-            raise ValueError('Mixed checkpoint or sampler settings across timestamps')
-        identity, count = key, len(ensemble)
+        if key != plan['identity'] or seeds != plan['seeds']:
+            raise ValueError(f'{entry["id"]}: member metadata changed after preflight; use stable prediction files')
         truth = np.asarray(np.load(archive_root/entry['id']/'truth_v2.npy', mmap_mode='r')[1])
         baseline = np.asarray(np.load(archive_root/entry['id']/'baseline_v2.npy', mmap_mode='r')[1])
-        print(f'Auditing {entry["id"]}: {count} members', flush=True)
+        print(f'Auditing {entry["id"]}: {count} members, {plan["group"]}', flush=True)
         report = audit_case(ensemble, regression, baseline, truth, static['area'], cfg['patch'], stats['precip_log_scale'])
         report.update(id=entry['id'], time=entry['time'], split=split, seeds=seeds,
+                      identity=key, group=plan['group'],
                       prediction_files=[str(p.resolve()) for p in paths])
+        residual_stats = stats.get('residual')
+        report['log_space']['archive_residual_normalization'] = (
+            {'precip_mean': residual_stats['mean'][1], 'precip_std': residual_stats['std'][1]}
+            if residual_stats else None)
         write_json(out/f'{entry["id"]}_audit_v2.json', report)
         if plots:
             from .precip_plots_v2 import plot_case
             plot_case(out, report, ensemble, regression, baseline, truth)
         reports.append(report)
+    for group in groups:
+        destination = out if len(groups) == 1 else out/'groups_v2'/group['id']
+        destination.mkdir(parents=True, exist_ok=True)
+        group_reports = [r for r in reports if r['group'] == group['id']]
+        write_group_reports(destination, group_reports, root, cfg, split, count, index['fingerprint'],
+                            group['identity'], len(available))
+    if len(groups) > 1:
+        write_json(out/'summary_v2.json', {
+            **provenance, 'hours_audited': len(reports),
+            'aggregation': 'No combined scores: checkpoint/sampler identities differ; see groups_v2/<group>/summary_v2.json'})
+        lines = ['# V2 precipitation audit: separate provenance groups', '',
+                 f'{len(reports)} {split} hours; {count} members per hour. No combined scores.', '',
+                 'Case JSONs and plots are in this directory. Each group has its own report, CSV and summary.', '',
+                 'Different groups may contain different weather cases; their averages are not a controlled model comparison.', '']
+        for group in groups:
+            lines += [f'- [{group["id"]}](groups_v2/{group["id"]}/report_v2.md): ' + ', '.join(group['timestamps'])]
+        lines += ['', '## Saved metadata differences', '', *differences, '',
+                  'Full identities and input files: [provenance_v2.json](provenance_v2.json).']
+        (out/'report_v2.md').write_text('\n'.join(lines)+'\n')
+    return out
+
+
+def write_group_reports(out, reports, root, cfg, split, count, fingerprint, identity, available_count):
+    """Summarize hours only after ensuring they share one exact identity."""
     selection_path = root.parent/'metrics_v2.json'
     selection = None
     if selection_path.is_file():
@@ -255,9 +378,9 @@ def run_audit(cfg, predictions, output=None, split='test', timestamps=None, memb
     # Recalculate each hour first; these are means of hour-level metrics, not
     # pooled spatial RMSE. Event case and random cases remain separately visible.
     summary = {'split': split, 'hours_audited': len(reports), 'members': count,
-               'archive_fingerprint': index['fingerprint'], 'identity': identity,
+               'archive_fingerprint': fingerprint, 'identity': identity,
                'config_patch_assumption': cfg['patch'], 'selection': selection,
-               'timestamps': [r['id'] for r in reports], 'other_split_hours_not_audited': len(available)-len(reports),
+               'timestamps': [r['id'] for r in reports], 'other_split_hours_not_audited': available_count-len(reports),
                'aggregation': 'Equal-weight mean of per-hour scores; not pooled RMSE or full-test skill',
                'limits': ['Prepared HWT snapshots versus coarse hourly means; this audit cannot verify raw averaging windows.',
                           'Tile regions use supplied config; old predictions do not store tile geometry.',
@@ -293,8 +416,10 @@ def run_audit(cfg, predictions, output=None, split='test', timestamps=None, memb
               '- Overlap versus single-tile error differences also depend on where storms fall; they do not establish a stitching bug.',
               '- The log-residual shrinkage sweep is a post-decoding diagnostic. Do not choose a production amplitude on test cases.',
               '- Maps use a common linear scale covering the maximum across all displayed fields; extreme values are not clipped.', '',
+              '- The companion errors_detail map uses percentile color limits, labels the saturated fraction and marks the largest absolute value.',
+              '- The log_space JSON compares each decoded log correction with the HWT correction needed from regression; it also locates peak rainfall pixels.',
+              '- Positive log corrections amplify P + scale exponentially. This explains amplification, not why the model generated the correction.', '',
               '## Limits', '', *[f'- {note}' for note in summary['limits']]]
     if selection:
         lines += ['', f'Original case selection: {selection}.']
     (out/'report_v2.md').write_text('\n'.join(lines)+'\n')
-    return out

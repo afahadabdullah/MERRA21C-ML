@@ -14,11 +14,13 @@ def main():
     parser.add_argument('--timestamps', nargs='+', help='Optional exact archive IDs or ISO times')
     parser.add_argument('--members', type=int, help='Expected member count; default: infer and require same count across hours')
     parser.add_argument('--no-plots', action='store_true')
+    parser.add_argument('--group-by-identity', action='store_true',
+                        help='Audit different checkpoint/sampler identities in separate groups; never mix their scores')
     args = parser.parse_args()
     if args.members is not None and args.members < 2:
         parser.error('--members must be at least two')
     result = run_audit(load_config_v2(args.config), args.predictions, args.output, args.split,
-                       args.timestamps, args.members, not args.no_plots)
+                       args.timestamps, args.members, not args.no_plots, group_by_identity=args.group_by_identity)
     print(f'Rainfall audit written to {result}', flush=True)
 
 

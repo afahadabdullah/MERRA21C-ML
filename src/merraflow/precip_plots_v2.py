@@ -44,6 +44,24 @@ def plot_case(out, report, ensemble, regression, baseline, truth):
         fig.colorbar(im, ax=ax, shrink=.7, label='mm h⁻¹')
     finish(fig, out/f'{stamp}_errors_v2.png', title)
 
+    # Keep the full-range maps above. A second view exposes ordinary errors
+    # when a handful of extreme pixels controls the original color limits.
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+    bound = max(.01, max(float(np.percentile(np.abs(x), 99.5)) for x in errors))
+    for ax, value, label in zip(axes, [*errors, ensemble.std(0)],
+                                ['Regression − HWT', 'Flow mean − HWT', 'Member standard deviation']):
+        spread = label.startswith('Member')
+        limit = max(.01, float(np.percentile(value, 99.5))) if spread else bound
+        clipped = float(np.mean(np.abs(value) > limit))
+        peak = np.unravel_index(np.argmax(np.abs(value)), value.shape)
+        im = ax.imshow(value, origin='lower', interpolation='nearest', cmap='magma' if spread else 'RdBu_r',
+                       vmin=0 if spread else -limit, vmax=limit)
+        ax.scatter(peak[1], peak[0], marker='*', s=70, facecolor='yellow', edgecolor='black', linewidth=.6)
+        ax.set(title=f'{label}\ncolor-saturated pixels {clipped:.2%}; ★ {value[peak]:.3g} mm h⁻¹', xticks=[], yticks=[])
+        fig.colorbar(im, ax=ax, shrink=.7, extend='max' if spread else 'both', label='mm h⁻¹ (percentile display)')
+    finish(fig, out/f'{stamp}_errors_detail_v2.png',
+           title+'\nDisplay: 99.5th grid-cell percentile (floor 0.01); shared error scale; original data unchanged')
+
     fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
     for name, color in COLORS.items():
         profile = report['profiles'][name]
@@ -67,6 +85,7 @@ def plot_case(out, report, ensemble, regression, baseline, truth):
     axes[0, 2].tick_params(axis='x', rotation=20)
     axes[0, 0].set(title='Exceedance (thin purple: members)', xlabel='Precipitation threshold (mm h⁻¹)', ylabel='Area fraction ≥ threshold', ylim=(1e-6, 1))
     axes[0, 1].set(title='Area-weighted upper quantiles and maximum', ylabel='mm h⁻¹')
+    axes[0, 1].set_yscale('symlog', linthresh=.1)
     axes[1, 0].set(title='RMSE after area-weighted block averaging', xlabel='Block width (grid pixels)', ylabel='mm h⁻¹')
     axes[1, 0].set_xscale('log', base=2)
     axes[1, 0].set_xticks([int(f) for f in report['coarsened']], list(report['coarsened']))

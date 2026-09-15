@@ -27,6 +27,11 @@ args=(--config "${CONFIG:-configs/discover_annual_v2.yaml}"
       --split "${SPLIT:-test}")
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi
 if [[ -n "${MEMBERS:-}" ]]; then args+=(--members "$MEMBERS"); fi
+case "${GROUP_BY_IDENTITY:-0}" in
+  1) args+=(--group-by-identity) ;;
+  0) ;;
+  *) echo 'GROUP_BY_IDENTITY must be 0 or 1' >&2; exit 2 ;;
+esac
 if [[ -n "${TIMESTAMPS:-}" ]]; then
   read -r -a timestamp_args <<< "$TIMESTAMPS"
   args+=(--timestamps "${timestamp_args[@]}")
