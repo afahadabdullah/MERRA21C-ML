@@ -5,6 +5,10 @@ generate new members, modify checkpoints, or submit another job. The code needs
 NumPy, SciPy, xarray, h5netcdf, PyYAML and Matplotlib; the saved-field audit does
 not import Torch. Use the existing project conda environment on Discover.
 
+For new inference with internal normalization/ODE traces, use
+[the Copy1 flow diagnostic](flow_diagnostic_v2.md). It regenerates predictions
+and does not require saved test outputs.
+
 From the Discover login node, enter `bash` first if your prompt uses tcsh, then:
 
 ```bash

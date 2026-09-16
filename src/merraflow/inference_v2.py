@@ -33,7 +33,7 @@ def load_models_v2(cfg, checkpoint, archive, device):
 
 
 @torch.no_grad()
-def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, seed):
+def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, seed, diagnostics=None):
     p, (h, w) = cfg['patch'], archive.shape
     size, halo = p['size'], p['halo']
     noise = np.random.default_rng(seed).standard_normal((5, h, w), dtype=np.float32)
@@ -50,10 +50,17 @@ def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, s
             b = dict(target=z, condition=local[None].to(device), context=broad[None].to(device))
             with autocast(device, cfg['train']['precision']):
                 mean = regression_v2(mean_model, b)
-                prediction = mean if flow is None else mean+flow_scale*integrate_v2(flow, z, b['condition'], b['context'], mean, cfg['inference']['steps'])
+                observer = None
+                if diagnostics is not None and diagnostics.trace_tile(y, x):
+                    observer = lambda step, time, state: diagnostics.on_ode(y, x, step, time, state, mean)
+                endpoint = None if flow is None else integrate_v2(
+                    flow, z, b['condition'], b['context'], mean, cfg['inference']['steps'], observer=observer)
+                prediction = mean if flow is None else mean+flow_scale*endpoint
             core = prediction[0, :, halo:halo+size, halo:halo+size].float().cpu().numpy()
             mc = mean[0, :, halo:halo+size, halo:halo+size].float().cpu().numpy()
             region = np.s_[y:y+size, x:x+size]
+            if diagnostics is not None:
+                diagnostics.on_tile(y, x, endpoint, core, mc, window)
             if mode == 'weighted':
                 accum[:, region[0], region[1]] += core*window
                 mean_accum[:, region[0], region[1]] += mc*window
@@ -70,6 +77,8 @@ def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, s
         accum /= denom
         mean_accum /= denom
     baseline = transform_v2(archive.array(entry, 'baseline'), archive.stats['precip_log_scale'])
+    if diagnostics is not None:
+        diagnostics.on_frame(accum, mean_accum, baseline)
     result = inverse_v2(baseline+accum*archive.rs+archive.rm, archive.stats['precip_log_scale'])
     deterministic = inverse_v2(baseline+mean_accum*archive.rs+archive.rm, archive.stats['precip_log_scale'])
     audit = budget_error(result[1], archive.array(entry, 'native_reference')[0], archive.static['area'], archive.static['groups'])

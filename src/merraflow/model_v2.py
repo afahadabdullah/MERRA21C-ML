@@ -89,13 +89,17 @@ def regression_v2(model, batch):
 
 
 @torch.no_grad()
-def integrate_v2(model, noise, condition, context, mean, steps):
+def integrate_v2(model, noise, condition, context, mean, steps, observer=None):
     if steps < 1:
         raise ValueError('ODE steps must be positive')
     x, dt = noise, 1/steps
+    if observer is not None:
+        observer(0, 0., x)
     for i in range(steps):
         t = torch.full((x.shape[0],), i*dt, device=x.device)
         k1 = model(x, t, condition, context, mean).float()
         k2 = model(x+dt*k1, t+dt, condition, context, mean).float()
         x = x+dt*(k1+k2)/2
+        if observer is not None:
+            observer(i+1, (i+1)*dt, x)
     return x
