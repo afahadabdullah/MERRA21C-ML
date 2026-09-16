@@ -29,18 +29,20 @@ export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-matplotlib-${SLURM_JOB_ID}"
 CONFIG="${CONFIG:-configs/discover_v2.yaml}"
-if [[ "${STAGE:-regression}" == flow ]]; then
-  # A new submission resumes the same flow run automatically.
-  flow_dir="$(python - "$CONFIG" <<'PY'
+STAGE="${STAGE:-regression}"
+case "$STAGE" in regression|flow) ;; *) echo 'Invalid STAGE' >&2; exit 2 ;; esac
+unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
+stage_dir="$(python - "$CONFIG" "$STAGE" <<'PY'
 import sys
 from pathlib import Path
 from merraflow.config_v2 import load_config_v2
-print(Path(load_config_v2(sys.argv[1])['train']['output'])/'flow_v2')
+print(Path(load_config_v2(sys.argv[1])['train']['output'])/f'{sys.argv[2]}_v2')
 PY
 )"
-  if [[ -z "${RESUME:-}" && -f "$flow_dir/last_v2.pt" ]]; then
-    RESUME="$flow_dir/last_v2.pt"
-  fi
+if [[ -z "${RESUME:-}" && -f "$stage_dir/last_v2.pt" ]]; then
+  RESUME="$stage_dir/last_v2.pt"
+fi
+if [[ "$STAGE" == flow ]]; then
   if [[ -z "${RESUME:-}" && ! -f "${REGRESSION_CHECKPOINT:-}" ]]; then
     echo 'Flow needs a completed regression checkpoint; none was found.' >&2
     exit 1
@@ -60,27 +62,40 @@ args=(--config "$CONFIG" --stage "${STAGE:-regression}")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi
 if [[ -n "${RESUME:-}" ]]; then args+=(--resume "$RESUME"); fi
 srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.cli_v2 train "${args[@]}"
-if [[ "${STAGE:-regression}" == flow ]]; then
+if [[ "$STAGE" == flow || "${TRAIN_FLOW_AFTER_REGRESSION:-0}" == 1 ]]; then
   # Training has returned at an epoch boundary. Read the durable checkpoint,
   # not history.jsonl, which can be one record ahead after an interrupted save.
-  progress="$(python - "$CONFIG" "$flow_dir/last_v2.pt" <<'PY'
+  progress="$(python - "$CONFIG" "$stage_dir/last_v2.pt" "$STAGE" <<'PY'
 import sys
 import torch
 from merraflow.config_v2 import load_config_v2
 cfg = load_config_v2(sys.argv[1])
 ckpt = torch.load(sys.argv[2], map_location='cpu', weights_only=True)
-if ckpt['version'] != 'v2' or ckpt['stage'] != 'flow':
-    raise ValueError('Expected a v2 flow checkpoint before continuation')
-print(ckpt['epoch']+1, cfg['train']['flow_epochs'])
+if ckpt['version'] != 'v2' or ckpt['stage'] != sys.argv[3]:
+    raise ValueError('Expected a matching v2 checkpoint before continuation')
+print(ckpt['epoch']+1, cfg['train'][f'{sys.argv[3]}_epochs'])
 PY
 )"
   read -r completed target <<< "$progress"
   if (( completed < target )); then
-    next_job="$(env CONFIG="$CONFIG" STAGE=flow RESUME="$flow_dir/last_v2.pt" \
-      REGRESSION_CHECKPOINT= sbatch --parsable --export=ALL --job-name=flow_v2 \
+    next_job="$(env -u SLURM_MEM_PER_GPU CONFIG="$CONFIG" STAGE="$STAGE" RESUME="$stage_dir/last_v2.pt" \
+      REGRESSION_CHECKPOINT= sbatch --parsable --export=ALL --job-name="${STAGE}_v2" --gres="gpu:$NPROC" \
       --dependency="afterany:${SLURM_JOB_ID}" scripts/slurm_train_flow_v2.sh)"
-    echo "Flow completed $completed/$target epochs; continuation queued as ${next_job%%;*}"
+    echo "$STAGE completed $completed/$target epochs; continuation queued as ${next_job%%;*}"
+  elif [[ "$STAGE" == regression ]]; then
+    next_job="$(env -u SLURM_MEM_PER_GPU CONFIG="$CONFIG" STAGE=flow RESUME= \
+      REGRESSION_CHECKPOINT="$stage_dir/best_v2.pt" sbatch --parsable --export=ALL \
+      --job-name=flow_v2 --gres="gpu:$NPROC" --dependency="afterok:${SLURM_JOB_ID}" scripts/slurm_train_flow_v2.sh)"
+    echo "Regression complete; flow queued as ${next_job%%;*}"
   else
     echo "Flow training complete at $completed/$target epochs; no continuation submitted"
+    if [[ "${TEST_AFTER_TRAINING:-0}" == 1 ]]; then
+      next_job="$(env -u SLURM_MEM_PER_GPU CONFIG="$CONFIG" CHECKPOINT="$stage_dir/best_v2.pt" \
+        OUTPUT="${stage_dir%/flow_v2}/trained_test_v2" SPLIT=test MEMBERS=5 STEPS=24 \
+        COMPARE_NOISE_PADDING=0 NOISE_PADDING= INCLUDE_DATE= \
+        TIMESTAMPS='20260223_0530 20260209_1530 20260209_2030 20260305_1230 20260306_1830' \
+        sbatch --parsable --export=ALL --dependency="afterok:${SLURM_JOB_ID}" scripts/slurm_test_best_model_v2.sh)"
+      echo "Five-case test queued as ${next_job%%;*}"
+    fi
   fi
 fi

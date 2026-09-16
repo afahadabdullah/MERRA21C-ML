@@ -19,7 +19,8 @@ from .noise_v2 import saved_noise_padding_v2
 THRESHOLDS = (.1, 1., 5., 10., 25.)
 FACTORS = (1, 4, 8, 16, 32)
 IDENTITY_KEYS = ('checkpoint_sha256', 'regression_sha256', 'checkpoint_epoch',
-                 'ode_steps', 'blend', 'target_alignment', 'conservation', 'noise_padding')
+                 'ode_steps', 'blend', 'target_alignment', 'conservation', 'noise_padding',
+                 'precipitation_representation', 'sampler', 'rain_noise_sigma_pixels')
 
 
 def validate_fields(ensemble, regression, baseline, truth, area):
@@ -204,11 +205,15 @@ def member_identity(ds, path, entry, fingerprint, member):
             or ds.sizes.get('time') != 1 or 'time' not in ds.coords
             or ds.time.values[0] != np.datetime64(entry['time'])):
         raise ValueError(f'{path}: incompatible v2 member/archive/time/split')
-    if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed') if key != 'noise_padding'):
+    optional = {'noise_padding', 'precipitation_representation', 'sampler', 'rain_noise_sigma_pixels'}
+    if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed') if key not in optional):
         raise ValueError(f'{path}: missing sampler/checkpoint provenance')
     return {**{name: ds.attrs[name].item() if isinstance(ds.attrs[name], np.generic) else ds.attrs[name]
-               for name in IDENTITY_KEYS if name != 'noise_padding'},
-            'noise_padding': saved_noise_padding_v2(ds.attrs)}
+               for name in IDENTITY_KEYS if name not in optional},
+            'noise_padding': saved_noise_padding_v2(ds.attrs),
+            'precipitation_representation': ds.attrs.get('precipitation_representation', 'log1p'),
+            'sampler': ds.attrs.get('sampler', 'independent'),
+            'rain_noise_sigma_pixels': float(ds.attrs.get('rain_noise_sigma_pixels', 0.))}
 
 
 def preflight(entries, root, fingerprint, expected_members):

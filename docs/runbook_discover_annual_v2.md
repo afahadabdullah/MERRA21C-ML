@@ -268,3 +268,7 @@ and reuses `best_flow_feb23_five_cases_v2/predictions_v2`.
 
 For the inference-only boundary-noise correction and a same-checkpoint,
 same-seed compute-job comparison, see [noise padding](noise_padding_v2.md).
+
+For the rainfall amount and spatial-structure retraining configuration, including
+automatic regression → flow → five-case test jobs, see
+[rainfall structure retraining](rain_structure_v2.md).

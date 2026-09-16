@@ -119,8 +119,9 @@ def test_patch_proposals_and_context_v2(prepared_v2):
     assert not np.allclose(q, 1/len(q))
     b = data[0]
     assert b['target'].shape == (5, 24, 24)
-    assert b['condition'].shape == (31, 24, 24)
-    assert b['context'].shape == (31, 16, 16)
+    nc = data.archive.index['condition_channels']
+    assert b['condition'].shape == (nc, 24, 24)
+    assert b['context'].shape == (nc, 16, 16)
     assert torch.equal(b['target'], data[0]['target'])
     data.epoch = 1
     assert not torch.equal(b['condition'], data[0]['condition'])
@@ -290,13 +291,13 @@ def test_both_objectives_backward_v2(prepared_v2):
     cfg = prepared_v2
     data = PatchDatasetV2(cfg['data']['prepared'], 'train', cfg['patch'], 2)
     batch = {k: v[None] for k, v in data[0].items()}
-    mean = UNetV2(31, **cfg['model'])
+    mean = UNetV2(data.archive.index['condition_channels'], **cfg['model'])
     loss, _ = loss_v2(mean, batch, cfg, 'regression')
     loss.backward()
     assert torch.isfinite(loss) and mean.output[-1].weight.grad.abs().sum() > 0
     mean.zero_grad(set_to_none=True)
     mean.eval().requires_grad_(False)
-    flow = UNetV2(31, **cfg['model'], mean_condition=True)
+    flow = UNetV2(data.archive.index['condition_channels'], **cfg['model'], mean_condition=True)
     loss, metrics = loss_v2(flow, batch, cfg, 'flow', mean, torch.ones(1, 5, 1, 1))
     loss.backward()
     assert metrics.shape == (9,) and flow.output[-1].weight.grad.abs().sum() > 0

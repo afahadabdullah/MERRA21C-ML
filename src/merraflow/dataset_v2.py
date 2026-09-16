@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 from .dataset import crop
 from .prepare import time_features
-from .physics_v2 import transform_v2
+from .physics_v2 import encode_fields_v2, decode_fields_v2
 
 
 def crop_v2(array, y, x, size, halo=0):
@@ -45,7 +45,7 @@ def load_proposal_cache(root, patch, candidates, shape):
 
 
 class ArchiveV2:
-    def __init__(self, root):
+    def __init__(self, root, precipitation_representation='log1p'):
         self.root = Path(root)
         self.index = json.loads((self.root/'index_v2.json').read_text())
         if self.index.get('format') != 'v2':
@@ -56,6 +56,19 @@ class ArchiveV2:
         self.shape = self.static['area'].shape
         self.cm, self.cs = [np.asarray(self.stats['condition'][k], dtype='float32')[:, None, None] for k in ('mean', 'std')]
         self.rm, self.rs = [np.asarray(self.stats['residual'][k], dtype='float32')[:, None, None] for k in ('mean', 'std')]
+        self.precipitation_representation = precipitation_representation
+        if precipitation_representation not in ('log1p', 'sqrt1p'):
+            raise ValueError('Unknown precipitation representation')
+        if precipitation_representation == 'sqrt1p':
+            # The prepared log residual statistics are NOT square-root statistics.
+            # Use explicit fixed units; flow calibration remains training-only.
+            self.rm[1], self.rs[1] = 0., 1.
+
+    def encode(self, field):
+        return encode_fields_v2(field, self.stats['precip_log_scale'], self.precipitation_representation)
+
+    def decode(self, field):
+        return decode_fields_v2(field, self.stats['precip_log_scale'], self.precipitation_representation)
 
     def array(self, entry, name):
         return np.load(self.root/entry['id']/f'{name}_v2.npy', mmap_mode='r')
@@ -64,7 +77,7 @@ class ArchiveV2:
         dyn = (crop_v2(self.array(entry, 'condition'), y, x, size, halo)-self.cm)/self.cs
         fixed = crop_v2(self.static['features'], y, x, size, halo)
         temporal = time_features(entry['time'], crop_v2(self.static['lon'], y, x, size, halo))
-        base = transform_v2(crop_v2(self.array(entry, 'baseline'), y, x, size, halo), self.stats['precip_log_scale'])
+        base = self.encode(crop_v2(self.array(entry, 'baseline'), y, x, size, halo))
         base[0] = (base[0]-280)/20
         base[2] = (base[2]-90000)/15000
         base[3:] /= 10
@@ -96,8 +109,8 @@ def box_means_v2(field, yy, xx, size):
 
 
 class PatchDatasetV2(Dataset):
-    def __init__(self, root, split, patch, samples, seed=0):
-        self.archive = ArchiveV2(root)
+    def __init__(self, root, split, patch, samples, seed=0, precipitation_representation='log1p'):
+        self.archive = ArchiveV2(root, precipitation_representation)
         self.entries = [e for e in self.archive.index['entries'] if e['split'] == split]
         if not self.entries:
             raise ValueError(f'Empty {split} split')
@@ -142,7 +155,16 @@ class PatchDatasetV2(Dataset):
         local, context = self.archive.inputs(entry, y, x, self.patch)
         a, p = self.archive, self.patch
         target = (crop_v2(a.array(entry, 'residual'), y, x, p['size'], p['halo'])-a.rm)/a.rs
+        extra = {}
+        if a.precipitation_representation == 'sqrt1p':
+            baseline = a.encode(crop_v2(a.array(entry, 'baseline'), y, x, p['size'], p['halo']))
+            truth = crop_v2(a.array(entry, 'truth'), y, x, p['size'], p['halo'])
+            target[1] = a.encode(truth)[1]-baseline[1]
+            extra = dict(rain_baseline=torch.from_numpy(baseline[1].copy()),
+                         rain_truth=torch.from_numpy(truth[1].copy()),
+                         rain_scale=torch.tensor(a.stats['precip_log_scale'], dtype=torch.float32))
         area = crop_v2(a.static['area'], y, x, p['size'])
         return dict(condition=local, context=context, target=torch.from_numpy(target),
                     area=torch.from_numpy(area/area.mean()),
-                    importance=torch.tensor(1/(len(q)*q[i]), dtype=torch.float32))
+                    area_full=torch.from_numpy(crop_v2(a.static['area'], y, x, p['size'], p['halo'])/area.mean()),
+                    importance=torch.tensor(1/(len(q)*q[i]), dtype=torch.float32), **extra)

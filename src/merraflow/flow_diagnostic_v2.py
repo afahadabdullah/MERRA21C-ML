@@ -178,6 +178,9 @@ def run_flow_diagnostic(cfg, checkpoint, output, timestamps, steps=(24, 48, 96),
                         split='test', plots=True):
     cfg = deepcopy(cfg)
     validate_config_v2(cfg)
+    from .physics_v2 import precipitation_representation_v2
+    if precipitation_representation_v2(cfg) != 'log1p' or cfg['inference'].get('sampler', 'independent') != 'independent':
+        raise ValueError('This legacy trajectory diagnostic requires log1p and independent sampling; use test_best_model_v2 for the retrained model')
     if split not in ('val', 'test') or members < 2 or len(set(steps)) != len(steps) or len(steps) < 2 or min(steps) < 1:
         raise ValueError('Require val/test, at least two members, and at least two distinct positive step counts')
     if not timestamps or len(set(timestamps)) != len(timestamps):

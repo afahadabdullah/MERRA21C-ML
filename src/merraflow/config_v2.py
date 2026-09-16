@@ -1,7 +1,10 @@
 """Strict v2 configuration and namespace isolation."""
 from pathlib import Path
+import math
 import yaml
 from .noise_v2 import noise_padding_v2
+from .physics_v2 import precipitation_representation_v2
+from .rain_prior_v2 import rain_noise_sigma_v2
 
 
 def v2_path(path):
@@ -22,6 +25,34 @@ def validate_config_v2(cfg):
     noise_padding_v2(cfg)
     if cfg.get('version') != 'v2':
         raise ValueError('Require version: v2')
+    if precipitation_representation_v2(cfg) not in ('log1p', 'sqrt1p'):
+        raise ValueError('Unsupported precipitation representation')
+    sigma = rain_noise_sigma_v2(cfg)
+    if not math.isfinite(sigma) or not 0 <= sigma <= 16:
+        raise ValueError('rain_noise_sigma_pixels must be in [0, 16]')
+    if sigma and noise_padding_v2(cfg) != 'independent_halo':
+        raise ValueError('Correlated rainfall prior requires independent halo support')
+    if cfg['inference'].get('sampler', 'independent') not in ('independent', 'synchronized'):
+        raise ValueError('Unsupported v2 sampler')
+    if cfg['inference'].get('sampler') == 'synchronized' and not cfg['loss'].get('flow_full_patch', False):
+        raise ValueError('Synchronized sampling requires full-patch flow supervision')
+    if not isinstance(cfg['loss'].get('flow_full_patch', False), bool):
+        raise ValueError('flow_full_patch must be boolean')
+    for key in ('flow_multiscale', 'regression_rain_physical'):
+        if cfg['loss'].get(key, 0) < 0:
+            raise ValueError(f'{key} must be nonnegative')
+    if cfg['loss'].get('regression_rain_physical', 0) and precipitation_representation_v2(cfg) != 'sqrt1p':
+        raise ValueError('Physical rainfall loss requires sqrt1p representation')
+    if cfg['inference'].get('tile_cache_mb', 512) < 0:
+        raise ValueError('tile_cache_mb must be nonnegative')
+    if cfg['inference'].get('sampler') == 'synchronized' and cfg['inference'].get('blend', 'weighted') != 'weighted':
+        raise ValueError('Synchronized sampler uses weighted velocities')
+    generated = cfg['train'].get('generated_validation', {})
+    if generated:
+        if precipitation_representation_v2(cfg) != 'sqrt1p':
+            raise ValueError('Generated rainfall validation requires sqrt1p')
+        if any(not isinstance(generated.get(k), int) or generated[k] < 1 for k in ('batches', 'interval', 'steps')) or generated.get('members', 0) < 2:
+            raise ValueError('Invalid generated validation counts')
     d, p, m, tr = (cfg[k] for k in ('data', 'patch', 'model', 'train'))
     if d['conserve_training_precip'] is not False or cfg['inference']['conserve_precip'] is not False:
         raise ValueError('V2 never projects precipitation')

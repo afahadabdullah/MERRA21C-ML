@@ -19,6 +19,8 @@ from .model_v2 import UNetV2, regression_v2
 from .loss_v2 import loss_v2, core_v2
 from .train import device_for, autocast, to_device, atomic_save
 from .slurm_time_v2 import flow_time_left_seconds
+from .physics_v2 import precipitation_representation_v2
+from .rain_prior_v2 import rain_noise_sigma_v2
 
 
 def file_hash_v2(path):
@@ -36,6 +38,14 @@ def check_checkpoint_v2(ckpt, archive, cfg, stage=None):
         raise ValueError('V2 checkpoint and archive/statistics mismatch')
     if ckpt['config']['model'] != cfg['model'] or ckpt['config']['patch'] != cfg['patch']:
         raise ValueError('V2 checkpoint model/patch mismatch')
+    if precipitation_representation_v2(ckpt['config']) != precipitation_representation_v2(cfg):
+        raise ValueError('Checkpoint precipitation representation mismatch; retrain both stages')
+    if ckpt['stage'] == 'flow' and ckpt['config']['loss'].get('flow_full_patch', False) != cfg['loss'].get('flow_full_patch', False):
+        raise ValueError('Checkpoint flow halo supervision mismatch; retrain flow')
+    if ckpt['stage'] == 'flow' and rain_noise_sigma_v2(ckpt['config']) != rain_noise_sigma_v2(cfg):
+        raise ValueError('Checkpoint rainfall noise prior mismatch; retrain flow')
+    if getattr(archive, 'precipitation_representation', 'log1p') != precipitation_representation_v2(cfg):
+        raise ValueError('Archive view precipitation representation mismatch')
 
 
 @torch.no_grad()
@@ -74,8 +84,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     torch.manual_seed(tr['seed']+rank)
     if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
-    data = PatchDatasetV2(cfg['data']['prepared'], 'train', p, p['samples_per_epoch'], tr['seed'])
-    val = PatchDatasetV2(cfg['data']['prepared'], 'val', p, tr['val_batches']*tr['batch_size']*world, tr['seed']+991)
+    representation = precipitation_representation_v2(cfg)
+    data = PatchDatasetV2(cfg['data']['prepared'], 'train', p, p['samples_per_epoch'], tr['seed'], representation)
+    val = PatchDatasetV2(cfg['data']['prepared'], 'val', p, tr['val_batches']*tr['batch_size']*world, tr['seed']+991, representation)
     if world > 1 and len(data) % world:
         raise ValueError('samples_per_epoch must divide world size; avoid duplicated DDP patches')
     sampler = DistributedSampler(data, world, rank, seed=tr['seed']) if world > 1 else None
@@ -147,7 +158,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
               f'effective_batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
     names = ('total', 'value', 'gradient', 'multiscale', 't2m', 'precip', 'ps', 'u10m', 'v10m')
     plot_interval = None
-    stop_minutes = None
+    stop_minutes = int(os.getenv('FLOW_STOP_MINUTES' if stage == 'flow' else 'REGRESSION_STOP_MINUTES', '40'))
+    if stop_minutes < 1:
+        raise ValueError('Training stop reserve must be positive')
     if stage == 'flow':
         # Wall-time controls do not change the 100-epoch learning-rate schedule.
         stop_minutes = int(os.getenv('FLOW_STOP_MINUTES', '40'))
@@ -166,9 +179,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                 path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema,
                                              flow_scale, device, start, out)
                 print(f'Recovered full-domain flow comparison: {path}', flush=True)
-    longest_flow_epoch = 0.
+    longest_epoch = 0.
     for epoch in range(start, epochs):
-        epoch_started = time.monotonic() if stage == 'flow' else None
+        epoch_started = time.monotonic()
         data.epoch = epoch
         if sampler:
             sampler.set_epoch(epoch)
@@ -218,8 +231,17 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         train_metrics, val_metrics = (sums[:9]/sums[9]).tolist(), (vsums[:9]/vsums[9]).tolist()
         if not all(math.isfinite(x) for x in train_metrics+val_metrics):
             raise FloatingPointError('Nonfinite v2 epoch metrics')
-        improved = val_metrics[0] < best
-        best = min(best, val_metrics[0])
+        generated = None
+        generated_settings = tr.get('generated_validation') if stage == 'flow' else None
+        if generated_settings and (epoch == 0 or (epoch+1) % generated_settings['interval'] == 0 or epoch+1 == epochs):
+            from .generated_validation_v2 import generated_validation_v2
+            generated = generated_validation_v2(ema, mean_model, flow_scale, vloader, cfg, device, rank, world)
+        # A falling velocity objective alone did not select useful rainfall.
+        # On intervening epochs save last/resume, but do not replace best.
+        selection = generated['selection_score'] if generated else (None if generated_settings else val_metrics[0])
+        improved = selection is not None and selection < best
+        if improved:
+            best = selection
         rng = {'cpu': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
         rng_all = [None]*world
         if world > 1:
@@ -229,6 +251,8 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         if rank == 0:
             row = dict(stage=stage, epoch=epoch+1, step=step, train=dict(zip(names, train_metrics)),
                        val=dict(zip(names, val_metrics)), learning_rate=opt.param_groups[0]['lr'])
+            if generated is not None:
+                row['generated_validation'] = generated
             with open(out/'history_v2.jsonl', 'a') as f:
                 f.write(json.dumps(row)+'\n')
             payload = dict(version='v2', stage=stage, model=base.state_dict(), ema=ema.state_dict(),
@@ -236,7 +260,8 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                            epoch=epoch, step=step, best=best, rng=rng_all, config=cfg,
                            stats=data.archive.stats, fingerprint=data.archive.index['fingerprint'],
                            regression_ema=mean_model.state_dict() if mean_model is not None else None,
-                           regression_sha256=mean_hash, flow_scale=flow_scale)
+                           regression_sha256=mean_hash, flow_scale=flow_scale,
+                           selection_metric='rain_crps_plus_mean_rmse_plus_structure' if generated_settings else 'validation_objective')
             atomic_save(out/'last_v2.pt', payload)
             if improved:
                 atomic_save(out/'best_v2.pt', payload)
@@ -248,24 +273,24 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                 path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema, flow_scale,
                                              device, epoch+1, out)
                 print(f'Full-domain flow comparison: {path}', flush=True)
-        if stage == 'flow' and epoch+1 < epochs:
+        if epoch+1 < epochs and (stage == 'flow' or os.getenv('TRAIN_FLOW_AFTER_REGRESSION') == '1'):
             stop_for_time = False
             if rank == 0:
                 elapsed = time.monotonic()-epoch_started
-                longest_flow_epoch = max(longest_flow_epoch, elapsed)
+                longest_epoch = max(longest_epoch, elapsed)
                 try:
                     remaining = flow_time_left_seconds()
                 except (OSError, ValueError, subprocess.CalledProcessError) as exc:
                     # Keep the completed checkpoint and hand off if the Slurm
                     # query is unavailable, rather than risk an unplanned kill.
-                    print(f'Slurm time-left query failed: {exc}; stopping flow session', flush=True)
+                    print(f'Slurm time-left query failed: {exc}; stopping {stage} session', flush=True)
                     stop_for_time = True
                 else:
                     if remaining is not None:
                         # Also avoid starting an epoch that is unlikely to fit.
-                        needed = max(stop_minutes*60, 1.2*longest_flow_epoch+600)
+                        needed = max(stop_minutes*60, 1.2*longest_epoch+600)
                         stop_for_time = remaining <= needed
-                        print(f'Flow time remaining: {remaining/60:.1f} min; '
+                        print(f'{stage} time remaining: {remaining/60:.1f} min; '
                               f'next-epoch reserve: {needed/60:.1f} min; '
                               f'continue={not stop_for_time}', flush=True)
             if world > 1:

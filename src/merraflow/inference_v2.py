@@ -7,11 +7,12 @@ import torch
 import xarray as xr
 from .config_v2 import validate_config_v2
 from .noise_v2 import padded_noise_v2, noise_padding_v2
+from .rain_prior_v2 import inference_rain_noise_v2, rain_noise_sigma_v2
 from .dataset import crop
 from .dataset_v2 import ArchiveV2
 from .inference import starts, blend_window
 from .model_v2 import UNetV2, regression_v2, integrate_v2
-from .physics_v2 import TARGETS_V2, UNITS_V2, transform_v2, inverse_v2
+from .physics_v2 import TARGETS_V2, UNITS_V2, precipitation_representation_v2
 from .physics import budget_error
 from .train import device_for, autocast
 from .train_v2 import check_checkpoint_v2, file_hash_v2
@@ -38,13 +39,23 @@ def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, s
     p, (h, w) = cfg['patch'], archive.shape
     size, halo = p['size'], p['halo']
     noise = padded_noise_v2(seed, (5, h, w), halo, noise_padding_v2(cfg))
+    noise = inference_rain_noise_v2(noise, seed, cfg)
     accum, mean_accum = [np.zeros((5, h, w), dtype='float32') for _ in range(2)]
     denom = np.zeros((h, w), dtype='float32')
     window = blend_window(size)
     mode = cfg['inference'].get('blend', 'weighted')
     if mode not in ('weighted', 'owner'):
         raise ValueError('V2 blend must be weighted or owner')
-    for y in starts(h, size, p['stride']):
+    synchronized = flow is not None and cfg['inference'].get('sampler', 'independent') == 'synchronized'
+    if archive.precipitation_representation != precipitation_representation_v2(cfg):
+        raise ValueError('Sampler archive representation mismatch')
+    if synchronized:
+        if diagnostics is not None:
+            raise ValueError('Tile-trajectory diagnostics are only defined for independent sampling')
+        from .synchronized_v2 import synchronized_frame_v2
+        accum, mean_accum = synchronized_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, noise)
+        denom[:] = 1
+    for y in ([] if synchronized else starts(h, size, p['stride'])):
         for x in starts(w, size, p['stride']):
             local, broad = archive.inputs(entry, y, x, p)
             # The padded field contains every requested index: crop does not
@@ -79,18 +90,18 @@ def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, s
     if mode == 'weighted':
         accum /= denom
         mean_accum /= denom
-    baseline = transform_v2(archive.array(entry, 'baseline'), archive.stats['precip_log_scale'])
+    baseline = archive.encode(archive.array(entry, 'baseline'))
     if diagnostics is not None:
         diagnostics.on_frame(accum, mean_accum, baseline)
-    result = inverse_v2(baseline+accum*archive.rs+archive.rm, archive.stats['precip_log_scale'])
-    deterministic = inverse_v2(baseline+mean_accum*archive.rs+archive.rm, archive.stats['precip_log_scale'])
+    result = archive.decode(baseline+accum*archive.rs+archive.rm)
+    deterministic = archive.decode(baseline+mean_accum*archive.rs+archive.rm)
     audit = budget_error(result[1], archive.array(entry, 'native_reference')[0], archive.static['area'], archive.static['groups'])
     return result, deterministic, audit
 
 
 def predict_v2(cfg, checkpoint, split='val', limit=None, timestamp=None):
     validate_config_v2(cfg)
-    archive = ArchiveV2(cfg['data']['prepared'])
+    archive = ArchiveV2(cfg['data']['prepared'], precipitation_representation_v2(cfg))
     device = device_for(cfg['train']['device'])
     mean, flow, scale, ckpt = load_models_v2(cfg, checkpoint, archive, device)
     entries = [e for e in archive.index['entries'] if e['split'] == split and
@@ -129,6 +140,9 @@ def predict_v2(cfg, checkpoint, split='val', limit=None, timestamp=None):
                             dataset_fingerprint=archive.index['fingerprint'], ensemble_member=member, seed=seed,
                             split=split, ode_steps=cfg['inference']['steps'], blend=cfg['inference'].get('blend', 'weighted'),
                             noise_padding=noise_padding_v2(cfg),
+                            precipitation_representation=precipitation_representation_v2(cfg),
+                            sampler=cfg['inference'].get('sampler', 'independent'),
+                            rain_noise_sigma_pixels=rain_noise_sigma_v2(cfg),
                             target_alignment='HR midpoint snapshot approximates coarse hourly mean',
                             conservation='none; audit only', budget_audit_v2=json.dumps(audit))
             encoding = {name: {'zlib': True, 'complevel': 2, 'dtype': 'float32'} for name in ds.data_vars if name != 'lr_time_bounds_v2' and ds[name].ndim == 3}

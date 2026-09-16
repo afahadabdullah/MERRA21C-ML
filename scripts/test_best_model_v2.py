@@ -17,9 +17,10 @@ from merraflow.dataset_v2 import ArchiveV2
 from merraflow.evaluate_v2 import load_members_v2
 from merraflow.inference_v2 import predict_v2
 from merraflow.metrics import continuous, precipitation
-from merraflow.physics_v2 import TARGETS_V2, UNITS_V2
+from merraflow.physics_v2 import TARGETS_V2, UNITS_V2, precipitation_representation_v2
 from merraflow.train_v2 import file_hash_v2
 from merraflow.noise_v2 import noise_padding_v2, NOISE_PADDING_MODES
+from merraflow.rain_prior_v2 import rain_noise_sigma_v2
 from merraflow.inference import starts
 from merraflow.precip_audit_v2 import deterministic_scores
 from merraflow.metrics import weighted_mean
@@ -313,7 +314,10 @@ def run_selected(cfg, checkpoint, archive, out, selected, selection, args, diges
                'checkpoint': str(checkpoint.resolve()),
                'checkpoint_sha256': digest, 'members': args.members,
                'selection': selection, 'samples': reports, 'noise_padding': noise_padding_v2(cfg),
-               'ode_steps': cfg['inference']['steps'], 'inference_seed': cfg['inference']['seed']}
+               'ode_steps': cfg['inference']['steps'], 'inference_seed': cfg['inference']['seed'],
+               'precipitation_representation': precipitation_representation_v2(cfg),
+               'rain_noise_sigma_pixels': rain_noise_sigma_v2(cfg),
+               'sampler': cfg['inference'].get('sampler', 'independent')}
     write_json(out/'metrics_v2.json', metrics)
     plot_summary(out, reports, args.members, args.split)
     plot_history(out, Path(cfg['train']['output']))

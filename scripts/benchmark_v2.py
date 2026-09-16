@@ -9,6 +9,7 @@ from merraflow.dataset_v2 import PatchDatasetV2
 from merraflow.model_v2 import UNetV2
 from merraflow.loss_v2 import loss_v2
 from merraflow.train import autocast, device_for, to_device
+from merraflow.physics_v2 import precipitation_representation_v2
 
 
 def main():
@@ -20,7 +21,8 @@ def main():
         parser.error('--steps must be positive')
     cfg = load_config_v2(args.config)
     device = device_for(cfg['train']['device'])
-    data = PatchDatasetV2(cfg['data']['prepared'], 'train', cfg['patch'], cfg['train']['batch_size'])
+    data = PatchDatasetV2(cfg['data']['prepared'], 'train', cfg['patch'], cfg['train']['batch_size'],
+                          precipitation_representation=precipitation_representation_v2(cfg))
     batch = to_device(next(iter(torch.utils.data.DataLoader(data, batch_size=len(data)))), device)
     nc = data.archive.index['condition_channels']
     mean = UNetV2(nc, **cfg['model']).to(device)
