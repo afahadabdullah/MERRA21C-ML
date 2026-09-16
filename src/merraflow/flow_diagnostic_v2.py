@@ -16,6 +16,7 @@ from .physics_v2 import TARGETS_V2, transform_v2, inverse_v2
 from .precip_audit_v2 import audit_case, deterministic_scores
 from .train import device_for
 from .train_v2 import file_hash_v2
+from .noise_v2 import noise_padding_v2
 
 
 def field_summary(value):
@@ -212,7 +213,7 @@ def run_flow_diagnostic(cfg, checkpoint, output, timestamps, steps=(24, 48, 96),
                 'config': cfg, 'steps': steps, 'members': members, 'split': split,
                 'timestamps': [e['id'] for e in entries],
                 'formula': 'L = log1p(coarse/s) + residual_mean + residual_std * (regression + flow_scale * endpoint); P = s * expm1(max(L,0))',
-                'weights_loaded_once': True, 'normalization_changed': False}
+                'weights_loaded_once': True, 'normalization_changed': False, 'noise_padding': noise_padding_v2(cfg)}
     write_json(out/'manifest_v2.json', manifest)
     print(f'Checkpoint: {checkpoint}; epoch {ckpt["epoch"]+1}; SHA256 {digest}', flush=True)
     print(f'Precip flow_scale={scales[1]:.6g}; residual_std={archive.rs[1,0,0]:.6g}; '
@@ -260,6 +261,7 @@ def run_flow_diagnostic(cfg, checkpoint, output, timestamps, steps=(24, 48, 96),
                              regression_sha256=ckpt['regression_sha256'], dataset_fingerprint=archive.index['fingerprint'],
                              split=split, ensemble_member=member, seed=seed, ode_steps=nsteps,
                              blend=cfg['inference'].get('blend', 'weighted'),
+                             noise_padding=noise_padding_v2(cfg),
                              target_alignment='HR midpoint snapshot approximates coarse hourly mean', conservation='none; audit only')
                 save_fields(prediction_dir/f'{stamp}_v2.nc', archive, entry,
                             {**trace.fields, 'precip': values[1], 'regression_precip': deterministic[1]}, attrs)

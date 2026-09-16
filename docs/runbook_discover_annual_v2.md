@@ -265,3 +265,6 @@ For the completed five-case run, use the [precipitation audit](precip_audit_v2.m
 to inspect saved member amounts, wet areas, upper tails, spatial-scale errors,
 spectra, calibration and possible displacement. It runs as a CPU compute job
 and reuses `best_flow_feb23_five_cases_v2/predictions_v2`.
+
+For the inference-only boundary-noise correction and a same-checkpoint,
+same-seed compute-job comparison, see [noise padding](noise_padding_v2.md).

@@ -7,6 +7,7 @@ from .config import write_json
 from .dataset_v2 import ArchiveV2
 from .physics_v2 import TARGETS_V2
 from .metrics import continuous, precipitation, radial_psd, rank_histogram
+from .noise_v2 import saved_noise_padding_v2
 
 
 def load_members_v2(paths, archive, entry):
@@ -17,7 +18,7 @@ def load_members_v2(paths, archive, entry):
                     or ds.attrs['ensemble_member'] != member or ds.attrs['split'] != entry['split']
                     or ds.time.size != 1 or ds.time.values[0] != np.datetime64(entry['time'])):
                 raise ValueError(f'Incompatible v2 prediction: {path}')
-            key = tuple(ds.attrs[k] for k in ('checkpoint_sha256', 'regression_sha256', 'ode_steps', 'blend'))
+            key = tuple(ds.attrs[k] for k in ('checkpoint_sha256', 'regression_sha256', 'ode_steps', 'blend')) + (saved_noise_padding_v2(ds.attrs),)
             if identity is not None and key != identity:
                 raise ValueError('Mixed v2 checkpoints or inference settings')
             identity = key
@@ -75,7 +76,7 @@ def evaluate_v2(cfg, split='val', output=None):
         raise ValueError('No v2 predictions found')
     summary = dict(version='v2', split=split, hours_evaluated=len(reports), missing_hours=missing,
                    aggregation='equal-weight mean of per-hour area-weighted scores; not pooled RMSE',
-                   checkpoint_sha256=identity[0], conservation='none; report budget discrepancies', metrics={})
+                   checkpoint_sha256=identity[0], noise_padding=identity[4], conservation='none; report budget discrepancies', metrics={})
     for label in ('ensemble', 'regression', 'baseline'):
         summary['metrics'][label] = {}
         for name in reports[0][label]:

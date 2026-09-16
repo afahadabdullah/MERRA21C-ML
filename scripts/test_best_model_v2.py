@@ -19,6 +19,10 @@ from merraflow.inference_v2 import predict_v2
 from merraflow.metrics import continuous, precipitation
 from merraflow.physics_v2 import TARGETS_V2, UNITS_V2
 from merraflow.train_v2 import file_hash_v2
+from merraflow.noise_v2 import noise_padding_v2, NOISE_PADDING_MODES
+from merraflow.inference import starts
+from merraflow.precip_audit_v2 import deterministic_scores
+from merraflow.metrics import weighted_mean
 
 
 def select_entries(archive, split, count, timestamps, seed, include_date=None):
@@ -169,6 +173,60 @@ def plot_history(out, train_root):
     plt.close(fig)
 
 
+def boundary_affected_mask(shape, patch):
+    """Union of cores whose input noise halo extends beyond the domain."""
+    h, w = shape
+    size, halo = patch['size'], patch['halo']
+    affected = np.zeros(shape, dtype=bool)
+    for y in starts(h, size, patch['stride']):
+        for x in starts(w, size, patch['stride']):
+            if y < halo or x < halo or y+size+halo > h or x+size+halo > w:
+                affected[y:y+size, x:x+size] = True
+    return affected
+
+
+def padding_scores(ensemble, truth, area, patch):
+    rain = ensemble[:, 1]
+    pred = rain.mean(0)
+    affected = boundary_affected_mask(truth.shape[-2:], patch)
+    return {'mean_mm_h': weighted_mean(pred, area), 'HWT_mean_mm_h': weighted_mean(truth[1], area),
+            'max_member_mm_h': float(rain.max()), 'max_ensemble_mean_mm_h': float(pred.max()),
+            'HWT_max_mm_h': float(truth[1].max()),
+            'regions': {name: {'area_fraction': weighted_mean(mask, area),
+                               'scores': deterministic_scores(pred[mask], truth[1][mask], area[mask]) if mask.any() else None}
+                        for name, mask in [('boundary_affected', affected), ('interior', ~affected)]}}
+
+
+def write_padding_comparison(out, comparisons):
+    old, new = comparisons['replicate'], comparisons['independent_halo']
+    for key in ('checkpoint_sha256', 'members', 'ode_steps', 'inference_seed'):
+        if old[key] != new[key]:
+            raise ValueError(f'Uncontrolled padding comparison: {key} differs')
+    if [r['id'] for r in old['samples']] != [r['id'] for r in new['samples']]:
+        raise ValueError('Padding comparison timestamps differ')
+    lines = ['# Noise-padding correction: controlled comparison', '',
+             f'Checkpoint: `{old["checkpoint"]}`; {old["members"]} members; {old["ode_steps"]} steps.', '',
+             'Every in-domain initial noise value is preserved. Only outside-domain noise padding differs.', '',
+             '| Case | Padding | Rain RMSE | Rain bias | Largest member | Boundary-region RMSE | Interior RMSE |',
+             '|---|---|---:|---:|---:|---:|---:|']
+    for before, after in zip(old['samples'], new['samples']):
+        if before['full']['precip']['regression'] != after['full']['precip']['regression']:
+            raise ValueError('Regression changed in padding comparison')
+        for mode, record in [('replicate', before), ('independent_halo', after)]:
+            score, p = record['full']['precip']['ensemble_mean'], record['padding_check']
+            def regional(name):
+                scores = p['regions'][name]['scores']
+                return f'{scores["rmse"]:.4g}' if scores else 'n/a'
+            lines.append(f'| {record["id"]} | {mode} | {score["rmse"]:.4g} | {score["bias"]:.4g} | '
+                         f'{p["max_member_mm_h"]:.4g} | {regional("boundary_affected")} | {regional("interior")} |')
+    lines += ['', 'Rain units: mm/h. Boundary region is the union of cores whose halos cross the domain boundary.',
+              'This correction does not change the model weights, normalization, conditioning, or patch evolution.',
+              'Per-variable scores, precipitation calibration and full/zoom maps are saved separately under each padding directory.',
+              'Improvement must be judged from these results; the software tests do not establish meteorological skill.']
+    write_json(out/'padding_comparison_v2.json', comparisons)
+    (out/'padding_comparison_v2.md').write_text('\n'.join(lines)+'\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='configs/discover_annual_v2.yaml')
@@ -181,10 +239,21 @@ def main():
     parser.add_argument('--include-date', help='Include the wettest HWT hour on this UTC date (YYYY-MM-DD), then sample remaining cases')
     parser.add_argument('--sample-seed', type=int, default=317)
     parser.add_argument('--zoom-fraction', type=float, default=.4)
+    parser.add_argument('--noise-padding', choices=NOISE_PADDING_MODES, help='Default: independent_halo')
+    parser.add_argument('--compare-noise-padding', action='store_true', help='Run legacy and corrected padding with identical in-domain noise')
+    parser.add_argument('--steps', type=int, help='Override ODE steps for both sides of the comparison')
     args = parser.parse_args()
     if args.members < 2 or not 0 < args.zoom_fraction <= 1:
         parser.error('members must be >=2 and zoom-fraction must be in (0, 1]')
     cfg = load_config_v2(args.config)
+    if args.steps is not None:
+        if args.steps < 1:
+            parser.error('--steps must be positive')
+        cfg['inference']['steps'] = args.steps
+    if args.noise_padding:
+        if args.compare_noise_padding:
+            parser.error('--noise-padding cannot be combined with --compare-noise-padding')
+        cfg['inference']['noise_padding'] = args.noise_padding
     checkpoint = Path(args.checkpoint or Path(cfg['train']['output'])/'flow_v2'/'best_v2.pt')
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
@@ -201,6 +270,20 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     cfg['inference']['members'] = args.members
     cfg['inference']['output'] = str(out/'predictions_v2')
+    modes = ('replicate', 'independent_halo') if args.compare_noise_padding else (noise_padding_v2(cfg),)
+    comparisons = {}
+    for mode in modes:
+        cfg['inference']['noise_padding'] = mode
+        destination = out/f'{mode}_v2' if args.compare_noise_padding else out
+        destination.mkdir(parents=True, exist_ok=True)
+        cfg['inference']['output'] = str(destination/'predictions_v2')
+        comparisons[mode] = run_selected(cfg, checkpoint, archive, destination, selected, selection, args, digest)
+    if args.compare_noise_padding:
+        write_padding_comparison(out, comparisons)
+    print(f'V2 diagnostics written to {out}', flush=True)
+
+
+def run_selected(cfg, checkpoint, archive, out, selected, selection, args, digest):
     reports = []
     for entry in selected:
         predict_v2(cfg, checkpoint, split=args.split, timestamp=entry['id'])
@@ -219,19 +302,22 @@ def main():
         plot_maps(out, entry, ensemble, regression, baseline, truth, full_scores, full, '')
         plot_maps(out, entry, ensemble, regression, baseline, truth, zoom_scores, region, 'zoom')
         reports.append({'id': entry['id'], 'time': entry['time'], 'split': args.split,
+                        'padding_check': padding_scores(ensemble, truth, archive.static['area'], cfg['patch']),
                         'full': full_scores, 'zoom': zoom_scores,
                         'zoom_bounds': {'y': [region[0].start, region[0].stop],
                                         'x': [region[1].start, region[1].stop]},
                         'precipitation': precipitation(ensemble[:, 1], truth[1], archive.static['area']),
                         'budget_audit': audits})
         print(f'Wrote v2 diagnostic for {entry["id"]}', flush=True)
-    write_json(out/'metrics_v2.json', {'version': 'v2', 'split': args.split,
-                                      'checkpoint': str(checkpoint.resolve()),
-                                      'checkpoint_sha256': digest, 'members': args.members,
-                                      'selection': selection, 'samples': reports})
+    metrics = {'version': 'v2', 'split': args.split,
+               'checkpoint': str(checkpoint.resolve()),
+               'checkpoint_sha256': digest, 'members': args.members,
+               'selection': selection, 'samples': reports, 'noise_padding': noise_padding_v2(cfg),
+               'ode_steps': cfg['inference']['steps'], 'inference_seed': cfg['inference']['seed']}
+    write_json(out/'metrics_v2.json', metrics)
     plot_summary(out, reports, args.members, args.split)
     plot_history(out, Path(cfg['train']['output']))
-    print(f'V2 diagnostics written to {out}', flush=True)
+    return metrics
 
 
 if __name__ == '__main__':

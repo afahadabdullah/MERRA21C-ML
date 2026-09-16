@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import xarray as xr
 from .config_v2 import validate_config_v2
+from .noise_v2 import padded_noise_v2, noise_padding_v2
 from .dataset import crop
 from .dataset_v2 import ArchiveV2
 from .inference import starts, blend_window
@@ -36,8 +37,8 @@ def load_models_v2(cfg, checkpoint, archive, device):
 def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, seed, diagnostics=None):
     p, (h, w) = cfg['patch'], archive.shape
     size, halo = p['size'], p['halo']
-    noise = np.random.default_rng(seed).standard_normal((5, h, w), dtype=np.float32)
-    accum, mean_accum = np.zeros_like(noise), np.zeros_like(noise)
+    noise = padded_noise_v2(seed, (5, h, w), halo, noise_padding_v2(cfg))
+    accum, mean_accum = [np.zeros((5, h, w), dtype='float32') for _ in range(2)]
     denom = np.zeros((h, w), dtype='float32')
     window = blend_window(size)
     mode = cfg['inference'].get('blend', 'weighted')
@@ -46,7 +47,9 @@ def sample_frame_v2(mean_model, flow, flow_scale, archive, entry, cfg, device, s
     for y in starts(h, size, p['stride']):
         for x in starts(w, size, p['stride']):
             local, broad = archive.inputs(entry, y, x, p)
-            z = torch.from_numpy(crop(noise, y, x, size, halo)[None]).to(device)
+            # The padded field contains every requested index: crop does not
+            # clamp noise here. Retain its original tensor layout for the A/B.
+            z = torch.from_numpy(crop(noise, y+halo, x+halo, size, halo)[None]).to(device)
             b = dict(target=z, condition=local[None].to(device), context=broad[None].to(device))
             with autocast(device, cfg['train']['precision']):
                 mean = regression_v2(mean_model, b)
@@ -125,6 +128,7 @@ def predict_v2(cfg, checkpoint, split='val', limit=None, timestamp=None):
                             regression_sha256=ckpt.get('regression_sha256') or digest,
                             dataset_fingerprint=archive.index['fingerprint'], ensemble_member=member, seed=seed,
                             split=split, ode_steps=cfg['inference']['steps'], blend=cfg['inference'].get('blend', 'weighted'),
+                            noise_padding=noise_padding_v2(cfg),
                             target_alignment='HR midpoint snapshot approximates coarse hourly mean',
                             conservation='none; audit only', budget_audit_v2=json.dumps(audit))
             encoding = {name: {'zlib': True, 'complevel': 2, 'dtype': 'float32'} for name in ds.data_vars if name != 'lr_time_bounds_v2' and ds[name].ndim == 3}

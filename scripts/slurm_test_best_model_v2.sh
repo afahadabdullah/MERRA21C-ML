@@ -31,6 +31,13 @@ args=(--config "${CONFIG:-configs/discover_annual_v2.yaml}"
       --split "${SPLIT:-test}" --samples "${SAMPLES:-3}" --members "${MEMBERS:-5}")
 if [[ -n "${CHECKPOINT:-}" ]]; then args+=(--checkpoint "$CHECKPOINT"); fi
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi
+if [[ -n "${STEPS:-}" ]]; then args+=(--steps "$STEPS"); fi
+if [[ -n "${NOISE_PADDING:-}" ]]; then args+=(--noise-padding "$NOISE_PADDING"); fi
+case "${COMPARE_NOISE_PADDING:-0}" in
+  1) args+=(--compare-noise-padding) ;;
+  0) ;;
+  *) echo 'COMPARE_NOISE_PADDING must be 0 or 1' >&2; exit 2 ;;
+esac
 if [[ -n "${INCLUDE_DATE:-}" ]]; then args+=(--include-date "$INCLUDE_DATE"); fi
 if [[ -n "${TIMESTAMPS:-}" ]]; then
   read -r -a timestamp_args <<< "$TIMESTAMPS"

@@ -13,12 +13,13 @@ import xarray as xr
 
 from .config import write_json
 from .metrics import continuous, precipitation, radial_psd, rank_histogram, weighted_mean
+from .noise_v2 import saved_noise_padding_v2
 
 
 THRESHOLDS = (.1, 1., 5., 10., 25.)
 FACTORS = (1, 4, 8, 16, 32)
 IDENTITY_KEYS = ('checkpoint_sha256', 'regression_sha256', 'checkpoint_epoch',
-                 'ode_steps', 'blend', 'target_alignment', 'conservation')
+                 'ode_steps', 'blend', 'target_alignment', 'conservation', 'noise_padding')
 
 
 def validate_fields(ensemble, regression, baseline, truth, area):
@@ -203,10 +204,11 @@ def member_identity(ds, path, entry, fingerprint, member):
             or ds.sizes.get('time') != 1 or 'time' not in ds.coords
             or ds.time.values[0] != np.datetime64(entry['time'])):
         raise ValueError(f'{path}: incompatible v2 member/archive/time/split')
-    if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed')):
+    if any(key not in ds.attrs for key in (*IDENTITY_KEYS, 'seed') if key != 'noise_padding'):
         raise ValueError(f'{path}: missing sampler/checkpoint provenance')
-    return {name: ds.attrs[name].item() if isinstance(ds.attrs[name], np.generic) else ds.attrs[name]
-            for name in IDENTITY_KEYS}
+    return {**{name: ds.attrs[name].item() if isinstance(ds.attrs[name], np.generic) else ds.attrs[name]
+               for name in IDENTITY_KEYS if name != 'noise_padding'},
+            'noise_padding': saved_noise_padding_v2(ds.attrs)}
 
 
 def preflight(entries, root, fingerprint, expected_members):

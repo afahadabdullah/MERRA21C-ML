@@ -1,6 +1,7 @@
 """Strict v2 configuration and namespace isolation."""
 from pathlib import Path
 import yaml
+from .noise_v2 import noise_padding_v2
 
 
 def v2_path(path):
@@ -18,6 +19,7 @@ def load_config_v2(path):
 
 
 def validate_config_v2(cfg):
+    noise_padding_v2(cfg)
     if cfg.get('version') != 'v2':
         raise ValueError('Require version: v2')
     d, p, m, tr = (cfg[k] for k in ('data', 'patch', 'model', 'train'))
