@@ -114,7 +114,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         check_checkpoint_v2(ckpt, data.archive, cfg, stage)
         migrated_world = resume_world_change_v2(ckpt, cfg, world)
         def settings(value):
-            ignored = ('output', 'device', 'workers', 'batch_size') if migrated_world else ('output', 'device', 'workers')
+            ignored = ('output', 'device', 'workers', 'checkpoint_interval', 'batch_size') if migrated_world else ('output', 'device', 'workers', 'checkpoint_interval')
             return {k: v for k, v in value.items() if k not in ignored}
         if (settings(ckpt['config']['train']) != settings(tr) or ckpt['config']['loss'] != cfg['loss']
                 or (not migrated_world and len(ckpt['rng']) != world)):

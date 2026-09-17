@@ -105,9 +105,10 @@ epoch, the validation patch count and the learning-rate schedule. Model, EMA and
 optimizer weights resume from the last completed epoch; the data order and the
 extra GPUs' random streams change. This continuation is not bitwise identical
 to one-GPU training. The wrapper carries these environment settings into later
-12-hour continuation jobs. Four GPUs may shorten an epoch, but the gain depends
-on data loading and DDP communication; compare epoch wall times before assuming
-a fourfold speedup.
+12-hour continuation jobs. Numbered `epoch_XXXX_v2.pt` checkpoints are written
+every two completed epochs; `last_v2.pt` is written every epoch. Four GPUs may
+shorten an epoch, but the gain depends on data loading and DDP communication;
+compare epoch wall times before assuming a fourfold speedup.
 
 ## What is verified and what still requires production training
 
