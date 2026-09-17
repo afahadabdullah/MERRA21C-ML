@@ -104,7 +104,10 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     vloader = DataLoader(val, sampler=vsampler, shuffle=False, **kwargs)
     nc = data.archive.index['condition_channels']
     base = UNetV2(nc, **cfg['model'], mean_condition=stage == 'flow').to(device)
-    model = DDP(base, device_ids=[local]) if world > 1 else base
+    # ``self_attention.context_norm`` is allocated by AttentionV2 but never used
+    # when that module attends to itself, so DDP must be told to expect two
+    # parameters without gradients instead of stalling its reduction.
+    model = DDP(base, device_ids=[local], find_unused_parameters=True) if world > 1 else base
     ema = deepcopy(base).eval().requires_grad_(False)
     out = Path(tr['output'])/f'{stage}_v2'
     out.mkdir(parents=True, exist_ok=True)

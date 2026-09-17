@@ -116,6 +116,15 @@ every two completed epochs; `last_v2.pt` is written every epoch. Four GPUs may
 shorten an epoch, but the gain depends on data loading and DDP communication;
 compare epoch wall times before assuming a fourfold speedup.
 
+DDP is constructed with `find_unused_parameters=True`. The self-attention block
+allocates a `context_norm` it never uses, so two parameters receive no gradient
+in every iteration. One GPU never wrapped the model and never saw this; without
+the flag the first four-GPU step stops with "Expected to have finished reduction
+in the prior iteration" and names parameter indices 106 and 107. A resubmission
+of the same migration command is safe after that failure: nothing was written,
+so `flow_v2/last_v2.pt` still holds the last completed epoch and
+`best_before_reset_v2.pt` is left as it was.
+
 ## What is verified and what still requires production training
 
 Local tests exercise both stages, exact checkpoint resume, generated validation
