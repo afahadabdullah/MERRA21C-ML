@@ -24,7 +24,7 @@ env -u SLURM_MEM_PER_CPU -u SLURM_MEM_PER_NODE -u SLURM_MEM_PER_GPU \
 
 The array contains five tasks, one timestamp per task, with at most two active
 tasks. Each requests one A100, four CPUs, 48 GB host memory per GPU, and up to
-12 hours. Logs: `logs_v2/flow_diag_<array-ID>_<task-index>_v2.log` and `.err`.
+12 hours. Stdout and stderr share `logs_v2/flow_diag_<array-ID>_<task-index>_v2.log`.
 This performs seven times as many ODE steps as the original 24-step five-case
 test, and adds CPU diagnostics and file writes. The walltime is a requested
 limit, not a runtime estimate. Complete raw fields can occupy several GB.

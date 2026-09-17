@@ -8,7 +8,6 @@
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs_v2/rain_audit_%j_v2.log
-#SBATCH --error=logs_v2/rain_audit_%j_v2.err
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
 ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"

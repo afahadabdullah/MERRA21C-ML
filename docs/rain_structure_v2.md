@@ -95,6 +95,7 @@ env -u SLURM_MEM_PER_CPU -u SLURM_MEM_PER_NODE -u SLURM_MEM_PER_GPU \
     CONFIG=configs/discover_rain_structure_v2.yaml STAGE=flow \
     RESUME=runs/merraflow_rain_structure_v2/flow_v2/last_v2.pt \
     REGRESSION_CHECKPOINT= ALLOW_WORLD_SIZE_CHANGE=1 \
+    RESET_FLOW_BEST_ON_MIGRATION=1 \
     TRAIN_BATCH_SIZE_OVERRIDE=2 TRAIN_WORKERS_OVERRIDE=3 \
     sbatch --export=ALL --job-name=flow_v2 --gres=gpu:4 \
     --cpus-per-gpu=4 scripts/slurm_train_flow_v2.sh
@@ -104,7 +105,12 @@ The four-GPU run keeps the effective batch at 16, the 512 optimizer updates per
 epoch, the validation patch count and the learning-rate schedule. Model, EMA and
 optimizer weights resume from the last completed epoch; the data order and the
 extra GPUs' random streams change. This continuation is not bitwise identical
-to one-GPU training. The wrapper carries these environment settings into later
+to one-GPU training. A new generated-validation score after the first resumed
+epoch establishes the four-GPU best checkpoint. Full-domain progress plots are
+kept out of DDP training so one rank cannot hold up the other ranks; use the
+separate evaluation job for maps. The batch job tests GPU communication before
+opening the archive. The old best is preserved as
+`flow_v2/best_before_reset_v2.pt`. The wrapper carries these settings into later
 12-hour continuation jobs. Numbered `epoch_XXXX_v2.pt` checkpoints are written
 every two completed epochs; `last_v2.pt` is written every epoch. Four GPUs may
 shorten an epoch, but the gain depends on data loading and DDP communication;

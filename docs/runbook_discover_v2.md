@@ -113,8 +113,8 @@ ls -lt logs_v2
 ```
 
 Preparation logs are `logs_v2/prepare_<array-ID>_<month>_v2.log`. Both training
-stages use `logs_v2/flow_<job-ID>_v2.log` and `.err`; match their IDs to the
-submission record. A pending job with reason `Dependency` is waiting normally.
+stages write stdout and stderr to one `logs_v2/flow_<job-ID>_v2.log`; match the
+IDs to the submission record. A pending job with reason `Dependency` is waiting normally.
 
 | Output | Location relative to project root |
 |---|---|

@@ -11,7 +11,7 @@
 #SBATCH --mem-per-gpu=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs_v2/flow_%j_v2.log
-#SBATCH --error=logs_v2/flow_%j_v2.err
+# Slurm sends stderr to --output when --error is omitted.
 # Submit from project root after mkdir -p logs_v2.
 # The queue-friendly default is one A100. Request two at submission with
 # ``sbatch --gres=gpu:2 scripts/slurm_train_flow_v2.sh``. NPROC below is derived
@@ -52,6 +52,14 @@ NPROC=$(python -c 'import torch; print(torch.cuda.device_count())')
 if (( NPROC < 1 )); then
   echo 'No CUDA GPUs visible in this allocation' >&2
   exit 1
+fi
+if (( NPROC > 1 )); then
+  export PYTHONFAULTHANDLER=1
+  export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+  export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+  export TORCH_NCCL_DESYNC_DEBUG=1
+  echo "DDP preflight: ${NPROC} GPUs on $(hostname)"
+  srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.ddp_preflight_v2
 fi
 # Check both stages on a real prepared batch in the GPU allocation before a
 # fresh regression run. This measures scratch steps, not full-run headroom.

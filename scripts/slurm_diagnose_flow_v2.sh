@@ -12,7 +12,6 @@
 #SBATCH --time=12:00:00
 #SBATCH --array=0-4%2
 #SBATCH --output=logs_v2/flow_diag_%A_%a_v2.log
-#SBATCH --error=logs_v2/flow_diag_%A_%a_v2.err
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
 ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"

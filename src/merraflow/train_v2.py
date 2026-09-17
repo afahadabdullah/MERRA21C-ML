@@ -1,7 +1,8 @@
-"""Two-stage v2 training, DDP, EMA, exact epoch-boundary resume."""
+"""Two-stage v2 training, DDP, EMA, and epoch-boundary resume."""
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
+from shutil import copy2
 import hashlib
 import json
 import math
@@ -145,6 +146,8 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_scale)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and tr['precision'] == 'fp16')
     start, step, best = 0, 0, float('inf')
+    reset_flow_best = False
+    selection_generation = 0
     if ckpt:
         base.load_state_dict(ckpt['model'])
         ema.load_state_dict(ckpt['ema'])
@@ -152,14 +155,31 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         scheduler.load_state_dict(ckpt['scheduler'])
         scaler.load_state_dict(ckpt['scaler'])
         start, step, best = ckpt['epoch']+1, ckpt['step'], ckpt['best']
+        selection_generation = ckpt.get('selection_generation', 0)
+        reset_flow_best = (stage == 'flow' and selection_generation == 0
+                           and os.getenv('RESET_FLOW_BEST_ON_MIGRATION') == '1')
+        if reset_flow_best:
+            best = float('inf')
+            selection_generation = 1
         if rank < len(ckpt['rng']):
             torch.set_rng_state(ckpt['rng'][rank]['cpu'])
             if device.type == 'cuda':
                 torch.cuda.set_rng_state(ckpt['rng'][rank]['cuda'], device)
     if rank == 0:
+        if reset_flow_best:
+            previous_best = out/'best_v2.pt'
+            backup = out/'best_before_reset_v2.pt'
+            if previous_best.is_file() and not backup.exists():
+                temporary = backup.with_name(backup.name+'.tmp')
+                copy2(previous_best, temporary)
+                os.replace(temporary, backup)
+                print(f'Preserved previous best at {backup}', flush=True)
         if ckpt and migrated_world:
             print(f'{stage} DDP migration: {len(ckpt["rng"])} to {world} GPUs at completed epoch {start}; '
                   'weights, optimizer, EMA and LR schedule preserved; sample order changes', flush=True)
+        if reset_flow_best:
+            print('Flow best-score reset: generated validation will establish a new baseline '
+                  'after the first resumed epoch', flush=True)
         write_json(out/'config_v2.json', cfg)
         print(f'V2 {stage}: {sum(x.numel() for x in base.parameters()):,} parameters; world={world}; '
               f'effective_batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
@@ -177,8 +197,11 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         if rank == 0:
             print(f'Flow job: resume at epoch {start+1} of {epochs}; stop near '
                   f'{stop_minutes} minutes remaining; full-domain validation plot '
-                  f'every {plot_interval} epochs', flush=True)
-            if start and start % plot_interval == 0 and not list(
+                  f'every {plot_interval} epochs on one GPU', flush=True)
+            if world > 1:
+                print('Full-domain progress plots skipped inside DDP training; '
+                      'run the separate evaluation job for maps', flush=True)
+            if world == 1 and start and start % plot_interval == 0 and not list(
                     (out/'plots_v2').glob(f'epoch_{start:04d}_*_v2.png')):
                 # A wall-time kill can land after the checkpoint but during
                 # plotting. Recreate that comparison before advancing.
@@ -240,7 +263,8 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
             raise FloatingPointError('Nonfinite v2 epoch metrics')
         generated = None
         generated_settings = tr.get('generated_validation') if stage == 'flow' else None
-        if generated_settings and (epoch == 0 or (epoch+1) % generated_settings['interval'] == 0 or epoch+1 == epochs):
+        if generated_settings and (epoch == 0 or (reset_flow_best and epoch == start)
+                                   or (epoch+1) % generated_settings['interval'] == 0 or epoch+1 == epochs):
             from .generated_validation_v2 import generated_validation_v2
             generated = generated_validation_v2(ema, mean_model, flow_scale, vloader, cfg, device, rank, world)
         # A falling velocity objective alone did not select useful rainfall.
@@ -268,6 +292,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                            stats=data.archive.stats, fingerprint=data.archive.index['fingerprint'],
                            regression_ema=mean_model.state_dict() if mean_model is not None else None,
                            regression_sha256=mean_hash, flow_scale=flow_scale,
+                           selection_generation=selection_generation,
                            selection_metric='rain_crps_plus_mean_rmse_plus_structure' if generated_settings else 'validation_objective')
             atomic_save(out/'last_v2.pt', payload)
             if improved:
@@ -275,7 +300,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
             if (epoch+1) % tr['checkpoint_interval'] == 0:
                 atomic_save(out/f'epoch_{epoch+1:04d}_v2.pt', payload)
             print(json.dumps(row), flush=True)
-            if stage == 'flow' and (epoch+1) % plot_interval == 0:
+            if stage == 'flow' and world == 1 and (epoch+1) % plot_interval == 0:
                 from .flow_progress_v2 import plot_flow_progress_v2
                 path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema, flow_scale,
                                              device, epoch+1, out)
