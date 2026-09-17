@@ -53,7 +53,7 @@ model:
   - 4
   - 4
   time_dim: 128
-  activation_checkpointing: true
+  activation_checkpointing: false
   blocks_per_level: 2
   attention_heads: 4
 train:

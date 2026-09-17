@@ -101,6 +101,11 @@ env -u SLURM_MEM_PER_CPU -u SLURM_MEM_PER_NODE -u SLURM_MEM_PER_GPU \
     --cpus-per-gpu=4 scripts/slurm_train_flow_v2.sh
 ```
 
+Add `TEST_AFTER_TRAINING=1` to that environment to have the final epoch queue the
+five-case test against `flow_v2/best_v2.pt`. Each continuation job resubmits with
+`--export=ALL`, so the flag only has to be set on the first submission; a
+continuation submitted by hand without it drops the test.
+
 The four-GPU run keeps the effective batch at 16, the 512 optimizer updates per
 epoch, the validation patch count and the learning-rate schedule. Model, EMA and
 optimizer weights resume from the last completed epoch; the data order and the

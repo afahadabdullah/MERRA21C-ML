@@ -33,12 +33,22 @@ def file_hash_v2(path):
     return h.hexdigest()
 
 
+def architecture_v2(model_config):
+    """Weight-shaping settings only.
+
+    ``activation_checkpointing`` trades recomputation for activation memory and
+    leaves the parameters and their gradients unchanged, so it must not block a
+    resume the way a real architecture change does.
+    """
+    return {k: v for k, v in model_config.items() if k != 'activation_checkpointing'}
+
+
 def check_checkpoint_v2(ckpt, archive, cfg, stage=None):
     if ckpt.get('version') != 'v2' or (stage and ckpt['stage'] != stage):
         raise ValueError('Wrong checkpoint version or stage')
     if ckpt['fingerprint'] != archive.index['fingerprint'] or ckpt['stats'] != archive.stats:
         raise ValueError('V2 checkpoint and archive/statistics mismatch')
-    if ckpt['config']['model'] != cfg['model'] or ckpt['config']['patch'] != cfg['patch']:
+    if architecture_v2(ckpt['config']['model']) != architecture_v2(cfg['model']) or ckpt['config']['patch'] != cfg['patch']:
         raise ValueError('V2 checkpoint model/patch mismatch')
     if precipitation_representation_v2(ckpt['config']) != precipitation_representation_v2(cfg):
         raise ValueError('Checkpoint precipitation representation mismatch; retrain both stages')
@@ -86,6 +96,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     torch.manual_seed(tr['seed']+rank)
     if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
+        # Patch and batch shapes are fixed for a whole run, so the one-time
+        # algorithm search pays for itself in convolution launch time.
+        torch.backends.cudnn.benchmark = True
     representation = precipitation_representation_v2(cfg)
     data = PatchDatasetV2(cfg['data']['prepared'], 'train', p, p['samples_per_epoch'], tr['seed'], representation)
     val = PatchDatasetV2(cfg['data']['prepared'], 'val', p, tr['val_batches']*tr['batch_size']*world, tr['seed']+991, representation)
