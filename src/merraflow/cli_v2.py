@@ -1,5 +1,6 @@
 """Separate v2 CLI; the existing merraflow command remains v1."""
 import argparse
+import os
 from .config_v2 import load_config_v2
 
 
@@ -46,6 +47,11 @@ def main():
         print(diagnostics_v2(cfg))
         return
     cfg = load_config_v2(args.config)
+    if args.command == 'train':
+        if os.getenv('TRAIN_BATCH_SIZE_OVERRIDE'):
+            cfg['train']['batch_size'] = int(os.environ['TRAIN_BATCH_SIZE_OVERRIDE'])
+        if os.getenv('TRAIN_WORKERS_OVERRIDE'):
+            cfg['train']['workers'] = int(os.environ['TRAIN_WORKERS_OVERRIDE'])
     if args.command == 'coverage':
         from .audit_v2 import coverage_v2
         coverage_v2(cfg)

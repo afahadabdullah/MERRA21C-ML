@@ -78,6 +78,37 @@ weights. Outputs go to `runs/merraflow_rain_structure_v2/trained_test_v2`.
 No test data enter training or checkpoint selection. Do not submit the same run
 twice concurrently. A failed command exits without queuing its successor.
 
+## Continue an existing one-GPU flow run on four GPUs
+
+The original checkpoint contains one rank's random state, so changing GPU count
+requires an explicit migration. Do this only after a completed flow epoch has
+written `flow_v2/last_v2.pt`. First identify the **flow training** job with
+`squeue -u "$USER"`; do not cancel a `flow_latest_test_v2` evaluation job. Cancel
+the flow training job, confirm it has left the queue, then submit from the project
+root:
+
+```bash
+git pull --ff-only
+scancel FLOW_TRAINING_JOB_ID
+squeue -u "$USER"
+env -u SLURM_MEM_PER_CPU -u SLURM_MEM_PER_NODE -u SLURM_MEM_PER_GPU \
+    CONFIG=configs/discover_rain_structure_v2.yaml STAGE=flow \
+    RESUME=runs/merraflow_rain_structure_v2/flow_v2/last_v2.pt \
+    REGRESSION_CHECKPOINT= ALLOW_WORLD_SIZE_CHANGE=1 \
+    TRAIN_BATCH_SIZE_OVERRIDE=2 TRAIN_WORKERS_OVERRIDE=3 \
+    sbatch --export=ALL --job-name=flow_v2 --gres=gpu:4 \
+    --cpus-per-gpu=4 scripts/slurm_train_flow_v2.sh
+```
+
+The four-GPU run keeps the effective batch at 16, the 512 optimizer updates per
+epoch, the validation patch count and the learning-rate schedule. Model, EMA and
+optimizer weights resume from the last completed epoch; the data order and the
+extra GPUs' random streams change. This continuation is not bitwise identical
+to one-GPU training. The wrapper carries these environment settings into later
+12-hour continuation jobs. Four GPUs may shorten an epoch, but the gain depends
+on data loading and DDP communication; compare epoch wall times before assuming
+a fourfold speedup.
+
 ## What is verified and what still requires production training
 
 Local tests exercise both stages, exact checkpoint resume, generated validation

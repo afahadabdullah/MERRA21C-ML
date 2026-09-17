@@ -21,6 +21,7 @@ from .train import device_for, autocast, to_device, atomic_save
 from .slurm_time_v2 import flow_time_left_seconds
 from .physics_v2 import precipitation_representation_v2
 from .rain_prior_v2 import rain_noise_sigma_v2
+from .resume_v2 import resume_world_change_v2
 
 
 def file_hash_v2(path):
@@ -111,10 +112,12 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     ckpt = torch.load(resume, map_location='cpu', weights_only=True) if resume else None
     if ckpt:
         check_checkpoint_v2(ckpt, data.archive, cfg, stage)
+        migrated_world = resume_world_change_v2(ckpt, cfg, world)
         def settings(value):
-            return {k: v for k, v in value.items() if k not in ('output', 'device', 'workers')}
+            ignored = ('output', 'device', 'workers', 'batch_size') if migrated_world else ('output', 'device', 'workers')
+            return {k: v for k, v in value.items() if k not in ignored}
         if (settings(ckpt['config']['train']) != settings(tr) or ckpt['config']['loss'] != cfg['loss']
-                or len(ckpt['rng']) != world):
+                or (not migrated_world and len(ckpt['rng']) != world)):
             raise ValueError('Exact resume requires same training/loss settings and world size')
     mean_model, flow_scale, mean_hash = None, None, None
     if stage == 'flow':
@@ -149,10 +152,14 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         scheduler.load_state_dict(ckpt['scheduler'])
         scaler.load_state_dict(ckpt['scaler'])
         start, step, best = ckpt['epoch']+1, ckpt['step'], ckpt['best']
-        torch.set_rng_state(ckpt['rng'][rank]['cpu'])
-        if device.type == 'cuda':
-            torch.cuda.set_rng_state(ckpt['rng'][rank]['cuda'], device)
+        if rank < len(ckpt['rng']):
+            torch.set_rng_state(ckpt['rng'][rank]['cpu'])
+            if device.type == 'cuda':
+                torch.cuda.set_rng_state(ckpt['rng'][rank]['cuda'], device)
     if rank == 0:
+        if ckpt and migrated_world:
+            print(f'{stage} DDP migration: {len(ckpt["rng"])} to {world} GPUs at completed epoch {start}; '
+                  'weights, optimizer, EMA and LR schedule preserved; sample order changes', flush=True)
         write_json(out/'config_v2.json', cfg)
         print(f'V2 {stage}: {sum(x.numel() for x in base.parameters()):,} parameters; world={world}; '
               f'effective_batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
