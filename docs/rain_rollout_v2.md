@@ -124,6 +124,31 @@ the submission helper run again.
 For a run originally submitted with `GPUS=4`, use `--gres=gpu:4` when resuming
 its frozen configuration. A mismatched GPU count is rejected.
 
+## Evaluate the best checkpoint while training continues
+
+After syncing `scripts/submit_best_test_v2.sh` to Discover, submit from the
+cluster project directory:
+
+```bash
+bash scripts/submit_best_test_v2.sh
+```
+
+This freezes `runs/merraflow_rain_edges_v2/flow_v2/best_v2.pt` and its embedded
+configuration in a unique `evaluations_v2/best_v2_*` directory. It prints the
+selected epoch, score, SHA256, output directory and submitted job ID. Set
+`RUN_ROOT` for another run. The evaluation requests one A100, five members,
+24 integration steps and the same five test timestamps as the final test.
+Training can continue independently; subsequent best-checkpoint updates do
+not change this evaluation. The best composite score does not imply that the
+checkpoint beats the coarse baseline.
+
+The `diagnostic_v2` subdirectory contains full-domain and storm-zoom comparison
+maps, `rmse_summary_v2.png`, `metrics_v2.json`, and ensemble NetCDF predictions.
+Training-history plots are also written when history is available; these read
+the run's history at evaluation time, whereas checkpoint weights are frozen.
+Metrics include RMSE, MAE, bias, correlation, CRPS, spread and coverage, plus
+rainfall CSI, POD, FAR, Brier score, reliability bins and neighborhood FSS.
+
 ## Read the results
 
 - `flow_v2/history_v2.jsonl`: `rain_rollout_train` records auxiliary components
