@@ -28,6 +28,10 @@ cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=1
 export MPLCONFIGDIR="${TMPDIR:-/tmp}/merraflow-matplotlib-${SLURM_JOB_ID}"
+# Discover can allocate the requested CPUs while carrying an inherited binding
+# mask that is invalid for the nested ``srun`` step.  Torchrun owns the local
+# worker placement, so let the step access its complete Slurm CPU allocation.
+srun_args=(--cpu-bind=none)
 CONFIG="${CONFIG:-configs/discover_v2.yaml}"
 STAGE="${STAGE:-regression}"
 case "$STAGE" in regression|flow) ;; *) echo 'Invalid STAGE' >&2; exit 2 ;; esac
@@ -59,23 +63,23 @@ if (( NPROC > 1 )); then
   export TORCH_NCCL_DUMP_ON_TIMEOUT=1
   export TORCH_NCCL_DESYNC_DEBUG=1
   echo "DDP preflight: ${NPROC} GPUs on $(hostname)"
-  srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.ddp_preflight_v2
+  srun "${srun_args[@]}" torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.ddp_preflight_v2
 fi
 # Check both stages on a real prepared batch in the GPU allocation before a
 # fresh regression run. This measures scratch steps, not full-run headroom.
 if [[ "${STAGE:-regression}" == regression && -z "${RESUME:-}" ]]; then
-  srun python scripts/benchmark_v2.py --config "$CONFIG" --steps 5
+  srun "${srun_args[@]}" python scripts/benchmark_v2.py --config "$CONFIG" --steps 5
 fi
 if [[ "$STAGE" == flow && -z "${RESUME:-}" && "${TRAIN_PREFLIGHT:-0}" == 1 ]]; then
   benchmark_args=(--config "$CONFIG" --steps 2 --stage flow)
   if [[ -n "${INITIALIZE_FLOW:-}" ]]; then benchmark_args+=(--initialize-flow "$INITIALIZE_FLOW"); fi
-  srun python scripts/benchmark_v2.py "${benchmark_args[@]}"
+  srun "${srun_args[@]}" python scripts/benchmark_v2.py "${benchmark_args[@]}"
 fi
 args=(--config "$CONFIG" --stage "${STAGE:-regression}")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi
 if [[ -n "${RESUME:-}" ]]; then args+=(--resume "$RESUME"); fi
 if [[ -n "${INITIALIZE_FLOW:-}" && -z "${RESUME:-}" ]]; then args+=(--initialize-flow "$INITIALIZE_FLOW"); fi
-srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.cli_v2 train "${args[@]}"
+srun "${srun_args[@]}" torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.cli_v2 train "${args[@]}"
 if [[ "$STAGE" == flow || "${TRAIN_FLOW_AFTER_REGRESSION:-0}" == 1 ]]; then
   # Training has returned at an epoch boundary. Read the durable checkpoint,
   # not history.jsonl, which can be one record ahead after an interrupted save.

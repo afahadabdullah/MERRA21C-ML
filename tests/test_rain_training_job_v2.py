@@ -50,9 +50,11 @@ def test_training_job_continuation_and_final_test(tmp_path, stage, epoch, expect
     subprocess.run(['bash', '-c', '''
 source() { :; }
 conda() { :; }
-srun() { :; }
+srun() { printf '%s\n' "$*" >> "$SRUN_CAPTURE"; }
 . scripts/slurm_train_flow_v2.sh
-'''], cwd=root, env=env, text=True, capture_output=True, check=True)
+'''], cwd=root, env={**env, 'SRUN_CAPTURE': str(tmp_path/'srun.txt')}, text=True, capture_output=True, check=True)
+    srun_calls = (tmp_path/'srun.txt').read_text().splitlines()
+    assert srun_calls and all(call.startswith('--cpu-bind=none ') for call in srun_calls)
     submitted = json.loads(capture.read_text())
     assert submitted['args'][-1].endswith(expected_script)
     assert submitted['env']['STAGE'] == expected_stage
