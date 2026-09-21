@@ -43,8 +43,8 @@ if [[ -z "${RESUME:-}" && -f "$stage_dir/last_v2.pt" ]]; then
   RESUME="$stage_dir/last_v2.pt"
 fi
 if [[ "$STAGE" == flow ]]; then
-  if [[ -z "${RESUME:-}" && ! -f "${REGRESSION_CHECKPOINT:-}" ]]; then
-    echo 'Flow needs a completed regression checkpoint; none was found.' >&2
+  if [[ -z "${RESUME:-}" && ! -f "${REGRESSION_CHECKPOINT:-}" && ! -f "${INITIALIZE_FLOW:-}" ]]; then
+    echo 'Flow needs a regression checkpoint or INITIALIZE_FLOW; none was found.' >&2
     exit 1
   fi
 fi
@@ -66,9 +66,15 @@ fi
 if [[ "${STAGE:-regression}" == regression && -z "${RESUME:-}" ]]; then
   srun python scripts/benchmark_v2.py --config "$CONFIG" --steps 5
 fi
+if [[ "$STAGE" == flow && -z "${RESUME:-}" && "${TRAIN_PREFLIGHT:-0}" == 1 ]]; then
+  benchmark_args=(--config "$CONFIG" --steps 2 --stage flow)
+  if [[ -n "${INITIALIZE_FLOW:-}" ]]; then benchmark_args+=(--initialize-flow "$INITIALIZE_FLOW"); fi
+  srun python scripts/benchmark_v2.py "${benchmark_args[@]}"
+fi
 args=(--config "$CONFIG" --stage "${STAGE:-regression}")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi
 if [[ -n "${RESUME:-}" ]]; then args+=(--resume "$RESUME"); fi
+if [[ -n "${INITIALIZE_FLOW:-}" && -z "${RESUME:-}" ]]; then args+=(--initialize-flow "$INITIALIZE_FLOW"); fi
 srun torchrun --standalone --nnodes=1 --nproc-per-node="$NPROC" -m merraflow.cli_v2 train "${args[@]}"
 if [[ "$STAGE" == flow || "${TRAIN_FLOW_AFTER_REGRESSION:-0}" == 1 ]]; then
   # Training has returned at an epoch boundary. Read the durable checkpoint,
@@ -98,7 +104,15 @@ PY
   else
     echo "Flow training complete at $completed/$target epochs; no continuation submitted"
     if [[ "${TEST_AFTER_TRAINING:-0}" == 1 ]]; then
-      next_job="$(env -u SLURM_MEM_PER_GPU CONFIG="$CONFIG" CHECKPOINT="$stage_dir/best_v2.pt" \
+      test_checkpoint="$stage_dir/best_v2.pt"
+      if [[ "${PREFER_SKILL_CHECKPOINT:-0}" == 1 ]]; then
+        if [[ -f "$stage_dir/best_skill_v2.pt" ]]; then
+          test_checkpoint="$stage_dir/best_skill_v2.pt"
+        else
+          echo 'No checkpoint beat the coarse baseline on all three validation criteria; testing best_v2 for diagnosis.'
+        fi
+      fi
+      next_job="$(env -u SLURM_MEM_PER_GPU CONFIG="$CONFIG" CHECKPOINT="$test_checkpoint" \
         OUTPUT="${stage_dir%/flow_v2}/trained_test_v2" SPLIT=test MEMBERS=5 STEPS=24 \
         COMPARE_NOISE_PADDING=0 NOISE_PADDING= INCLUDE_DATE= \
         TIMESTAMPS='20260223_0530 20260209_1530 20260209_2030 20260305_1230 20260306_1830' \

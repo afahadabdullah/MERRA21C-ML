@@ -159,11 +159,14 @@ def plot_summary(out, reports, members, split):
 def plot_history(out, train_root):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
     plotted = False
+    generated = []
     for ax, stage in zip(axes, ('regression', 'flow')):
         path = train_root/f'{stage}_v2'/'history_v2.jsonl'
         if path.exists():
             rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
             if rows:
+                if stage == 'flow':
+                    generated = [r for r in rows if 'generated_validation' in r]
                 for label in ('train', 'val'):
                     ax.plot([r['epoch'] for r in rows], [r[label]['total'] for r in rows], label=label)
                 ax.legend()
@@ -172,6 +175,25 @@ def plot_history(out, train_root):
     if plotted:
         fig.savefig(out/'training_v2.png', dpi=160)
     plt.close(fig)
+    if generated:
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+        comparisons = (
+            ('Rainfall RMSE', 'ensemble_mean_rmse_mm_h', 'coarse_rmse_mm_h'),
+            ('Rainfall CRPS / coarse MAE', 'crps_mm_h', 'coarse_mae_mm_h'),
+            ('Rainfall spatial error', 'structure_rmse_mm_h', 'coarse_structure_rmse_mm_h'))
+        for ax, (title, score, baseline) in zip(axes, comparisons):
+            epochs = [r['epoch'] for r in generated]
+            ax.plot(epochs, [r['generated_validation'][score] for r in generated], label='Flow ensemble')
+            coarse = [r for r in generated if baseline in r['generated_validation']]
+            if coarse:
+                ax.plot([r['epoch'] for r in coarse], [r['generated_validation'][baseline] for r in coarse],
+                        '--', label='Coarse baseline')
+            ax.set(title=title, xlabel='Completed flow epoch', ylabel='mm/h')
+            ax.grid(alpha=.2)
+            ax.legend()
+        fig.suptitle('Generated validation rainfall · lower is better')
+        fig.savefig(out/'rain_training_v2.png', dpi=160)
+        plt.close(fig)
 
 
 def boundary_affected_mask(shape, patch):

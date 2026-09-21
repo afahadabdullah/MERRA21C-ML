@@ -23,15 +23,16 @@ def crop_v2(array, y, x, size, halo=0):
     return crop(array, y, x, size, halo)
 
 
-def proposal_cache_paths(root, patch):
+def proposal_cache_paths(root, patch, kind='rain'):
     """Scores depend on the archive and on the candidate grid, so key them by both."""
-    stem = Path(root)/'_proposals_v2'/f"size{patch['size']}_stride{patch['sampling_stride']}"
+    suffix = '_rain_edges_v1' if kind == 'structure' else ''
+    stem = Path(root)/'_proposals_v2'/f"size{patch['size']}_stride{patch['sampling_stride']}{suffix}"
     return stem.with_suffix('.npy'), stem.with_suffix('.json')
 
 
-def load_proposal_cache(root, patch, candidates, shape):
+def load_proposal_cache(root, patch, candidates, shape, kind='rain'):
     """Return (scores, {entry id: row}) or (None, {}) when no usable cache exists."""
-    scores_path, meta_path = proposal_cache_paths(root, patch)
+    scores_path, meta_path = proposal_cache_paths(root, patch, kind)
     if not (scores_path.exists() and meta_path.exists()):
         return None, {}
     meta = json.loads(meta_path.read_text())
@@ -108,6 +109,19 @@ def box_means_v2(field, yy, xx, size):
     return (integral[yy+size, xx+size]-integral[yy, xx+size]-integral[yy+size, xx]+integral[yy, xx])/(size*size)
 
 
+def rain_edge_scores_v2(rain, yy, xx, size):
+    """Favor true rain-rate boundaries and patches containing wet and dry areas.
+
+    Uses training truth only to form a sampling proposal, never a model input.
+    log1p prevents a few extreme rates from dominating gradient magnitudes.
+    """
+    transformed = np.log1p(np.maximum(rain, 0))
+    gy, gx = np.gradient(transformed)
+    gradient = box_means_v2(np.abs(gx)+np.abs(gy), yy, xx, size)
+    wet = box_means_v2(np.asarray(rain >= .1, dtype=np.float32), yy, xx, size)
+    return gradient+wet*(1-wet)+1e-4
+
+
 class PatchDatasetV2(Dataset):
     def __init__(self, root, split, patch, samples, seed=0, precipitation_representation='log1p'):
         self.archive = ArchiveV2(root, precipitation_representation)
@@ -116,6 +130,7 @@ class PatchDatasetV2(Dataset):
             raise ValueError(f'Empty {split} split')
         self.patch, self.samples, self.seed, self.epoch = patch, samples, seed, 0
         self.detail = patch['detail_fraction'] if split == 'train' else 0.
+        self.structure = patch.get('structure_fraction', 0.) if split == 'train' else 0.
         self.yy, self.xx = candidates_v2(self.archive.shape, patch['size'], patch['sampling_stride'])
         land = self.archive.static['land_fraction']
         coast = np.abs(np.gradient(land, axis=0))+np.abs(np.gradient(land, axis=1))
@@ -126,6 +141,9 @@ class PatchDatasetV2(Dataset):
         # fall back to computing the same value on demand.
         self.cached_scores, self.cached_rows = load_proposal_cache(
             self.archive.root, patch, len(self.yy), self.archive.shape)
+        self.cached_edges, self.cached_edge_rows = (load_proposal_cache(
+            self.archive.root, patch, len(self.yy), self.archive.shape, 'structure')
+            if self.structure else (None, {}))
 
     def __len__(self):
         return self.samples
@@ -139,11 +157,20 @@ class PatchDatasetV2(Dataset):
 
     def proposal(self, entry):
         n = len(self.yy)
-        if not self.detail:
+        if not self.detail and not self.structure:
             return np.full(n, 1/n)
         if entry['id'] not in self.proposals:
-            score = self.rain_score(entry)+5*self.coast+.01
-            self.proposals[entry['id']] = (1-self.detail)/n+self.detail*score/score.sum()
+            q = np.full(n, (1-self.detail-self.structure)/n)
+            if self.detail:
+                score = self.rain_score(entry)+5*self.coast+.01
+                q += self.detail*score/score.sum()
+            if self.structure:
+                row = self.cached_edge_rows.get(entry['id'])
+                edges = (np.asarray(self.cached_edges[row], dtype='float64') if row is not None else
+                         rain_edge_scores_v2(np.asarray(self.archive.array(entry, 'truth')[1]),
+                                             self.yy, self.xx, self.patch['size']))
+                q += self.structure*edges/edges.sum()
+            self.proposals[entry['id']] = q
         return self.proposals[entry['id']]
 
     def __getitem__(self, index):
@@ -157,10 +184,12 @@ class PatchDatasetV2(Dataset):
         target = (crop_v2(a.array(entry, 'residual'), y, x, p['size'], p['halo'])-a.rm)/a.rs
         extra = {}
         if a.precipitation_representation == 'sqrt1p':
-            baseline = a.encode(crop_v2(a.array(entry, 'baseline'), y, x, p['size'], p['halo']))
+            physical_baseline = crop_v2(a.array(entry, 'baseline'), y, x, p['size'], p['halo'])
+            baseline = a.encode(physical_baseline)
             truth = crop_v2(a.array(entry, 'truth'), y, x, p['size'], p['halo'])
             target[1] = a.encode(truth)[1]-baseline[1]
             extra = dict(rain_baseline=torch.from_numpy(baseline[1].copy()),
+                         rain_coarse=torch.from_numpy(physical_baseline[1].copy()),
                          rain_truth=torch.from_numpy(truth[1].copy()),
                          rain_scale=torch.tensor(a.stats['precip_log_scale'], dtype=torch.float32))
         area = crop_v2(a.static['area'], y, x, p['size'])

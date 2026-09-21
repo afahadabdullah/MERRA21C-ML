@@ -53,7 +53,38 @@ def validate_config_v2(cfg):
             raise ValueError('Generated rainfall validation requires sqrt1p')
         if any(not isinstance(generated.get(k), int) or generated[k] < 1 for k in ('batches', 'interval', 'steps')) or generated.get('members', 0) < 2:
             raise ValueError('Invalid generated validation counts')
+    rollout = cfg['train'].get('rain_rollout', {})
+    if rollout:
+        if precipitation_representation_v2(cfg) != 'sqrt1p' or not generated:
+            raise ValueError('Rain rollout requires sqrt1p and generated validation')
+        for key in ('steps', 'members', 'patches', 'interval', 'ramp_epochs'):
+            if type(rollout.get(key)) is not int or rollout[key] < (2 if key == 'members' else 1):
+                raise ValueError(f'Invalid rain_rollout.{key}')
+        if type(rollout.get('warmup_epochs')) is not int or rollout['warmup_epochs'] < 0:
+            raise ValueError('Invalid rain_rollout.warmup_epochs')
+        for key in ('weight', 'crps_weight', 'variogram_weight', 'coverage_weight', 'mean_mse_weight',
+                    'rate_scale_mm_h', 'coverage_temperature_mm_h'):
+            value = rollout.get(key)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f'Invalid rain_rollout.{key}')
+        for key in ('lags', 'pool_scales'):
+            values = rollout.get(key)
+            if not isinstance(values, list) or not values or any(type(v) is not int or v < 1 for v in values):
+                raise ValueError(f'Invalid rain_rollout.{key}')
+            if min(values) > cfg['patch']['size'] or (key == 'lags' and min(values) >= cfg['patch']['size']):
+                raise ValueError(f'No usable rain_rollout.{key} for this patch')
+        thresholds = rollout.get('thresholds_mm_h')
+        if not isinstance(thresholds, list) or not thresholds or any(
+                not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in thresholds):
+            raise ValueError('Invalid rain_rollout.thresholds_mm_h')
     d, p, m, tr = (cfg[k] for k in ('data', 'patch', 'model', 'train'))
+    if 'reference_world_size' in tr and (type(tr['reference_world_size']) is not int or tr['reference_world_size'] < 1):
+        raise ValueError('reference_world_size must be a positive integer')
+    structure_fraction = p.get('structure_fraction', 0.)
+    if not isinstance(structure_fraction, (int, float)) or not math.isfinite(structure_fraction) or not 0 <= structure_fraction < 1-p['detail_fraction']:
+        raise ValueError('structure_fraction + detail_fraction must be < 1, leaving uniform coverage')
+    if 'context_tokens' in m and (type(m['context_tokens']) is not int or not 1 <= m['context_tokens'] <= math.ceil(p['context_size']/4)):
+        raise ValueError('context_tokens must fit the encoded context grid')
     if d['conserve_training_precip'] is not False or cfg['inference']['conserve_precip'] is not False:
         raise ValueError('V2 never projects precipitation')
     if d['precip_source'] != 'hwt_30mn_slv_LCC.PRECTOT' or d['state_alignment'] != 'midpoint_snapshot':

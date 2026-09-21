@@ -18,6 +18,7 @@ def main():
             p.add_argument('--stage', choices=('regression', 'flow'), required=True)
             p.add_argument('--resume')
             p.add_argument('--regression-checkpoint')
+            p.add_argument('--initialize-flow', help='Start a new run from flow EMA and its embedded regression; reset optimizer and schedule')
         elif name == 'predict':
             p.add_argument('--checkpoint', required=True)
             p.add_argument('--split', choices=('train', 'val', 'test', 'predict'), default='val')
@@ -75,7 +76,7 @@ def main():
         result = prepare_predict(cfg, args.reference_archive)
     elif args.command == 'train':
         from .train_v2 import train_v2
-        result = train_v2(cfg, args.stage, args.resume, args.regression_checkpoint)
+        result = train_v2(cfg, args.stage, args.resume, args.regression_checkpoint, args.initialize_flow)
     elif args.command == 'predict':
         from .inference_v2 import predict_v2
         result = predict_v2(cfg, args.checkpoint, args.split, args.limit, args.timestamp)

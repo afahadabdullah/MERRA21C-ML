@@ -23,6 +23,7 @@ from .slurm_time_v2 import flow_time_left_seconds
 from .physics_v2 import precipitation_representation_v2
 from .rain_prior_v2 import rain_noise_sigma_v2
 from .resume_v2 import resume_world_change_v2
+from .rain_rollout_v2 import RainFlowObjectiveV2, ROLLOUT_METRICS, rollout_strength_v2
 
 
 def file_hash_v2(path):
@@ -40,15 +41,25 @@ def architecture_v2(model_config):
     leaves the parameters and their gradients unchanged, so it must not block a
     resume the way a real architecture change does.
     """
-    return {k: v for k, v in model_config.items() if k != 'activation_checkpointing'}
+    result = {k: v for k, v in model_config.items() if k != 'activation_checkpointing'}
+    result.setdefault('context_tokens', 8)
+    return result
 
 
-def check_checkpoint_v2(ckpt, archive, cfg, stage=None):
+def patch_geometry_v2(patch):
+    return {k: v for k, v in patch.items() if k not in
+            ('samples_per_epoch', 'sampling_stride', 'detail_fraction', 'structure_fraction')}
+
+
+def check_checkpoint_v2(ckpt, archive, cfg, stage=None, allow_sampling_change=False):
     if ckpt.get('version') != 'v2' or (stage and ckpt['stage'] != stage):
         raise ValueError('Wrong checkpoint version or stage')
     if ckpt['fingerprint'] != archive.index['fingerprint'] or ckpt['stats'] != archive.stats:
         raise ValueError('V2 checkpoint and archive/statistics mismatch')
-    if architecture_v2(ckpt['config']['model']) != architecture_v2(cfg['model']) or ckpt['config']['patch'] != cfg['patch']:
+    old_patch, new_patch = ckpt['config']['patch'], cfg['patch']
+    if allow_sampling_change:
+        old_patch, new_patch = patch_geometry_v2(old_patch), patch_geometry_v2(new_patch)
+    if architecture_v2(ckpt['config']['model']) != architecture_v2(cfg['model']) or old_patch != new_patch:
         raise ValueError('V2 checkpoint model/patch mismatch')
     if precipitation_representation_v2(ckpt['config']) != precipitation_representation_v2(cfg):
         raise ValueError('Checkpoint precipitation representation mismatch; retrain both stages')
@@ -80,12 +91,16 @@ def calibrate_v2(mean_model, loader, cfg, device, world):
     return torch.sqrt(sums[:5]/sums[5]).clamp_min(.05).float()[None, :, None, None]
 
 
-def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
+def train_v2(cfg, stage, resume=None, regression_checkpoint=None, initialize_flow=None):
     validate_config_v2(cfg)
     if stage not in ('regression', 'flow'):
         raise ValueError('Choose regression or flow stage')
+    if initialize_flow and (stage != 'flow' or resume or regression_checkpoint):
+        raise ValueError('initialize_flow is flow-only and cannot be combined with resume or regression_checkpoint')
     tr, p = cfg['train'], cfg['patch']
     rank, world, local = [int(os.getenv(k, default)) for k, default in [('RANK', 0), ('WORLD_SIZE', 1), ('LOCAL_RANK', 0)]]
+    if tr.get('reference_world_size', world) != world:
+        raise ValueError('GPU count differs from reference_world_size; submit the new run with GPUS=2 or GPUS=4 using submit_rain_rollout_v2.sh')
     device = device_for(tr['device'])
     if world > 1:
         if device.type != 'cuda':
@@ -120,13 +135,24 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     # ``self_attention.context_norm`` is allocated by AttentionV2 but never used
     # when that module attends to itself, so DDP must be told to expect two
     # parameters without gradients instead of stalling its reduction.
-    model = DDP(base, device_ids=[local], find_unused_parameters=True) if world > 1 else base
+    rollout_settings = tr.get('rain_rollout') if stage == 'flow' else None
+    training_module = RainFlowObjectiveV2(base, cfg) if rollout_settings else base
+    model = DDP(training_module, device_ids=[local], find_unused_parameters=True) if world > 1 else training_module
     ema = deepcopy(base).eval().requires_grad_(False)
     out = Path(tr['output'])/f'{stage}_v2'
     out.mkdir(parents=True, exist_ok=True)
     if not resume and any(out.iterdir()):
         raise FileExistsError(f'{out} is not empty; resume explicitly or use a new v2 run')
     ckpt = torch.load(resume, map_location='cpu', weights_only=True) if resume else None
+    initial = torch.load(initialize_flow, map_location='cpu', weights_only=True) if initialize_flow else None
+    initialization = ckpt.get('initialization') if ckpt else None
+    if initial:
+        check_checkpoint_v2(initial, data.archive, cfg, 'flow', allow_sampling_change=True)
+        base.load_state_dict(initial['ema'])
+        ema.load_state_dict(initial['ema'])
+        initialization = dict(checkpoint=str(Path(initialize_flow).resolve()),
+                              sha256=file_hash_v2(initialize_flow), epoch=initial['epoch']+1,
+                              mode='EMA weights, frozen regression and flow scale; fresh optimizer/schedule')
     if ckpt:
         check_checkpoint_v2(ckpt, data.archive, cfg, stage)
         migrated_world = resume_world_change_v2(ckpt, cfg, world)
@@ -139,10 +165,11 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     mean_model, flow_scale, mean_hash = None, None, None
     if stage == 'flow':
         mean_model = UNetV2(nc, **cfg['model']).to(device).eval().requires_grad_(False)
-        if ckpt:
-            mean_model.load_state_dict(ckpt['regression_ema'])
-            mean_hash = ckpt['regression_sha256']
-            flow_scale = ckpt['flow_scale'].to(device)
+        source = ckpt if ckpt else initial
+        if source:
+            mean_model.load_state_dict(source['regression_ema'])
+            mean_hash = source['regression_sha256']
+            flow_scale = source['flow_scale'].to(device)
         else:
             if not regression_checkpoint:
                 raise ValueError('Flow training requires --regression-checkpoint')
@@ -162,6 +189,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_scale)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and tr['precision'] == 'fp16')
     start, step, best = 0, 0, float('inf')
+    best_skill = float('inf')
     reset_flow_best = False
     selection_generation = 0
     if ckpt:
@@ -171,11 +199,13 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         scheduler.load_state_dict(ckpt['scheduler'])
         scaler.load_state_dict(ckpt['scaler'])
         start, step, best = ckpt['epoch']+1, ckpt['step'], ckpt['best']
+        best_skill = ckpt.get('best_skill', float('inf'))
         selection_generation = ckpt.get('selection_generation', 0)
         reset_flow_best = (stage == 'flow' and selection_generation == 0
                            and os.getenv('RESET_FLOW_BEST_ON_MIGRATION') == '1')
         if reset_flow_best:
             best = float('inf')
+            best_skill = float('inf')
             selection_generation = 1
         if rank < len(ckpt['rng']):
             torch.set_rng_state(ckpt['rng'][rank]['cpu'])
@@ -183,6 +213,11 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                 torch.cuda.set_rng_state(ckpt['rng'][rank]['cuda'], device)
     if rank == 0:
         if reset_flow_best:
+            previous_skill = out/'best_skill_v2.pt'
+            if previous_skill.exists():
+                # Remove it from eligibility in the new selection generation,
+                # while preserving its contents for inspection.
+                os.replace(previous_skill, out/'best_skill_before_reset_v2.pt')
             previous_best = out/'best_v2.pt'
             backup = out/'best_before_reset_v2.pt'
             if previous_best.is_file() and not backup.exists():
@@ -199,6 +234,11 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         write_json(out/'config_v2.json', cfg)
         print(f'V2 {stage}: {sum(x.numel() for x in base.parameters()):,} parameters; world={world}; '
               f'effective_batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
+        if initialization:
+            print(f'Flow initialization: {json.dumps(initialization)}', flush=True)
+        if rollout_settings:
+            print(f'Generated-rain training: {json.dumps(rollout_settings)}; '
+                  'history train/val.total retain the flow objective; rain_rollout_train logs the auxiliary loss', flush=True)
     names = ('total', 'value', 'gradient', 'multiscale', 't2m', 'precip', 'ps', 'u10m', 'v10m')
     plot_interval = None
     stop_minutes = int(os.getenv('FLOW_STOP_MINUTES' if stage == 'flow' else 'REGRESSION_STOP_MINUTES', '40'))
@@ -233,6 +273,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
             sampler.set_epoch(epoch)
         model.train()
         sums = torch.zeros(10, device=device, dtype=torch.float64)
+        rollout_sums = torch.zeros(len(ROLLOUT_METRICS)+1, device=device, dtype=torch.float64)
         opt.zero_grad(set_to_none=True)
         for i, batch in enumerate(loader):
             b = to_device(batch, device)
@@ -243,12 +284,20 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
             sync = model.no_sync() if world > 1 and not do_step else nullcontext()
             with sync:
                 with autocast(device, tr['precision']):
-                    loss, metrics = loss_v2(model, b, cfg, stage, mean_model, flow_scale)
+                    strength = rollout_strength_v2(rollout_settings, epoch, i) if rollout_settings else 0.
+                    if rollout_settings:
+                        loss, metrics, auxiliary = model(b, mean_model, flow_scale, strength)
+                    else:
+                        loss, metrics = loss_v2(model, b, cfg, stage, mean_model, flow_scale)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f'Nonfinite v2 {stage} loss in epoch {epoch}')
                 scaler.scale(loss*len(b['target'])/count).backward()
             sums[:9] += metrics*len(b['target'])
             sums[9] += len(b['target'])
+            if strength:
+                patches = min(rollout_settings['patches'], len(b['target']))
+                rollout_sums[:-1] += auxiliary*patches
+                rollout_sums[-1] += patches
             if do_step:
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(base.parameters(), tr['grad_clip'], error_if_nonfinite=not scaler.is_enabled())
@@ -274,6 +323,7 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         if world > 1:
             dist.all_reduce(sums)
             dist.all_reduce(vsums)
+            dist.all_reduce(rollout_sums)
         train_metrics, val_metrics = (sums[:9]/sums[9]).tolist(), (vsums[:9]/vsums[9]).tolist()
         if not all(math.isfinite(x) for x in train_metrics+val_metrics):
             raise FloatingPointError('Nonfinite v2 epoch metrics')
@@ -289,6 +339,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         improved = selection is not None and selection < best
         if improved:
             best = selection
+        skill_improved = bool(generated and generated['beats_coarse'] and selection < best_skill)
+        if skill_improved:
+            best_skill = selection
         rng = {'cpu': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
         rng_all = [None]*world
         if world > 1:
@@ -298,8 +351,15 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
         if rank == 0:
             row = dict(stage=stage, epoch=epoch+1, step=step, train=dict(zip(names, train_metrics)),
                        val=dict(zip(names, val_metrics)), learning_rate=opt.param_groups[0]['lr'])
+            elapsed = time.monotonic()-epoch_started
+            row['timing'] = dict(gpus=world, train_and_validation_seconds=elapsed,
+                                 gpu_hours_before_checkpoint=world*elapsed/3600)
             if generated is not None:
                 row['generated_validation'] = generated
+            if rollout_settings:
+                row['rain_rollout_train'] = dict(zip(ROLLOUT_METRICS,
+                    (rollout_sums[:-1]/rollout_sums[-1].clamp_min(1)).tolist()))
+                row['rain_rollout_train']['patches'] = int(rollout_sums[-1])
             with open(out/'history_v2.jsonl', 'a') as f:
                 f.write(json.dumps(row)+'\n')
             payload = dict(version='v2', stage=stage, model=base.state_dict(), ema=ema.state_dict(),
@@ -309,10 +369,13 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None):
                            regression_ema=mean_model.state_dict() if mean_model is not None else None,
                            regression_sha256=mean_hash, flow_scale=flow_scale,
                            selection_generation=selection_generation,
+                           best_skill=best_skill, initialization=initialization,
                            selection_metric='rain_crps_plus_mean_rmse_plus_structure' if generated_settings else 'validation_objective')
             atomic_save(out/'last_v2.pt', payload)
             if improved:
                 atomic_save(out/'best_v2.pt', payload)
+            if skill_improved:
+                atomic_save(out/'best_skill_v2.pt', payload)
             if (epoch+1) % tr['checkpoint_interval'] == 0:
                 atomic_save(out/f'epoch_{epoch+1:04d}_v2.pt', payload)
             print(json.dumps(row), flush=True)

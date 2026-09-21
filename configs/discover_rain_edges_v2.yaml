@@ -1,0 +1,140 @@
+# Experiment B: rollout plus 30% rain-edge, 40% existing detail, 30% uniform proposals.
+data:
+  lowres_lcc_root: /gpfsm/dnb10/projects/p311/ML_downscaling/data/lowres_lcc_1hr
+  native_root: /gpfsm/dnb06/projects/p174/f5295_fp/diag
+  highres_root: /gpfsm/dnb08/projects/p38/HWT/CONUS02KM/Feature-c2160_L137/holding
+  prepared: data/paired_hourly_annual_v2
+  start: '2024-12-01T00:30:00'
+  end: '2026-03-08T23:30:00'
+  splits:
+    train:
+    - '2024-12-01'
+    - '2025-12-01'
+    val:
+    - '2025-12-03'
+    - '2026-02-01'
+    test:
+    - '2026-02-03'
+    - '2026-03-09'
+  predictors:
+  - PRECTOT
+  - U10M
+  - V10M
+  - TQV
+  - QV2M
+  - SLP
+  precip_source: hwt_30mn_slv_LCC.PRECTOT
+  state_alignment: midpoint_snapshot
+  strict_missing: true
+  conserve_training_precip: false
+  stats_stride: 8
+  precip_log_scale: 1.0
+  static:
+    path: data/static_grid/hwt_surface_fractions_v2.nc
+    ocean: FROCEAN
+    lake: FRLAKE
+    require_lake: true
+    lat: lats
+    lon: lons
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 8192
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 32
+  detail_fraction: 0.4
+  structure_fraction: 0.3
+model:
+  base_channels: 32
+  channel_mult:
+  - 1
+  - 2
+  - 4
+  - 4
+  time_dim: 128
+  activation_checkpointing: true
+  blocks_per_level: 2
+  attention_heads: 4
+train:
+  device: auto
+  seed: 2025
+  checkpoint_interval: 2
+  batch_size: 2
+  accumulate: 4
+  workers: 3
+  learning_rate: 5.0e-05
+  weight_decay: 0.01
+  warmup_steps: 100
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.999
+  val_batches: 64
+  channel_weights:
+  - 1.0
+  - 2.0
+  - 1.0
+  - 1.0
+  - 1.0
+  output: runs/merraflow_rain_edges_v2
+  regression_epochs: 30
+  flow_epochs: 30
+  calibration_batches: 128
+  generated_validation:
+    batches: 16
+    members: 4
+    steps: 24
+    interval: 2
+  prefetch: 2
+  rain_rollout:
+    members: 4
+    patches: 1
+    steps: 24
+    interval: 8
+    warmup_epochs: 0
+    ramp_epochs: 5
+    weight: 1.0
+    rate_scale_mm_h: 10.0
+    crps_weight: 1.0
+    variogram_weight: 1.0
+    coverage_weight: 0.5
+    mean_mse_weight: 1.0
+    lags:
+    - 1
+    - 4
+    - 16
+    - 32
+    pool_scales:
+    - 1
+    - 4
+    - 16
+    - 32
+    thresholds_mm_h:
+    - 0.1
+    - 1.0
+    - 5.0
+    coverage_temperature_mm_h: 0.1
+  reference_world_size: 2
+inference:
+  members: 8
+  steps: 24
+  seed: 317
+  output: runs/merraflow_rain_edges_v2/predictions_v2
+  conserve_precip: false
+  blend: weighted
+  sampler: synchronized
+  noise_padding: independent_halo
+  tile_cache_mb: 512
+version: v2
+loss:
+  regression_gradient: 0.1
+  regression_multiscale: 0.1
+  flow_gradient: 0.1
+  regression_rain_physical: 1.0
+  flow_full_patch: true
+  flow_multiscale: 0.1
+representation:
+  precip: sqrt1p
+  rain_noise_sigma_pixels: 2.0

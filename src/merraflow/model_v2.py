@@ -30,7 +30,7 @@ class AttentionV2(nn.Module):
 class UNetV2(nn.Module):
     def __init__(self, condition_channels, base_channels=32, channel_mult=(1, 2, 4, 4),
                  time_dim=128, blocks_per_level=2, attention_heads=4,
-                 activation_checkpointing=True, mean_condition=False):
+                 activation_checkpointing=True, mean_condition=False, context_tokens=8):
         super().__init__()
         widths = [base_channels*m for m in channel_mult]
         self.checkpointing = activation_checkpointing
@@ -42,7 +42,7 @@ class UNetV2(nn.Module):
         self.down = nn.ModuleList([nn.ModuleList([Block(w, w, time_dim) for _ in range(blocks_per_level)]) for w in widths])
         self.reduce = nn.ModuleList([nn.Conv2d(a, b, 3, stride=2, padding=1) for a, b in zip(widths[:-1], widths[1:])])
         self.context = nn.Sequential(nn.Conv2d(condition_channels, base_channels, 3, 2, 1), nn.SiLU(),
-                                     nn.Conv2d(base_channels, widths[-1], 3, 2, 1), nn.SiLU(), nn.AdaptiveAvgPool2d(8))
+                                     nn.Conv2d(base_channels, widths[-1], 3, 2, 1), nn.SiLU(), nn.AdaptiveAvgPool2d(context_tokens))
         self.self_attention = AttentionV2(widths[-1], attention_heads)
         self.cross_attention = AttentionV2(widths[-1], attention_heads)
         self.up = nn.ModuleList([nn.ModuleList([Block(a+b, b, time_dim)]+
@@ -90,6 +90,10 @@ def regression_v2(model, batch):
 
 @torch.no_grad()
 def integrate_v2(model, noise, condition, context, mean, steps, observer=None):
+    return integrate_differentiable_v2(model, noise, condition, context, mean, steps, observer)
+
+
+def integrate_differentiable_v2(model, noise, condition, context, mean, steps, observer=None):
     if steps < 1:
         raise ValueError('ODE steps must be positive')
     x, dt = noise, 1/steps

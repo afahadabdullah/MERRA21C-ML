@@ -18,9 +18,9 @@ from .train import device_for, autocast
 from .train_v2 import check_checkpoint_v2, file_hash_v2
 
 
-def load_models_v2(cfg, checkpoint, archive, device):
+def load_models_v2(cfg, checkpoint, archive, device, allow_sampling_change=False):
     ckpt = torch.load(checkpoint, map_location='cpu', weights_only=True)
-    check_checkpoint_v2(ckpt, archive, cfg)
+    check_checkpoint_v2(ckpt, archive, cfg, allow_sampling_change=allow_sampling_change)
     nc = archive.index['condition_channels']
     mean = UNetV2(nc, **cfg['model']).to(device).eval()
     flow, scale = None, None

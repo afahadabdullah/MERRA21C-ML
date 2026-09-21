@@ -1,5 +1,9 @@
 # MERRA21C-ML
 
+For the next v2 precipitation experiment, see the [generated-rain training and
+rain-edge sampling plan](docs/rain_rollout_v2.md), including the Discover submission
+command, coarse-baseline skill criteria and optional comparison runs.
+
 Patch-based conditional flow matching for **native GEOS-FP (~25 km) → HWT ~3 km LCC** downscaling over CONUS. Coarse predictors already interpolated to 3 km are still coarse information. This package uses the existing regridding products and the archive paths in [data.md](data.md).
 
 Targets: **2 m temperature, precipitation rate, surface pressure, and 10 m wind speed**, sampled hourly at matched :30 timestamps. Conditions include coarse weather, topography, latitude/longitude, cell area, annual phase, UTC hour, and local solar hour. Training and inference operate on patches in GPU memory; full fields are processed one timestamp at a time in host memory.
