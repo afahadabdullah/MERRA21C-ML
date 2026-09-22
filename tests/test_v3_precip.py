@@ -430,7 +430,7 @@ def test_submission_pipeline_uses_dependency(config, tmp_path):
     sbatch.write_text('#!/bin/bash\nprintf "%s %s\\n" "$STAGE" "$*" >> "$SUBMISSION_LOG"\n'
                       'if [[ "$STAGE" == regression ]]; then echo 123; else echo 124; fi\n')
     sbatch.chmod(0o755)
-    env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log),
+    env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log), ENV_DIR=str(Path(sys.executable).parent.parent),
                PATH=f'{bin_path}:{Path(sys.executable).parent}:'+os.environ['PATH'])
     result = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout+result.stderr
@@ -464,6 +464,7 @@ def test_prepare_and_train_submission_chain(config, tmp_path):
                       'echo "$n"\n')
     sbatch.chmod(0o755)
     env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log), COUNTER=str(counter), PREPARE_FIRST='1',
+               ENV_DIR=str(Path(sys.executable).parent.parent),
                REGRESSION_SEGMENTS='2', DIFFUSION_SEGMENTS='8', PREPARE_ARRAY_CONCURRENCY='3',
                PATH=f'{bin_path}:{Path(sys.executable).parent}:'+os.environ['PATH'])
     result = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
@@ -504,6 +505,7 @@ def test_training_can_depend_on_existing_hourly_finalizer(config, tmp_path):
                       'if [[ "$STAGE" == regression ]]; then echo 123; else echo 124; fi\n')
     sbatch.chmod(0o755)
     env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log), AFTEROK_JOB='58501027',
+               ENV_DIR=str(Path(sys.executable).parent.parent),
                PATH=f'{bin_path}:{Path(sys.executable).parent}:'+os.environ['PATH'])
     result = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout+result.stderr

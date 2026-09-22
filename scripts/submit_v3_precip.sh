@@ -6,6 +6,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PROJECT_DIR="${PROJECT_DIR:-$PWD}"
 export CONFIG="${CONFIG:-configs/discover_v3_precip.yaml}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"
+if [[ -x "$ENV_DIR/bin/python" ]]; then PYTHON_BIN="${PYTHON_BIN:-$ENV_DIR/bin/python}"; else PYTHON_BIN="${PYTHON_BIN:-python}"; fi
+export ENV_DIR
 PREPARE_FIRST="${PREPARE_FIRST:-0}"
 AFTEROK_JOB="${AFTEROK_JOB:-}"
 REGRESSION_SEGMENTS="${REGRESSION_SEGMENTS:-2}"
@@ -26,11 +29,11 @@ for count in "$REGRESSION_SEGMENTS" "$DIFFUSION_SEGMENTS"; do
 done
 if [[ "$PREPARE_FIRST" == 1 || -n "$AFTEROK_JOB" ]]; then
   # Full hourly-target audit runs in each GPU job after the finalizer succeeds.
-  python -m merraflow.cli_v3_precip months --config "$CONFIG" > /dev/null
+  "$PYTHON_BIN" -m merraflow.cli_v3_precip months --config "$CONFIG" > /dev/null
 else
-  python -m merraflow.cli_v3_precip audit --config "$CONFIG"
+  "$PYTHON_BIN" -m merraflow.cli_v3_precip audit --config "$CONFIG"
 fi
-REGRESSION_CHECKPOINT=$(python - "$CONFIG" <<'PY'
+REGRESSION_CHECKPOINT=$("$PYTHON_BIN" - "$CONFIG" <<'PY'
 import sys
 from pathlib import Path
 from merraflow.config_v3_precip import load_config
