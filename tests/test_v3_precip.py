@@ -464,13 +464,13 @@ def test_prepare_and_train_submission_chain(config, tmp_path):
                       'echo "$n"\n')
     sbatch.chmod(0o755)
     env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log), COUNTER=str(counter), PREPARE_FIRST='1',
-               REGRESSION_SEGMENTS='2', DIFFUSION_SEGMENTS='8',
+               REGRESSION_SEGMENTS='2', DIFFUSION_SEGMENTS='8', PREPARE_ARRAY_CONCURRENCY='3',
                PATH=f'{bin_path}:{Path(sys.executable).parent}:'+os.environ['PATH'])
     result = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout+result.stderr
     calls = log.read_text().splitlines()
     assert len(calls) == 12
-    assert '--array=' in calls[0] and 'finalize=0' in calls[0]
+    assert '--array=' in calls[0] and '%3' in calls[0] and 'finalize=0' in calls[0]
     assert 'finalize=1' in calls[1] and '--dependency=afterok:1' in calls[1]
     assert calls[2].startswith('regression ') and '--dependency=afterok:2' in calls[2]
     assert calls[4].startswith('diffusion ') and '--dependency=afterok:4' in calls[4]
@@ -480,6 +480,11 @@ def test_prepare_and_train_submission_chain(config, tmp_path):
     env['DIFFUSION_SEGMENTS'] = '0'
     failed = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
     assert failed.returncode != 0 and not log.exists()
+    env.pop('PREPARE_FIRST')
+    env['PREPARE_ARRAY_CONCURRENCY'] = 'zero'
+    failed = subprocess.run(['bash', 'scripts/submit_prepare_hourly_v3_precip.sh'], env=env,
+                            capture_output=True, text=True)
+    assert failed.returncode != 0
     production = load_config('configs/discover_v3_precip.yaml')
     assert production['train']['validation_plot_interval'] == 5
     assert production['train']['workers'] == 4

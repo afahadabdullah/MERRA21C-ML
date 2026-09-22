@@ -183,6 +183,10 @@ conda activate /gpfsm/dnb10/projects/p311/ML_downscaling/env
 PREPARE_FIRST=1 bash scripts/submit_v3_precip.sh
 ```
 
+Hourly preparation now runs at most four months at once by default, which is
+more schedulable than the earlier 14-way array. Override it only when the
+compute queue has capacity, for example `PREPARE_ARRAY_CONCURRENCY=2`.
+
 If the hourly-target finalizer is already queued, submit the GPU chain immediately and make its first regression segment wait for that finalizer.  For the currently queued run:
 
 ```bash
