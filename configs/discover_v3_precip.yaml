@@ -43,7 +43,7 @@ train:
   seed: 2026
   batch_size: 8  # Per GPU; 4 GPUs x 8 x accumulate 2 = 64 patches/update.
   accumulate: 2
-  workers: 12  # Per rank; Slurm reserves 16 CPUs per GPU.
+  workers: 4  # Per rank; matches the four CPUs reserved per GPU on Discover.
   learning_rate: 0.0002
   # [fix 1] Linear warmup then cosine decay.
   lr_schedule: cosine

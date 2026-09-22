@@ -7,7 +7,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4
-#SBATCH --cpus-per-gpu=16
+# Four A100s share one Rome node. Discover's working four-GPU test templates
+# reserve four CPUs per GPU; 16 per GPU requests 64 CPUs and is not available.
+#SBATCH --cpus-per-gpu=4
 #SBATCH --mem-per-gpu=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs_v3_precip/train_%j.log

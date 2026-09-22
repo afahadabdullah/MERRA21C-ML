@@ -206,8 +206,10 @@ sbatch scripts/slurm_train_v3_precip.sh
 
 The default batch size is **8 per GPU**, with accumulation of 2: four GPUs produce
 an effective batch of **64 patches per update**. `samples_per_epoch: 32768` is
-the global patch count (8192 per rank), not 32768 per GPU. Loader workers are 12
-per rank; the allocation reserves 16 CPUs and 32 GB host memory per GPU. Learning
+the global patch count (8192 per rank), not 32768 per GPU. Loader workers are 4
+per rank; the allocation reserves 4 CPUs and 32 GB host memory per GPU. The
+four-CPU allocation matches Discover's working four-GPU test template; it avoids
+the unavailable 64-CPU request from the first submission. Learning
 rate is not automatically multiplied with GPU count. Exact resume requires the
 same world size and training settings. A companion best checkpoint is required
 only after a validation has selected one; early diffusion segments resume from

@@ -442,7 +442,8 @@ def test_submission_pipeline_uses_dependency(config, tmp_path):
     assert '--dependency=afterok:124' in calls[3]
     assert all('--kill-on-invalid-dep=yes' in c for c in calls[1:])
     script = Path('scripts/slurm_train_v3_precip.sh').read_text()
-    assert '#SBATCH --gres=gpu:4' in script and '--nproc-per-node=4' in script
+    assert ('#SBATCH --gres=gpu:4' in script and '#SBATCH --cpus-per-gpu=4' in script
+            and '--nproc-per-node=4' in script)
 
 
 def test_prepare_and_train_submission_chain(config, tmp_path):
@@ -481,3 +482,4 @@ def test_prepare_and_train_submission_chain(config, tmp_path):
     assert failed.returncode != 0 and not log.exists()
     production = load_config('configs/discover_v3_precip.yaml')
     assert production['train']['validation_plot_interval'] == 5
+    assert production['train']['workers'] == 4
