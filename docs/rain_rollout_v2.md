@@ -142,6 +142,20 @@ Training can continue independently; subsequent best-checkpoint updates do
 not change this evaluation. The best composite score does not imply that the
 checkpoint beats the coarse baseline.
 
+To compare the latest completed epoch with that best checkpoint, use the same
+five-case, five-member evaluation settings:
+
+```bash
+CHECKPOINT_KIND=last MEMBERS=5 bash scripts/submit_best_test_v2.sh
+```
+
+This freezes `last_v2.pt` in a separate `evaluations_v2/last_v2_*` directory and
+prints its completed epoch. It uses the saved inference seed and the same
+24-step sampler as the best-checkpoint test. In its metadata,
+`best_score_so_far` is the run's historical best score, not the latest epoch's
+score. This comparison does not use the older four-GPU, ten-member latest-test
+wrapper, whose defaults target the rain-structure run.
+
 The `diagnostic_v2` subdirectory contains full-domain and storm-zoom comparison
 maps, `rmse_summary_v2.png`, `metrics_v2.json`, and ensemble NetCDF predictions.
 Training-history plots are also written when history is available; these read
