@@ -1,5 +1,9 @@
 # MERRA21C-ML
 
+For the precipitation-only experiment, see the [v3_precip research review and
+runbook](docs/v3_precip.md): conditional residual diffusion, coarse-hour context,
+and physical ensemble verification using the existing v2 archive.
+
 For the next v2 precipitation experiment, see the [generated-rain training and
 rain-edge sampling plan](docs/rain_rollout_v2.md), including the Discover submission
 command, coarse-baseline skill criteria and optional comparison runs.

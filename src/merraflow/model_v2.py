@@ -30,14 +30,15 @@ class AttentionV2(nn.Module):
 class UNetV2(nn.Module):
     def __init__(self, condition_channels, base_channels=32, channel_mult=(1, 2, 4, 4),
                  time_dim=128, blocks_per_level=2, attention_heads=4,
-                 activation_checkpointing=True, mean_condition=False, context_tokens=8):
+                 activation_checkpointing=True, mean_condition=False, context_tokens=8,
+                 target_channels=5):
         super().__init__()
         widths = [base_channels*m for m in channel_mult]
         self.checkpointing = activation_checkpointing
         self.mean_condition = mean_condition
         self.time = TimeEmbedding(time_dim)
-        nc = condition_channels+(5 if mean_condition else 0)
-        self.input = nn.Conv2d(5+nc, widths[0], 3, padding=1)
+        nc = condition_channels+(target_channels if mean_condition else 0)
+        self.input = nn.Conv2d(target_channels+nc, widths[0], 3, padding=1)
         self.conditions = nn.ModuleList([nn.Conv2d(nc, w, 1) for w in widths])
         self.down = nn.ModuleList([nn.ModuleList([Block(w, w, time_dim) for _ in range(blocks_per_level)]) for w in widths])
         self.reduce = nn.ModuleList([nn.Conv2d(a, b, 3, stride=2, padding=1) for a, b in zip(widths[:-1], widths[1:])])
@@ -48,7 +49,7 @@ class UNetV2(nn.Module):
         self.up = nn.ModuleList([nn.ModuleList([Block(a+b, b, time_dim)]+
                                     [Block(b, b, time_dim) for _ in range(blocks_per_level-1)])
                                 for a, b in zip(widths[:0:-1], widths[-2::-1])])
-        self.output = nn.Sequential(norm(widths[0]), nn.SiLU(), nn.Conv2d(widths[0], 5, 3, padding=1))
+        self.output = nn.Sequential(norm(widths[0]), nn.SiLU(), nn.Conv2d(widths[0], target_channels, 3, padding=1))
         nn.init.zeros_(self.output[-1].weight)
         nn.init.zeros_(self.output[-1].bias)
 

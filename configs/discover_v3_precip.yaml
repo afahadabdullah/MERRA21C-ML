@@ -1,0 +1,85 @@
+# One precipitation target; coarse meteorology and static geography are inputs.
+# Changes vs the first v3 draft are tagged [fix N] (see docs/v3_precip.md).
+version: v3_precip
+data:
+  prepared: data/paired_hourly_annual_v2
+  # [fix 6] 1/4 P(:00) + 1/2 P(:30) + 1/4 P(:00+1h) from hwt_30mn_slv_LCC, built by
+  # `cli_v3_precip prepare-hourly` / `finalize-hourly`. Use midpoint_rate for the old :30 snapshot.
+  target_kind: hourly_mean_trapezoid
+  hourly_targets: data/hwt_hourly_mean_v3_precip
+  # highres_root: /gpfsm/dnb08/projects/p38/HWT/CONUS02KM/Feature-c2160_L137/holding  # only if archive paths moved
+  history_hours: [-2, -1, 0]
+  rain_scale_mm_h: 1.0
+  # [fix 3] Dry pixels (< threshold) are encoded at -dry_offset, below the wet range z >= 0,
+  # so small positive diffusion noise over dry areas cannot decode as drizzle.
+  dry_threshold_mm_h: 0.02
+  dry_offset: 0.25
+  wet_threshold_z: 0.0  # Decode threshold; tune on validation wet-area fraction only.
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 32768  # [fix 1] global patches per epoch (8192 per rank on 4 GPUs)
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 32
+  detail_fraction: 0.5
+  # Rain-rich COARSE proposals deliberately emphasize rainy inputs with unit weights.
+  # This changes the population objective; 'truth' retains inverse-proposal weights.
+  proposal: coarse
+  # [fix 5] Denoiser/regression are also supervised on halo pixels, required by synchronized tiling.
+  loss_on_halo: true
+model:
+  # [fix 2] 22M parameters (was 3.3M at 32/[1,2,4,4]). Widths 96/192/288/384.
+  # If A100 memory or speed is tight, drop base_channels to 64 (10.4M) before cutting training length.
+  base_channels: 96
+  channel_mult: [1, 2, 3, 4]
+  time_dim: 256
+  activation_checkpointing: true
+  blocks_per_level: 2
+  attention_heads: 8
+train:
+  device: auto
+  seed: 2026
+  batch_size: 8  # Per GPU; 4 GPUs x 8 x accumulate 2 = 64 patches/update.
+  accumulate: 2
+  workers: 12  # Per rank; Slurm reserves 16 CPUs per GPU.
+  learning_rate: 0.0002
+  # [fix 1] Linear warmup then cosine decay.
+  lr_schedule: cosine
+  warmup_steps: 2000
+  min_lr_ratio: 0.05
+  weight_decay: 0.01
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.9995
+  # [fix 1] 40 x 32768 / 64 = 20.5k regression updates; 250 x 32768 / 64 = 128k diffusion updates.
+  regression_epochs: 40
+  diffusion_epochs: 250
+  # Each Slurm job stops cleanly before this and the next chained job resumes (12 h walltime).
+  time_limit_hours: 11.25
+  calibration_batches: 128
+  # [fix 7] 256 fixed validation patches x 8 members x 18 Heun steps, every 5 diffusion epochs.
+  val_batches: 32
+  validation_members: 8
+  validation_steps: 18
+  validation_interval: 5
+  validation_plot_interval: 5
+  validation_plot_samples: 2
+  output: runs/merraflow_v3_precip
+diffusion:
+  sigma_data: 1.0
+  p_mean: -1.2
+  p_std: 1.2
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+inference:
+  members: 16
+  steps: 32
+  seed: 317
+  output: runs/merraflow_v3_precip/predictions_v3_precip
+  # [fix 5] One global EDM trajectory; overlapping tile denoisers are blended at every step.
+  # 'owner' / 'weighted' remain as independent-tile ablations.
+  blend: synchronized
+  tile_batch: 16
