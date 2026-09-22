@@ -483,3 +483,32 @@ def test_prepare_and_train_submission_chain(config, tmp_path):
     production = load_config('configs/discover_v3_precip.yaml')
     assert production['train']['validation_plot_interval'] == 5
     assert production['train']['workers'] == 4
+
+
+def test_training_can_depend_on_existing_hourly_finalizer(config, tmp_path):
+    import yaml
+    cfg = deepcopy(config)
+    cfg['train']['output'] = str(tmp_path/'dependency_v3_precip')
+    path = tmp_path/'config.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    bin_path = tmp_path/'bin'
+    bin_path.mkdir()
+    log = tmp_path/'submitted'
+    sbatch = bin_path/'sbatch'
+    sbatch.write_text('#!/bin/bash\nprintf "%s %s\\n" "$STAGE" "$*" >> "$SUBMISSION_LOG"\n'
+                      'if [[ "$STAGE" == regression ]]; then echo 123; else echo 124; fi\n')
+    sbatch.chmod(0o755)
+    env = dict(os.environ, CONFIG=str(path), SUBMISSION_LOG=str(log), AFTEROK_JOB='58501027',
+               PATH=f'{bin_path}:{Path(sys.executable).parent}:'+os.environ['PATH'])
+    result = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout+result.stderr
+    calls = log.read_text().splitlines()
+    assert len(calls) == 10
+    assert calls[0].startswith('regression ') and '--dependency=afterok:58501027' in calls[0]
+    assert calls[1].startswith('regression ') and '--dependency=afterok:123' in calls[1]
+    assert calls[2].startswith('diffusion ') and '--dependency=afterok:123' in calls[2]
+    for key, value in [('AFTEROK_JOB', 'not-a-job'), ('PREPARE_FIRST', '1')]:
+        bad = dict(env)
+        bad[key] = value
+        failed = subprocess.run(['bash', 'scripts/submit_v3_precip.sh'], env=bad, capture_output=True, text=True)
+        assert failed.returncode != 0

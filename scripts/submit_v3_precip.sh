@@ -7,17 +7,24 @@ export PROJECT_DIR="${PROJECT_DIR:-$PWD}"
 export CONFIG="${CONFIG:-configs/discover_v3_precip.yaml}"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 PREPARE_FIRST="${PREPARE_FIRST:-0}"
+AFTEROK_JOB="${AFTEROK_JOB:-}"
 REGRESSION_SEGMENTS="${REGRESSION_SEGMENTS:-2}"
 DIFFUSION_SEGMENTS="${DIFFUSION_SEGMENTS:-8}"
 if [[ "$PREPARE_FIRST" != 0 && "$PREPARE_FIRST" != 1 ]]; then
   echo 'PREPARE_FIRST must be 0 or 1' >&2; exit 2
+fi
+if [[ -n "$AFTEROK_JOB" && ! "$AFTEROK_JOB" =~ ^[0-9]+$ ]]; then
+  echo 'AFTEROK_JOB must be one numeric Slurm job ID' >&2; exit 2
+fi
+if [[ "$PREPARE_FIRST" == 1 && -n "$AFTEROK_JOB" ]]; then
+  echo 'Use PREPARE_FIRST=1 or AFTEROK_JOB, not both' >&2; exit 2
 fi
 for count in "$REGRESSION_SEGMENTS" "$DIFFUSION_SEGMENTS"; do
   if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
     echo 'REGRESSION_SEGMENTS and DIFFUSION_SEGMENTS must be positive integers' >&2; exit 2
   fi
 done
-if [[ "$PREPARE_FIRST" == 1 ]]; then
+if [[ "$PREPARE_FIRST" == 1 || -n "$AFTEROK_JOB" ]]; then
   # Full hourly-target audit runs in each GPU job after the finalizer succeeds.
   python -m merraflow.cli_v3_precip months --config "$CONFIG" > /dev/null
 else
@@ -47,6 +54,10 @@ if [[ "$PREPARE_FIRST" == 1 ]]; then
   if [[ ! "$previous" =~ ^[0-9]+$ ]]; then
     echo 'Preparation did not return a valid finalizer job ID; training not submitted' >&2; exit 1
   fi
+fi
+if [[ -n "$AFTEROK_JOB" ]]; then
+  previous="$AFTEROK_JOB"
+  echo "Training chain starts after successful job $AFTEROK_JOB"
 fi
 jobs=()
 for stage in regression diffusion; do

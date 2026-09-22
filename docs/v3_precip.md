@@ -183,6 +183,14 @@ conda activate /gpfsm/dnb10/projects/p311/ML_downscaling/env
 PREPARE_FIRST=1 bash scripts/submit_v3_precip.sh
 ```
 
+If the hourly-target finalizer is already queued, submit the GPU chain immediately and make its first regression segment wait for that finalizer.  For the currently queued run:
+
+```bash
+AFTEROK_JOB=58501027 bash scripts/submit_v3_precip.sh
+```
+
+This does not submit a second hourly-target array. Every training segment is chained with `afterok`; if the finalizer fails or is cancelled, Slurm cancels the training chain.
+
 With `PREPARE_FIRST=1`, the helper first submits monthly CPU preparation and its
 dependent finalizer, then chains training after that finalizer. Each GPU job
 audits the completed target set before starting. If hourly targets already exist
