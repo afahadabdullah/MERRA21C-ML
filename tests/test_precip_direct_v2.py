@@ -193,6 +193,58 @@ def test_submit_only_flow(setup, tmp_path):
     assert '#SBATCH --gres=gpu:4' in script and '--nproc-per-node=4' in script
 
 
+def test_rainy_validation_case_report(setup, tmp_path):
+    from merraflow.evaluate_wet_precip_direct_v2 import evaluate, select_wet_cases
+    cfg = deepcopy(setup)
+    archive = DirectPrecipDataset(cfg, 'val', 1, 3).archive
+    selected, selection = select_wet_cases(archive, cfg, 'val', scan_hours=2,
+                                           cases=1, min_wet_fraction=.001)
+    assert selected[0]['entry']['split'] == 'val'
+    assert selected[0]['selection_wet_fraction'] >= .001
+    assert selection['qualifying_hours'] >= 1
+    checkpoint = tmp_path/'snapshot.pt'
+    torch.save(dict(version='v2_precip_direct', targets=['precip'], config=cfg,
+                    fingerprint=archive.index['fingerprint'], stats=archive.stats,
+                    epoch=0, ema=make_model(archive.index['condition_channels'], cfg).state_dict(),
+                    regression_condition=regression_bundle(cfg['conditioning']['checkpoint'], archive)), checkpoint)
+    output = tmp_path/'wet_cases'
+    evaluate(cfg, checkpoint, output, scan_hours=2, cases=1,
+             min_wet_fraction=.001, members=2, steps=1)
+    report = json.loads((output/'report.json').read_text())
+    assert report['selection']['split'] == 'val' and report['epoch'] == 1
+    assert report['cases'][0]['truth_wet_fraction'] >= .001
+    assert 'crps_mm_h' in report['cases'][0] and 'regression_mae_mm_h' in report['cases'][0]
+    assert len(list(output.glob('case_*.png'))) == len(list(output.glob('case_*.npz'))) == 1
+
+
+def test_wet_evaluation_submission_snapshots_current_checkpoint(setup, tmp_path):
+    source = tmp_path/'last_direct_v2.pt'
+    torch.save(dict(version='v2_precip_direct', targets=['precip'], epoch=9,
+                    config=setup), source)
+    binary = tmp_path/'bin'
+    binary.mkdir()
+    capture = tmp_path/'submission.json'
+    sbatch = binary/'sbatch'
+    sbatch.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
+        'with open(os.environ["CAPTURE"], "w") as f:\n'
+        '    json.dump({"args": sys.argv[1:], "checkpoint": os.environ["CHECKPOINT"], '
+        '"config": os.environ["CONFIG"], "output": os.environ["OUTPUT"]}, f)\n'
+        'print("24680")\n')
+    sbatch.chmod(0o755)
+    env = dict(os.environ, CHECKPOINT=str(source), EVALUATION_ROOT=str(tmp_path/'evals'),
+               PYTHON_BIN=sys.executable, PATH=f'{binary}:'+os.environ['PATH'], CAPTURE=str(capture))
+    result = subprocess.run(['bash', 'scripts/submit_wet_eval_precip_direct_v2.sh'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout+result.stderr
+    submitted = json.loads(capture.read_text())
+    assert submitted['args'][-1] == 'scripts/slurm_wet_eval_precip_direct_v2.sh'
+    snapshot = Path(submitted['checkpoint'])
+    assert snapshot.exists() and snapshot != source
+    assert torch.load(snapshot, weights_only=True)['epoch'] == 9
+    assert Path(submitted['config']).exists()
+    assert submitted['output'].endswith('/results')
+
+
 @pytest.mark.parametrize('completed', [False, True])
 def test_job_continues_only_unfinished_flow(setup, tmp_path, completed):
     cfg = deepcopy(setup)

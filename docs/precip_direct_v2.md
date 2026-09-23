@@ -77,6 +77,40 @@ Validation estimates behavior on patches; it does not establish full-domain
 skill. The original v2 targets are HWT **:30 snapshots**, not the separately
 prepared v3 trapezoid hourly means.
 
+### Targeted rainy-case check during training
+
+The fixed validation previews are uniformly selected and may be almost dry.
+An independent one-GPU job can select genuinely wet **validation** patches from
+HWT truth, then compare four generated members with the coarse input and frozen
+v2 regression on those patches. The selection reads truth only to choose and
+score evaluation cases; truth never enters the model condition.
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+git pull --ff-only origin main
+bash scripts/submit_wet_eval_precip_direct_v2.sh
+```
+
+The helper snapshots the current `last_direct_v2.pt` before submission so a
+training checkpoint update cannot alter the evaluated epoch. Choose the best
+checkpoint with `CHECKPOINT_KIND=best` or another path with `CHECKPOINT=...`.
+Defaults scan 64 evenly spaced validation hours and choose six distinct hours,
+each with a patch containing at least 10% HWT wet pixels (>=0.1 mm/h). Select
+more cases with `SCAN_HOURS=128 CASES=12`; lower the threshold with
+`MIN_WET_FRACTION=0.05` if too few cases qualify. The results directory is
+printed by the helper and contains `report.json`, map PNGs and member arrays.
+
+These metrics describe selected rainy cases and cannot replace the existing
+uniform validation CRPS. In particular, a rainy-case gain does not establish
+that the model has fixed false rain on dry cases.
+
+The current training sampler already devotes 40% of its proposal mixture to
+rain/coast scores (`patch.detail_fraction: 0.4`). Its inverse-proposal weight
+`1/(N*q)` returns the objective to uniform patch risk. Increasing rainy-case
+emphasis by removing that weight would change the training objective and need
+a separate run; it may worsen false rain on dry pixels, which is currently the
+dominant observed error. The running job should keep its current settings.
+
 Resume after a failed allocation (first verify no continuation is still queued):
 
 ```bash
