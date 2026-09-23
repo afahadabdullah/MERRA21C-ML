@@ -2,11 +2,49 @@
 from pathlib import Path
 import os
 import numpy as np
+import torch
+import torch.distributed as dist
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from .inference_v2 import sample_frame_v2
 from .physics_v2 import TARGETS_V2, UNITS_V2
+
+
+def collective_flow_plot_v2(cfg, archive, mean_model, flow_model, flow_scale,
+                            device, completed_epoch, run_dir, group=None, skip_existing=False):
+    """All ranks enter; only rank zero renders, with no pending NCCL operation.
+
+    The caller supplies a CPU/Gloo group with a plotting-length timeout. Waiting
+    on the default NCCL group can time out while a full-domain sample is drawn.
+    Broadcast errors so other ranks never continue training after plot failure.
+    """
+    distributed = dist.is_initialized()
+    if distributed and (group is None or dist.get_backend(group) != 'gloo'):
+        raise ValueError('Distributed plotting needs a separate Gloo group')
+    rank = dist.get_rank() if distributed else 0
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    if distributed:
+        dist.barrier(group=group)
+    result = [None]
+    if rank == 0:
+        try:
+            existing = list((Path(run_dir)/'plots_v2').glob(f'epoch_{completed_epoch:04d}_*_v2.png'))
+            if skip_existing and existing:
+                result[0] = dict(path=str(existing[0]), error=None)
+            else:
+                path = plot_flow_progress_v2(cfg, archive, mean_model, flow_model, flow_scale,
+                                             device, completed_epoch, run_dir)
+                result[0] = dict(path=str(path), error=None)
+                print(f'Full-domain flow comparison: {path}', flush=True)
+        except Exception as exc:
+            result[0] = dict(path=None, error=f'{type(exc).__name__}: {exc}')
+    if distributed:
+        dist.broadcast_object_list(result, src=0, group=group)
+    if result[0]['error']:
+        raise RuntimeError(f'Flow validation plot failed: {result[0]["error"]}')
+    return Path(result[0]['path'])
 
 
 def plot_flow_progress_v2(cfg, archive, mean_model, flow_model, flow_scale,

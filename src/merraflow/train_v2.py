@@ -1,5 +1,6 @@
 """Two-stage v2 training, DDP, EMA, and epoch-boundary resume."""
 from contextlib import nullcontext
+from datetime import timedelta
 from copy import deepcopy
 from pathlib import Path
 from shutil import copy2
@@ -108,6 +109,9 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None, initialize_flo
         torch.cuda.set_device(local)
         device = torch.device('cuda', local)
         dist.init_process_group('nccl')
+    # Full-domain sampling may exceed NCCL's short collective timeout. Use a
+    # separate CPU group only for plot coordination; keep training timeouts.
+    plot_group = dist.new_group(backend='gloo', timeout=timedelta(hours=12)) if world > 1 and stage == 'flow' else None
     torch.manual_seed(tr['seed']+rank)
     if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -253,18 +257,12 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None, initialize_flo
         if rank == 0:
             print(f'Flow job: resume at epoch {start+1} of {epochs}; stop near '
                   f'{stop_minutes} minutes remaining; full-domain validation plot '
-                  f'every {plot_interval} epochs on one GPU', flush=True)
-            if world > 1:
-                print('Full-domain progress plots skipped inside DDP training; '
-                      'run the separate evaluation job for maps', flush=True)
-            if world == 1 and start and start % plot_interval == 0 and not list(
-                    (out/'plots_v2').glob(f'epoch_{start:04d}_*_v2.png')):
-                # A wall-time kill can land after the checkpoint but during
-                # plotting. Recreate that comparison before advancing.
-                from .flow_progress_v2 import plot_flow_progress_v2
-                path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema,
-                                             flow_scale, device, start, out)
-                print(f'Recovered full-domain flow comparison: {path}', flush=True)
+                  f'every {plot_interval} epochs on rank zero (other ranks wait)', flush=True)
+        if start and start % plot_interval == 0:
+            # Recover a plot interrupted after its epoch checkpoint was saved.
+            from .flow_progress_v2 import collective_flow_plot_v2
+            collective_flow_plot_v2(cfg, data.archive, mean_model, ema, flow_scale,
+                                   device, start, out, plot_group, skip_existing=True)
     longest_epoch = 0.
     for epoch in range(start, epochs):
         epoch_started = time.monotonic()
@@ -379,11 +377,10 @@ def train_v2(cfg, stage, resume=None, regression_checkpoint=None, initialize_flo
             if (epoch+1) % tr['checkpoint_interval'] == 0:
                 atomic_save(out/f'epoch_{epoch+1:04d}_v2.pt', payload)
             print(json.dumps(row), flush=True)
-            if stage == 'flow' and world == 1 and (epoch+1) % plot_interval == 0:
-                from .flow_progress_v2 import plot_flow_progress_v2
-                path = plot_flow_progress_v2(cfg, data.archive, mean_model, ema, flow_scale,
-                                             device, epoch+1, out)
-                print(f'Full-domain flow comparison: {path}', flush=True)
+        if stage == 'flow' and (epoch+1) % plot_interval == 0:
+            from .flow_progress_v2 import collective_flow_plot_v2
+            collective_flow_plot_v2(cfg, data.archive, mean_model, ema, flow_scale,
+                                   device, epoch+1, out, plot_group)
         if epoch+1 < epochs and (stage == 'flow' or os.getenv('TRAIN_FLOW_AFTER_REGRESSION') == '1'):
             stop_for_time = False
             if rank == 0:
