@@ -1,5 +1,9 @@
 # MERRA21C-ML
 
+For the six-variable experiment, see the [v4 task list and runbook](docs/v4.md):
+direct square-root hourly rainfall, residual states including 2 m humidity,
+previous-hour inputs, and four-GPU flow training. CAPE is excluded.
+
 For the precipitation-only experiment, see the [v3_precip research review and
 runbook](docs/v3_precip.md): conditional residual diffusion, coarse-hour context,
 and physical ensemble verification using the existing v2 archive.

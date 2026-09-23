@@ -1,0 +1,60 @@
+# Six-variable flow: full sqrt rainfall, residual temperature/pressure/winds.
+version: v4
+conditioning:
+  checkpoint: runs/merraflow_annual_v2/regression_v2/best_v2.pt
+data:
+  prepared: data/paired_hourly_annual_v2
+  hourly_targets: data/hwt_hourly_mean_v3_precip
+  target_kind: hourly_mean_trapezoid
+  representation: sqrt1p
+  rain_scale_mm_h: 1.0
+  history_hours: [-1, 0]
+  humidity_targets: data/hwt_q2m_v4
+  humidity_target_variable: SPFH_2M
+  humidity_scale_kg_kg: 0.001
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 32768
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 32
+  detail_fraction: 0.5
+  proposal: coarse
+  loss_on_halo: true
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  time_dim: 256
+  activation_checkpointing: true
+  blocks_per_level: 2
+  attention_heads: 8
+train:
+  device: auto
+  seed: 2026
+  epochs: 250
+  batch_size: 8
+  accumulate: 2
+  workers: 4
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  warmup_steps: 2000
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.9995
+  time_limit_hours: 11.0
+  calibration_batches: 128
+  channel_weights: [1.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+  validation_interval: 5
+  validation_patches: 256
+  validation_members: 8
+  validation_steps: 24
+  validation_plot_samples: 3
+  output: runs/merraflow_v4
+inference:
+  steps: 32
+  members: 16
+  seed: 317
+  output: runs/merraflow_v4/predictions
