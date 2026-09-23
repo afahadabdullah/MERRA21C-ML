@@ -1,0 +1,52 @@
+# Full-field conditional flow matching. Reuses the original annual v2 archive.
+version: v2_precip_direct
+# Reuse the ORIGINAL regression only as a frozen predictor input. Set null for
+# a scratch model conditioned only on the original coarse/static inputs.
+conditioning:
+  checkpoint: runs/merraflow_annual_v2/regression_v2/best_v2.pt
+data:
+  prepared: data/paired_hourly_annual_v2
+  target_kind: midpoint_rate
+  representation: log1p
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 8192
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 32
+  detail_fraction: 0.4
+model:
+  base_channels: 32
+  channel_mult: [1, 2, 4, 4]
+  time_dim: 128
+  activation_checkpointing: true
+  blocks_per_level: 2
+  attention_heads: 4
+train:
+  device: auto
+  seed: 2025
+  epochs: 100
+  batch_size: 8
+  accumulate: 2
+  workers: 4
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  warmup_steps: 500
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.999
+  time_limit_hours: 11.0
+  validation_interval: 5
+  validation_patches: 128
+  validation_members: 4
+  validation_steps: 24
+  validation_plot_samples: 3
+  output: runs/merraflow_precip_direct_v2
+inference:
+  steps: 24
+  members: 8
+  seed: 317
+  output: runs/merraflow_precip_direct_v2/predictions
