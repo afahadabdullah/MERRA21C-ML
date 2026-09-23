@@ -136,6 +136,41 @@ detail. If it stays poor even at 51–99 km, the broader event placement is wron
 The selected wet cases remain distinct from the uniform validation scores;
 both must be inspected before judging overall model skill.
 
+### Whole-CONUS February 23 case
+
+The CPU-only plotter reads already saved whole-domain NetCDF members for the
+existing test hour `20260223_0530` (2026-02-23 05:30 UTC). It detects whether
+the files are from the **direct full-rainfall flow** or the **original residual
+v2 flow** and labels the figure accordingly. It never presents original v2
+members as direct-flow output. No GPU inference or Slurm job is needed.
+
+With the project Conda environment activated on a compute node:
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+git pull --ff-only origin main
+export PYTHONPATH="$PWD/src"
+python -m merraflow.plot_saved_conus_precip_v2 --predictions runs --list
+```
+
+This lists all matching directories and model kinds. If one direct-flow
+directory exists, the plotter selects it. If none exists, it can use one
+original residual-v2 directory and states that clearly in the figure. If
+multiple directories match, pass the desired exact directory using
+`--predictions`. Plot from saved files with:
+
+```bash
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/precip-conus-${USER}"
+python -m merraflow.plot_saved_conus_precip_v2 --predictions runs --output runs/merraflow_precip_direct_v2/saved_conus_feb23
+```
+
+The fresh output directory contains a full-CONUS PNG and `report.json` with
+the source NetCDF paths, area-weighted rainfall metrics, and neighborhood FSS.
+The PNG shows HWT truth, coarse input, up to two members, ensemble mean, and
+spread on a shared rain-rate scale. This selected case is a visual diagnostic,
+not an overall test-set score. The plotter requires saved **member NetCDF**
+files; a previously saved PNG alone cannot provide new model comparisons.
+
 The current training sampler already devotes 40% of its proposal mixture to
 rain/coast scores (`patch.detail_fraction: 0.4`). Its inverse-proposal weight
 `1/(N*q)` returns the objective to uniform patch risk. Increasing rainy-case
