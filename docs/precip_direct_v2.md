@@ -104,6 +104,38 @@ These metrics describe selected rainy cases and cannot replace the existing
 uniform validation CRPS. In particular, a rainy-case gain does not establish
 that the model has fixed false rain on dry cases.
 
+### Spatial audit of an existing wet evaluation
+
+The wet evaluation saves each case's truth, coarse field, frozen regression,
+generated members, and area weights in `results/case_*.npz`. Score those saved
+fields on CPU without resampling or using a GPU:
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+git pull --ff-only origin main
+export PYTHONPATH="$PWD/src"
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/precip-spatial-${USER}"
+RESULTS=runs/merraflow_precip_direct_v2/wet_evaluations/last_wet_KAF9LG/results
+env/bin/python -m merraflow.analyze_wet_precip_direct_v2 \
+  --results "$RESULTS" \
+  --history runs/merraflow_precip_direct_v2/history.json
+```
+
+Replace `RESULTS` with the directory printed by your wet evaluation submission
+if it differs. The command writes `spatial_report.json` and `spatial_skill.png`
+inside that results directory. It requires the saved `.npz` files, not just
+`report.json` and PNGs. It also selects the **same epoch** from the uniform
+validation history, refusing to compare another epoch by accident.
+
+The plot compares mean individual-member, ensemble-mean, coarse, and frozen-v2
+fraction skill scores (FSS) at 1, 5, and 10 mm/h. Neighborhood widths are 1,
+5, 17, and 33 pixels (nominally 3, 15, 51, and 99 km). Scores rise toward 1
+with better spatial agreement. If skill is poor at one pixel but improves at
+larger neighborhoods, the rain features are close but displaced or miss fine
+detail. If it stays poor even at 51–99 km, the broader event placement is wrong.
+The selected wet cases remain distinct from the uniform validation scores;
+both must be inspected before judging overall model skill.
+
 The current training sampler already devotes 40% of its proposal mixture to
 rain/coast scores (`patch.detail_fraction: 0.4`). Its inverse-proposal weight
 `1/(N*q)` returns the objective to uniform patch risk. Increasing rainy-case
