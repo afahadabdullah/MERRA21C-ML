@@ -142,7 +142,8 @@ The CPU-only plotter reads already saved whole-domain NetCDF members for the
 existing test hour `20260223_0530` (2026-02-23 05:30 UTC). It detects whether
 the files are from the **direct full-rainfall flow** or the **original residual
 v2 flow** and labels the figure accordingly. It never presents original v2
-members as direct-flow output. No GPU inference or Slurm job is needed.
+members as direct-flow output. This path needs no GPU when direct full-domain
+members have already been saved.
 
 With the project Conda environment activated on a compute node:
 
@@ -170,6 +171,28 @@ The PNG shows HWT truth, coarse input, up to two members, ensemble mean, and
 spread on a shared rain-rate scale. This selected case is a visual diagnostic,
 not an overall test-set score. The plotter requires saved **member NetCDF**
 files; a previously saved PNG alone cannot provide new model comparisons.
+
+The September 2026 search on Discover listed **only residual-v2** February 23
+members. The direct-flow wet evaluation saved 128-pixel patches, not a
+whole-CONUS field. To make the same seven panels for the **direct** model at
+epoch 40, submit one full-domain inference job from the immutable wet-evaluation
+checkpoint:
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+git pull --ff-only origin main
+bash scripts/submit_full_conus_precip_direct_v2.sh
+```
+
+The job uses one A100, two members, 24 steps, and the test hour
+`20260223_0530`. It writes `HWT truth`, `Coarse input`, `Frozen v2 input`,
+`Member 1`, `Member 2`, `Ensemble mean`, and `Ensemble spread` with one color
+scale to `runs/merraflow_precip_direct_v2/wet_evaluations/last_wet_KAF9LG/full_conus_20260223_0530/20260223_0530_full_conus_direct_v2.png`.
+The same folder holds a report and the full generated arrays. The helper
+prints the Slurm job ID and log path. If the 12-hour allocation ends after a
+member is saved, rerun the same submission command; completed members are
+reused after checkpoint/settings validation. A saved whole-domain original-v2
+residual field cannot replace the missing direct-flow output.
 
 The current training sampler already devotes 40% of its proposal mixture to
 rain/coast scores (`patch.detail_fraction: 0.4`). Its inverse-proposal weight
