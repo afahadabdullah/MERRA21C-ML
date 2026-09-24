@@ -1,16 +1,18 @@
 """Hybrid six-field flow: direct sqrt rainfall and residual states including humidity."""
 from copy import deepcopy
+from collections import OrderedDict
 from pathlib import Path
 import numpy as np
 import torch
 import yaml
 from .dataset_v2 import PatchDatasetV2, crop_v2
-from .dataset_v3_precip import PrecipArchive, PrecipDataset, encode_rain
+from .dataset_v3_precip import PrecipArchive, PrecipDataset, encode_rain, HOURLY_FILE
 from .model_v2 import UNetV2, integrate_v2
 from .precip_direct_v2 import regression_bundle as original_bundle, validate_config as validate_direct
 from .loss_v2 import quadratic_v2
 from .physics_v2 import TARGETS_V2, UNITS_V2
 from .prepare_v4 import load_index
+from .loading_v4 import ProposalCache
 
 VERSION = 'v4'
 TARGETS = list(TARGETS_V2)+['q2m']
@@ -65,11 +67,19 @@ def validate_config(cfg):
         raise ValueError('Provide six positive channel loss weights')
     if type(tr['calibration_batches']) is not int or tr['calibration_batches'] < 1:
         raise ValueError('calibration_batches must be positive')
+    for key, default, minimum in [('prefetch_factor', 4, 1), ('array_cache_size', 16, 0)]:
+        value = tr.get(key, default)
+        if type(value) is not int or value < minimum:
+            raise ValueError(f'{key} must be an integer >= {minimum}')
+    if type(tr.get('proposal_cache', True)) is not bool:
+        raise ValueError('proposal_cache must be boolean')
     return cfg
 
 
 class ArchiveV4(PrecipArchive):
     def __init__(self, cfg, verify_files=True):
+        self.array_cache_size = cfg['train'].get('array_cache_size', 16)
+        self._array_cache = OrderedDict()
         super().__init__(cfg, verify_files=verify_files)
         if 'QV2M' not in self.stats['predictors']:
             raise ValueError('v4 requires already prepared QV2M input')
@@ -79,8 +89,32 @@ class ArchiveV4(PrecipArchive):
         self.target_rm = np.concatenate([self.rm, np.zeros((1,1,1), dtype='float32')])
         self.target_rs = np.concatenate([self.rs, np.full((1,1,1), cfg['data']['humidity_scale_kg_kg'], dtype='float32')])
 
+    def __getstate__(self):
+        # NumPy can serialize a memmap's contents. Workers must reopen their own
+        # bounded mappings instead of copying full-domain arrays through spawn.
+        return dict(self.__dict__, _array_cache=OrderedDict())
+
+    def mapped_array(self, path):
+        if path in self._array_cache:
+            self._array_cache.move_to_end(path)
+            return self._array_cache[path]
+        value = np.load(path, mmap_mode='r', allow_pickle=False)
+        if self.array_cache_size:
+            self._array_cache[path] = value
+            while len(self._array_cache) > self.array_cache_size:
+                # Do not explicitly close mappings: a returned crop may still
+                # hold a view. Normal reference counting handles those views.
+                self._array_cache.popitem(last=False)
+        return value
+
+    def array(self, entry, name):
+        return self.mapped_array(self.root/entry['id']/f'{name}_v2.npy')
+
+    def truth_field(self, entry):
+        return self.mapped_array(self.hourly_root/entry['id']/HOURLY_FILE)
+
     def humidity(self, entry):
-        return np.load(self.humidity_root/entry['id']/'q2m_v4.npy', mmap_mode='r')
+        return self.mapped_array(self.humidity_root/entry['id']/'q2m_v4.npy')
 
     def coarse(self, entry):
         return np.concatenate([self.array(entry, 'baseline'), self.array(entry, 'condition')[self.q_index:self.q_index+1]])
@@ -106,9 +140,30 @@ class DatasetV4(PrecipDataset):
         # truth proposal caches for coarse proposals.
         PatchDatasetV2.__init__(self, cfg['data']['prepared'], split, cfg['patch'], samples, seed)
         self.proposal_kind = 'coarse'
+        # Parent caches are truth-based and unused by v4. Do not serialize
+        # potentially large memmaps into every spawned coarse-proposal worker.
+        self.cached_scores = self.cached_edges = None
+        self.cached_rows, self.cached_edge_rows = {}, {}
         self.archive = archive if archive is not None else ArchiveV4(cfg)
         self.entries = self.archive.eligible(split)
         self.rain_scale = self.archive.scale
+        self.disk_proposals = None
+
+    def enable_proposal_cache(self, root):
+        self.disk_proposals = ProposalCache(root, self.archive.index['fingerprint'],
+                                            self.patch, self.archive.shape, len(self.yy))
+
+    def proposal(self, entry):
+        if self.disk_proposals is None or not self.detail or self.structure:
+            return super().proposal(entry)
+        if entry['id'] not in self.proposals:
+            cached = self.disk_proposals.load(entry['id'])
+            if cached is not None:
+                self.proposals[entry['id']] = cached
+            else:
+                q = super().proposal(entry)
+                self.disk_proposals.save(entry['id'], q)
+        return self.proposals[entry['id']]
 
     def __getitem__(self, index):
         rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, int(index)]))
@@ -215,7 +270,8 @@ def check_checkpoint(saved, cfg, archive, world=None):
         if saved['config'][key] != cfg[key]:
             raise ValueError(f'Checkpoint {key} mismatch')
     if world is not None:
-        ignore = {'output', 'workers', 'device', 'time_limit_hours'}
+        ignore = {'output', 'workers', 'device', 'time_limit_hours',
+                  'prefetch_factor', 'array_cache_size', 'proposal_cache'}
         if (saved['world_size'] != world or
                 {k:v for k,v in cfg['train'].items() if k not in ignore} !=
                 {k:v for k,v in saved['config']['train'].items() if k not in ignore}):

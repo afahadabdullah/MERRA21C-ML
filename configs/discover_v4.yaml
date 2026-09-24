@@ -37,6 +37,9 @@ train:
   batch_size: 8
   accumulate: 2
   workers: 4
+  prefetch_factor: 4
+  array_cache_size: 16
+  proposal_cache: true
   learning_rate: 0.0002
   weight_decay: 0.01
   warmup_steps: 2000

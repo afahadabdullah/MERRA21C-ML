@@ -109,6 +109,7 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
         # deadlock; spawn starts a clean interpreter on Linux as well as macOS.
         # Keep workers nonpersistent so data.epoch reaches each new iterator.
         kwargs['multiprocessing_context'] = 'spawn'
+        kwargs['prefetch_factor'] = tr.get('prefetch_factor', 4)
     loader = DataLoader(data, sampler=sampler, **kwargs)
     vloader = DataLoader(Subset(val, range(rank, len(val), world)), **kwargs)
     out = Path(tr['output'])
@@ -116,6 +117,13 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
         raise FileExistsError(f'Use a fresh output or --resume: {out}')
     # Multiple workers may start together; only rank zero creates artifacts.
     rank_zero_action(lambda: out.mkdir(parents=True, exist_ok=True), rank, group)
+    if tr.get('proposal_cache', True):
+        data.enable_proposal_cache(out.parent/'_v4_proposal_cache')
+    if rank == 0:
+        print(f'Data loading: workers={tr["workers"]}/rank; '
+              f'prefetch={kwargs.get("prefetch_factor", 0)} batches/worker; '
+              f'array mappings={archive.array_cache_size}/worker; '
+              f'proposal cache={data.disk_proposals.root if data.disk_proposals else "off"}', flush=True)
     saved = torch.load(resume, map_location='cpu', weights_only=True) if resume else None
     if saved:
         check_checkpoint(saved, cfg, archive, world)

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import os
+import pickle
 import subprocess
 import socket
 import sys
@@ -80,6 +81,7 @@ def conditioner_for(cfg, archive):
 
 def test_contract_six_targets_hourly_history_and_q2m(setup):
     d = DatasetV4(setup, 'train', 2, 3)
+    assert d.cached_scores is None and d.cached_edges is None
     b = d[0]
     a = d.archive
     assert len(TARGETS) == 6 and TARGETS[-1] == 'q2m'
@@ -173,6 +175,8 @@ def test_config_rejects_leakage_wrong_codec_and_loss(setup):
 
 def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     cfg = deepcopy(setup)
+    for key in ('prefetch_factor', 'array_cache_size', 'proposal_cache'):
+        cfg['train'].pop(key, None)  # Emulate a checkpoint from before loader tuning.
     cfg['train']['output'] = str(tmp_path/'training')
     # Epoch-boundary stop exercises a real optimizer/scheduler resume.
     cfg['train']['time_limit_hours'] = .00001
@@ -183,6 +187,7 @@ def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     assert first['history'][0]['step_s_per_rank'] > 0
     assert first['flow_scale'][0,1,0,0] == 1
     cfg['train']['time_limit_hours'] = None
+    cfg['train'].update(prefetch_factor=2, array_cache_size=4, proposal_cache=True)
     capsys.readouterr()
     train(cfg,resume=path)
     resume_log = capsys.readouterr().out
@@ -339,7 +344,7 @@ def test_humidity_units_and_missing_fields(setup,tmp_path):
         read_q2m(setup,a,entry)
 
 
-def test_submission_chain_and_missing_data_prevents_submission(setup,tmp_path):
+def test_submission_chain_defers_data_checks_to_job(setup,tmp_path):
     cfg = deepcopy(setup)
     cfg['train']['output'] = str(tmp_path/'scheduled')
     path = tmp_path/'config.yaml'
@@ -360,12 +365,94 @@ def test_submission_chain_and_missing_data_prevents_submission(setup,tmp_path):
     assert '--array=0-1%2' in calls[0]
     assert '--dependency=afterok:1' in calls[1]
     assert '--dependency=afterok:2' in calls[2] and 'slurm_train_v4.sh' in calls[2]
-    # A direct submission performs real preflight before contacting Slurm.
+    # Submission is immediate; the scheduled job performs quick preflight.
     result = subprocess.run(['bash','scripts/submit_v4.sh'],env=env,capture_output=True,text=True,timeout=60)
     assert result.returncode == 0, result.stdout+result.stderr
     assert len(capture.read_text().splitlines()) == 4
     cfg['data']['humidity_targets'] = str(tmp_path/'missing_humidity')
     path.write_text(yaml.safe_dump(cfg))
     result = subprocess.run(['bash','scripts/submit_v4.sh'],env=env,capture_output=True,text=True,timeout=60)
-    assert result.returncode != 0
-    assert len(capture.read_text().splitlines()) == 4
+    assert result.returncode == 0, result.stdout+result.stderr
+    assert len(capture.read_text().splitlines()) == 5
+    with pytest.raises(FileNotFoundError):
+        preflight(cfg)
+
+
+def test_array_mapping_cache_bound_and_spawn_serialization(setup, monkeypatch):
+    cfg = deepcopy(setup)
+    cfg['train']['array_cache_size'] = 2
+    a = ArchiveV4(cfg)
+    entry = a.eligible('train')[0]
+    original_load = np.load
+    opened = []
+
+    def load(path, *args, **kwargs):
+        opened.append(path)
+        return original_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(np, 'load', load)
+    first = a.array(entry, 'condition')
+    assert a.array(entry, 'condition') is first and len(opened) == 1
+    view = first[:, :2, :2]
+    expected = view.copy()
+    a.array(entry, 'baseline')
+    a.humidity(entry)
+    assert len(a._array_cache) == 2
+    assert a.root/entry['id']/'condition_v2.npy' not in a._array_cache
+    np.testing.assert_array_equal(view, expected)  # Eviction must not close live views.
+    clone = pickle.loads(pickle.dumps(a))
+    assert not clone._array_cache
+    np.testing.assert_array_equal(clone.array(entry, 'condition'), first)
+
+
+def test_proposal_disk_cache_exact_reuse_and_regeneration(setup, tmp_path, monkeypatch):
+    reference = DatasetV4(setup, 'train', 4, 91)
+    entry = reference.entries[0]
+    expected = reference.proposal(entry).copy()
+    root = tmp_path/'proposals'
+
+    def dataset(cfg=setup):
+        result = DatasetV4(cfg, 'train', 4, 91, archive=reference.archive)
+        result.enable_proposal_cache(root)
+        return result
+
+    first = dataset()
+    np.testing.assert_array_equal(first.proposal(entry), expected)
+    cached = dataset()
+
+    def no_rescan(*args):
+        raise AssertionError('A cached proposal rescanned the full coarse rain field')
+
+    monkeypatch.setattr(cached, 'rain_score', no_rescan)
+    np.testing.assert_array_equal(cached.proposal(entry), expected)
+    for epoch in (0, 1):
+        reference.epoch = cached.epoch = epoch
+        actual = cached[0]
+        for key, value in reference[0].items():
+            torch.testing.assert_close(actual[key], value, rtol=0, atol=0)
+    cache_file = first.disk_proposals.root/f'{entry["id"]}.npy'
+    cache_file.write_bytes(b'incomplete cache')
+    repaired = dataset()
+    np.testing.assert_array_equal(repaired.proposal(entry), expected)
+    np.testing.assert_array_equal(np.load(cache_file), expected)
+    changed = deepcopy(setup)
+    changed['patch']['detail_fraction'] /= 2
+    assert dataset(changed).disk_proposals.root != first.disk_proposals.root
+    disabled = dataset()
+    disabled.disk_proposals.enabled = False
+    np.testing.assert_array_equal(disabled.proposal(entry), expected)
+
+
+def test_prefetch_preserves_samples_across_epoch_worker_restarts(setup, tmp_path):
+    reference = DatasetV4(setup, 'train', 4, 73)
+    cached = DatasetV4(setup, 'train', 4, 73, archive=reference.archive)
+    cached.enable_proposal_cache(tmp_path/'proposals')
+    for epoch in (0, 1):
+        reference.epoch = cached.epoch = epoch
+        loader = DataLoader(cached, batch_size=2, num_workers=1,
+                            multiprocessing_context='spawn', prefetch_factor=4)
+        actual = list(loader)
+        expected = list(DataLoader(reference, batch_size=2, num_workers=0))
+        for left, right in zip(actual, expected):
+            for key in left:
+                torch.testing.assert_close(left[key], right[key], rtol=0, atol=0)
