@@ -35,19 +35,24 @@ def inspect_data(cfg):
 
 
 def preflight(cfg, resume=None):
+    print('Preflight: checking prepared, hourly-rain, and humidity archive manifests/provenance...', flush=True)
     archive = ArchiveV4(cfg)
+    print('Preflight: archive provenance valid', flush=True)
     for split in ('train','val','test'):
         entries = archive.eligible(split)
         print(f'{split}: {len(entries)} hours with complete history and hourly rainfall', flush=True)
     if resume:
+        print('Preflight: checking resume checkpoint...', flush=True)
         check_checkpoint(torch.load(resume, map_location='cpu', weights_only=True), cfg, archive)
     else:
+        print('Preflight: checking frozen regression checkpoint and output directory...', flush=True)
         original_checkpoint(cfg['conditioning']['checkpoint'], archive)
         out = Path(cfg['train']['output'])
         if out.exists() and any(out.iterdir()):
             raise FileExistsError(f'Existing v4 output: {out}; use --resume {out}/last_v4.pt')
     # Exercise real crops, humidity sidecars, previous-hour inputs and targets.
     for split in ('train', 'val'):
+        print(f'Preflight: loading one {split} sample...', flush=True)
         sample = DatasetV4(cfg, split, 1, cfg['train']['seed'])[0]
         if any(not torch.isfinite(value).all() for value in sample.values()):
             raise ValueError('Nonfinite preflight sample')
