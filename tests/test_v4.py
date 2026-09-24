@@ -100,6 +100,16 @@ def test_contract_six_targets_hourly_history_and_q2m(setup):
     # Hourly target differs from the original midpoint fixture.
     entry = a.eligible('train')[0]
     assert not np.allclose(a.physical_truth(entry)[1], a.array(entry, 'truth')[1])
+    # Reused regression inputs must equal the original v2 computation exactly,
+    # including broad crops that cross the domain boundary.
+    original = ArchiveV2(setup['data']['prepared'])
+    h, w = a.shape
+    size = setup['patch']['size']
+    for y, x in ((0, 0), ((h-size)//2, (w-size)//2), (h-size, w-size)):
+        inputs = a.inputs_with_original(entry, y, x, setup['patch'])
+        condition, context = original.inputs(entry, y, x, setup['patch'])
+        torch.testing.assert_close(inputs['original_condition'], condition, rtol=0, atol=0)
+        torch.testing.assert_close(inputs['original_context'], context, rtol=0, atol=0)
 
 
 def test_rain_never_residual_and_state_roundtrip(setup):
@@ -161,7 +171,7 @@ def test_config_rejects_leakage_wrong_codec_and_loss(setup):
         validate_config(cfg)
 
 
-def test_training_resume_validation_and_full_inference(setup, tmp_path):
+def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     cfg = deepcopy(setup)
     cfg['train']['output'] = str(tmp_path/'training')
     # Epoch-boundary stop exercises a real optimizer/scheduler resume.
@@ -169,13 +179,20 @@ def test_training_resume_validation_and_full_inference(setup, tmp_path):
     path = train(cfg)
     first = torch.load(path, weights_only=True)
     assert first['epoch'] == 0 and first['flow_scale'].shape == (1,6,1,1)
+    assert first['history'][0]['data_wait_s_per_rank'] >= 0
+    assert first['history'][0]['step_s_per_rank'] > 0
     assert first['flow_scale'][0,1,0,0] == 1
     cfg['train']['time_limit_hours'] = None
+    capsys.readouterr()
     train(cfg,resume=path)
+    resume_log = capsys.readouterr().out
+    assert 'using saved calibration (no recalibration)' in resume_log
+    assert 'Calibration starting' not in resume_log
     saved = torch.load(path,weights_only=True)
     assert saved['epoch'] == 4 and saved['targets'] == TARGETS
     assert len(saved['history']) == 5
     assert 'crps' not in saved['history'][3]
+    assert saved['history'][4]['validation_wall_s'] > 0
     assert all(f'{name}_crps' in saved['history'][4] for name in TARGETS)
     folder = path.parent/'validation_plots'/'epoch_0005'
     for name in ('fields.png','history.png','metrics.json','samples.npz'):

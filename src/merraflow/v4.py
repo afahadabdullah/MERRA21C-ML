@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
-from .dataset_v2 import ArchiveV2, PatchDatasetV2, crop_v2
+from .dataset_v2 import PatchDatasetV2, crop_v2
 from .dataset_v3_precip import PrecipArchive, PrecipDataset, encode_rain
 from .model_v2 import UNetV2, integrate_v2
 from .precip_direct_v2 import regression_bundle as original_bundle, validate_config as validate_direct
@@ -71,7 +71,6 @@ def validate_config(cfg):
 class ArchiveV4(PrecipArchive):
     def __init__(self, cfg, verify_files=True):
         super().__init__(cfg, verify_files=verify_files)
-        self.original = ArchiveV2(cfg['data']['prepared'])
         if 'QV2M' not in self.stats['predictors']:
             raise ValueError('v4 requires already prepared QV2M input')
         self.q_index = self.stats['predictors'].index('QV2M')
@@ -93,9 +92,12 @@ class ArchiveV4(PrecipArchive):
 
     def inputs_with_original(self, entry, y, x, patch):
         condition, context = self.inputs(entry, y, x, patch)
-        old_condition, old_context = self.original.inputs(entry, y, x, patch)
+        # History channels are appended after the unchanged v2 channels.
+        # Area pooling is channel-independent, so their context is identical
+        # too. Reuse both instead of rereading and rebuilding each broad crop.
+        channels = self.index['condition_channels']
         return dict(condition=condition, context=context,
-                    original_condition=old_condition, original_context=old_context)
+                    original_condition=condition[:channels], original_context=context[:channels])
 
 
 class DatasetV4(PrecipDataset):

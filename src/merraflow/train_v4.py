@@ -127,6 +127,8 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     model = make_model(archive.channels, cfg).to(device)
     initialization = None
     if saved:
+        if rank == 0:
+            print(f'Loaded checkpoint after epoch {saved["epoch"]+1}; using saved calibration (no recalibration).', flush=True)
         conditioner.flow_scale.copy_(saved['flow_scale'].to(device))
     else:
         # Bound indices before workers start. Fully exhaust this loader so no
@@ -181,7 +183,11 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
         training_model.train()
         optimizer.zero_grad(set_to_none=True)
         total, count = 0., 0
+        data_wait_s, step_s = 0., 0.
+        waiting_since = time.monotonic()
         for i, batch in enumerate(loader):
+            batch_ready = time.monotonic()
+            data_wait_s += batch_ready-waiting_since
             b = to_device(batch, device)
             window_start = i//tr['accumulate']*tr['accumulate']
             window_samples = min(tr['accumulate']*tr['batch_size'], len(data)//world-window_start*tr['batch_size'])
@@ -204,13 +210,26 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
                         averaged.lerp_(current, 1-tr['ema_decay'])
             total += loss.item()*len(b['target'])
             count += len(b['target'])
+            # loss.item() has synchronized the step on CUDA. This wall time
+            # includes transfer, model work, and any DDP waits on other ranks.
+            step_s += time.monotonic()-batch_ready
             if rank == 0 and (i == 0 or (i+1) % 32 == 0 or i+1 == len(loader)):
                 print(f'Epoch {epoch+1}/{tr["epochs"]}: batch {i+1}/{len(loader)}; '
-                      f'loss={total/count:.6g}; elapsed={(time.monotonic()-epoch_started)/60:.1f} min', flush=True)
-        total, count = reduce_totals([total, count], device)
+                      f'loss={total/count:.6g}; elapsed={(time.monotonic()-epoch_started)/60:.1f} min; '
+                      f'data_wait={data_wait_s/(i+1):.3f}s/batch; '
+                      f'step={step_s/(i+1):.3f}s/batch', flush=True)
+            waiting_since = time.monotonic()
+        total, count, wait_total, step_total = reduce_totals([total, count, data_wait_s, step_s], device)
         due = (epoch+1) % tr['validation_interval'] == 0 or epoch+1 == tr['epochs']
+        validation_started = time.monotonic()
+        if due and rank == 0:
+            print(f'Epoch {epoch+1}: validating {tr["validation_patches"]} patches, '
+                  f'{tr["validation_members"]} members, {tr["validation_steps"]} steps', flush=True)
         metrics, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale) if due else ({}, [])
-        row = dict(epoch=epoch+1, training_loss=total/count, learning_rate=scheduler.get_last_lr()[0], **metrics)
+        row = dict(epoch=epoch+1, training_loss=total/count, learning_rate=scheduler.get_last_lr()[0],
+                   data_wait_s_per_rank=wait_total/world, step_s_per_rank=step_total/world, **metrics)
+        if due:
+            row['validation_wall_s'] = reduce_max(time.monotonic()-validation_started, device)
         if device.type == 'cuda':
             row['peak_gpu_gb'] = reduce_max(torch.cuda.max_memory_allocated(device)/1024**3, device)
         history.append(row)

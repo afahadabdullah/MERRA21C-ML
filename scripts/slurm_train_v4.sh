@@ -30,9 +30,12 @@ args=(--config "$CONFIG")
 if [[ -n "${REGRESSION_CHECKPOINT:-}" ]]; then args+=(--regression-checkpoint "$REGRESSION_CHECKPOINT"); fi
 if [[ -n "${RESUME:-}" ]]; then args+=(--resume "$RESUME"); fi
 if [[ -n "${HOURLY_TARGETS:-}" ]]; then args+=(--hourly-targets "$HOURLY_TARGETS"); fi
-# Check index fingerprints and representative samples without rescanning every
-# prepared hourly file. `preflight --full` remains available as an audit.
-python -m merraflow.cli_v4 preflight "${args[@]}"
+if [[ -n "${RESUME:-}" ]]; then
+  echo "Resuming $RESUME directly; using saved calibration and trainer compatibility checks."
+else
+  # First-run sample checks; `preflight --full` remains available as an audit.
+  python -m merraflow.cli_v4 preflight "${args[@]}"
+fi
 srun --ntasks=1 --cpu-bind=none torchrun --standalone --nnodes=1 --nproc-per-node=4 \
   -m merraflow.cli_v4 train "${args[@]}"
 # Queue only the continuation that is actually needed; no fixed segment count.
