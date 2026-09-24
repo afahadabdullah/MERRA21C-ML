@@ -2,6 +2,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import timedelta
+from itertools import islice
 from pathlib import Path
 import json
 import math
@@ -20,25 +21,38 @@ from .train_v3_precip import lr_lambda, reduce_totals, reduce_max
 
 
 @torch.no_grad()
-def calibrate(conditioner, loader, cfg, device):
+def calibrate(conditioner, loader, cfg, device, group=None):
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    started = time.monotonic()
+    batches = min(len(loader), cfg['train']['calibration_batches'])
+    print(f'[rank {rank}] Calibration starting: {batches} batches', flush=True)
     sums = torch.zeros(len(TARGETS)+1, dtype=torch.float64, device=device)
     halo, size = cfg['patch']['halo'], cfg['patch']['size']
-    for i, batch in enumerate(loader):
-        if i >= cfg['train']['calibration_batches']:
-            break
+    for i, batch in enumerate(islice(loader, batches)):
         b = to_device(batch, device)
         with autocast(device, cfg['train']['precision']):
             error = (b['target']-conditioner(b))[:, :, halo:halo+size, halo:halo+size]
         weighted = (error.double().square()*b['area'][:, None]).sum((-2,-1))/b['area'].sum((-2,-1))[:,None]
         sums[:-1] += weighted.sum(0)
         sums[-1] += len(error)
+        if i == 0 or (i+1) % 16 == 0 or i+1 == batches:
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            print(f'[rank {rank}] Calibration {i+1}/{batches} '
+                  f'({time.monotonic()-started:.1f}s)', flush=True)
     if dist.is_initialized():
-        dist.all_reduce(sums)
+        # Archive I/O can leave ranks far apart. Use the existing long-lived
+        # CPU control group, not a pending NCCL operation, while they catch up.
+        if group is not None:
+            sums = sums.cpu()
+        print(f'[rank {rank}] Calibration local work complete; reducing totals', flush=True)
+        dist.all_reduce(sums, group=group)
     if not sums[-1] or not torch.isfinite(sums).all():
         raise ValueError('Invalid training-only calibration')
     scale = torch.sqrt(sums[:-1]/sums[-1]).clamp_min(.05).float()[None,:,None,None]
     scale[:,1] = 1.  # Rain is full sqrt rainfall, never calibrated as a residual.
     conditioner.flow_scale.copy_(scale)
+    print(f'[rank {rank}] Calibration complete ({time.monotonic()-started:.1f}s)', flush=True)
     return scale.cpu()
 
 
@@ -56,8 +70,19 @@ def train(cfg, resume=None, initialize=None):
         elif device.type != 'cpu':
             raise ValueError('DDP requires CUDA or CPU')
         dist.init_process_group('nccl' if device.type == 'cuda' else 'gloo')
-    group = dist.new_group(backend='gloo', timeout=timedelta(hours=12)) if world > 1 else None
     try:
+        group = dist.new_group(backend='gloo', timeout=timedelta(hours=12)) if world > 1 else None
+        print(f'[rank {rank}] V4 startup: device={device}; world={world}; '
+              f'workers={cfg["train"]["workers"]}', flush=True)
+        if world > 1:
+            # Check communication before archive reads or worker startup so a
+            # transport failure is distinguishable from slow calibration.
+            print(f'[rank {rank}] Checking distributed communication', flush=True)
+            probe = torch.ones(1, device=device)
+            dist.all_reduce(probe)
+            if probe.item() != world:
+                raise RuntimeError('Distributed startup check returned an invalid rank count')
+            print(f'[rank {rank}] Distributed communication ready', flush=True)
         return _train(cfg, resume, initialize, device, rank, world, local, group)
     finally:
         if dist.is_initialized():
@@ -70,11 +95,17 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     if p['samples_per_epoch'] % world:
         raise ValueError('samples_per_epoch must divide world size')
     torch.manual_seed(tr['seed']+rank)
+    print(f'[rank {rank}] Loading training and validation archives', flush=True)
     data = DatasetV4(cfg, 'train', p['samples_per_epoch'], tr['seed'])
     val = DatasetV4(cfg, 'val', tr['validation_patches'], tr['seed']+991)
     archive = data.archive
     sampler = DistributedSampler(data, world, rank, seed=tr['seed']) if world > 1 else None
     kwargs = dict(batch_size=tr['batch_size'], num_workers=tr['workers'], pin_memory=device.type == 'cuda')
+    if tr['workers'] > 0:
+        # Workers start on iteration, after CUDA/NCCL setup. Forking then can
+        # deadlock; spawn starts a clean interpreter on Linux as well as macOS.
+        # Keep workers nonpersistent so data.epoch reaches each new iterator.
+        kwargs['multiprocessing_context'] = 'spawn'
     loader = DataLoader(data, sampler=sampler, **kwargs)
     vloader = DataLoader(Subset(val, range(rank, len(val), world)), **kwargs)
     out = Path(tr['output'])
@@ -95,9 +126,10 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     if saved:
         conditioner.flow_scale.copy_(saved['flow_scale'].to(device))
     else:
-        calibrate(conditioner, loader, cfg, device)
+        calibrate(conditioner, loader, cfg, device, group)
     if saved:
         model.load_state_dict(saved['model'])
+    print(f'[rank {rank}] Preparing training model', flush=True)
     training_model = DDP(model, device_ids=[local] if device.type == 'cuda' else None,
                          find_unused_parameters=True) if world > 1 else model
     ema = deepcopy(model).eval().requires_grad_(False)

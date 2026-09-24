@@ -22,7 +22,7 @@ from merraflow.dataset_v2 import ArchiveV2
 from merraflow.v4 import (load_config, validate_config, ArchiveV4, DatasetV4, TARGETS,
     FrozenRegression, regression_bundle, make_model, objective, check_checkpoint)
 from merraflow.model_v2 import UNetV2
-from merraflow.train_v4 import train
+from merraflow.train_v4 import train, calibrate
 from merraflow.inference_v4 import predict, sample_frame
 
 
@@ -215,9 +215,53 @@ def test_full_domain_rain_is_direct(setup):
     np.testing.assert_allclose(actual[1],a.scale*z*(z+2),rtol=1e-6)
 
 
+def test_calibration_control_group_and_batch_limit(monkeypatch):
+    group = object()
+    monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: True)
+    monkeypatch.setattr(torch.distributed, 'get_rank', lambda: 0)
+    calls = []
+
+    def all_reduce(totals, group=None):
+        calls.append(group)
+        assert totals.device.type == 'cpu'
+        assert totals.dtype == torch.float64
+        torch.testing.assert_close(totals, torch.tensor([8.]*6+[2.], dtype=torch.float64))
+        # A remote rank contributes one sample with error 3 in each channel.
+        totals.add_(torch.tensor([9.]*6+[1.], dtype=torch.float64))
+
+    monkeypatch.setattr(torch.distributed, 'all_reduce', all_reduce)
+
+    class Conditioner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer('flow_scale', torch.ones(1, 6, 1, 1))
+
+        def forward(self, batch):
+            return torch.zeros_like(batch['target'])
+
+    class Loader:
+        def __len__(self):
+            return 2
+
+        def __iter__(self):
+            yield dict(target=torch.full((2, 6, 1, 1), 2.), area=torch.ones(2, 1, 1))
+            raise AssertionError('Calibration fetched a batch beyond its limit')
+
+    cfg = dict(patch=dict(halo=0, size=1), train=dict(calibration_batches=1, precision='fp32'))
+    conditioner = Conditioner()
+    scale = calibrate(conditioner, Loader(), cfg, torch.device('cpu'), group)
+    expected = torch.full((1, 6, 1, 1), (17/3)**.5)
+    expected[:, 1] = 1.
+    assert calls == [group]
+    torch.testing.assert_close(scale, expected)
+    torch.testing.assert_close(conditioner.flow_scale, expected)
+
+
 def test_four_process_training_with_plots(setup,tmp_path):
     cfg = deepcopy(setup)
-    cfg['train'].update(epochs=1, output=str(tmp_path/'ddp'),validation_interval=1,validation_patches=3)
+    # Exercise worker startup after process-group setup, including the rank
+    # with no validation samples. Production uses the same spawn context.
+    cfg['train'].update(epochs=1, workers=1, output=str(tmp_path/'ddp'),validation_interval=1,validation_patches=3)
     path = tmp_path/'config.yaml'
     path.write_text(yaml.safe_dump(cfg))
     env = dict(os.environ,PYTHONPATH=str(Path('src').resolve()),OMP_NUM_THREADS='1',MPLBACKEND='Agg',
@@ -227,7 +271,7 @@ def test_four_process_training_with_plots(setup,tmp_path):
         port = sock.getsockname()[1]
     result = subprocess.run([sys.executable,'-m','torch.distributed.run','--master-addr=127.0.0.1',
         f'--master-port={port}','--nnodes=1','--nproc-per-node=4',
-        '-m','merraflow.cli_v4','train','--config',str(path)],env=env,capture_output=True,text=True,timeout=180)
+        '-m','merraflow.cli_v4','train','--config',str(path)],env=env,capture_output=True,text=True,timeout=300)
     assert result.returncode == 0, result.stdout+result.stderr
     saved = torch.load(Path(cfg['train']['output'])/'last_v4.pt',weights_only=True)
     assert saved['world_size'] == 4 and len(saved['rng']) == 4
