@@ -266,9 +266,13 @@ def check_checkpoint(saved, cfg, archive, world=None):
             or saved['hourly_fingerprint'] != archive.hourly_fingerprint
             or saved['humidity_fingerprint'] != archive.humidity_fingerprint):
         raise ValueError('v4 archive/hourly/humidity fingerprint mismatch')
-    for key in ('data', 'patch', 'model', 'conditioning'):
+    for key in ('data', 'patch', 'conditioning'):
         if saved['config'][key] != cfg[key]:
             raise ValueError(f'Checkpoint {key} mismatch')
+    # Recomputation changes memory/compute use, not architecture or parameters.
+    if ({k: v for k, v in saved['config']['model'].items() if k != 'activation_checkpointing'} !=
+            {k: v for k, v in cfg['model'].items() if k != 'activation_checkpointing'}):
+        raise ValueError('Checkpoint model mismatch')
     if world is not None:
         ignore = {'output', 'workers', 'device', 'time_limit_hours',
                   'prefetch_factor', 'array_cache_size', 'proposal_cache'}

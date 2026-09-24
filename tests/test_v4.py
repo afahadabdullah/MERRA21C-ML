@@ -137,6 +137,32 @@ def test_rain_never_residual_and_state_roundtrip(setup):
     assert model.output[-1].out_channels == 6
 
 
+def test_checkpointing_toggle_preserves_loss_and_gradients(setup):
+    d = DatasetV4(setup, 'train', 2, 4)
+    batch = next(iter(DataLoader(d, batch_size=2)))
+    conditioner_for(setup, d.archive).prepare(batch)
+    checkpointed = make_model(d.archive.channels, setup).train()
+    checkpointed.checkpointing = True
+    # A nonzero output layer exercises gradients throughout the U-Net.
+    with torch.no_grad():
+        checkpointed.output[-1].weight.normal_(0, .02)
+    direct = deepcopy(checkpointed)
+    direct.checkpointing = False
+    losses = []
+    for model in (checkpointed, direct):
+        loss = objective(model, batch, generator=torch.Generator().manual_seed(42))
+        loss.backward()
+        losses.append(loss.detach())
+    torch.testing.assert_close(*losses)
+    assert checkpointed.input.weight.grad.abs().sum() > 0
+    for (name, before), (other_name, after) in zip(checkpointed.named_parameters(), direct.named_parameters()):
+        assert name == other_name
+        if before.grad is None:
+            assert after.grad is None
+        else:
+            torch.testing.assert_close(before.grad, after.grad)
+
+
 def test_sampling_does_not_use_truth_scores(setup):
     d = DatasetV4(setup, 'train', 3, 1)
     original = d.archive.array
@@ -175,6 +201,7 @@ def test_config_rejects_leakage_wrong_codec_and_loss(setup):
 
 def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     cfg = deepcopy(setup)
+    cfg['model']['activation_checkpointing'] = True
     for key in ('prefetch_factor', 'array_cache_size', 'proposal_cache'):
         cfg['train'].pop(key, None)  # Emulate a checkpoint from before loader tuning.
     cfg['train']['output'] = str(tmp_path/'training')
@@ -188,11 +215,13 @@ def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     assert first['flow_scale'][0,1,0,0] == 1
     cfg['train']['time_limit_hours'] = None
     cfg['train'].update(prefetch_factor=2, array_cache_size=4, proposal_cache=True)
+    cfg['model']['activation_checkpointing'] = False
     capsys.readouterr()
     train(cfg,resume=path)
     resume_log = capsys.readouterr().out
     assert 'using saved calibration (no recalibration)' in resume_log
     assert 'Calibration starting' not in resume_log
+    assert 'activation_checkpointing=False' in resume_log
     saved = torch.load(path,weights_only=True)
     assert saved['epoch'] == 4 and saved['targets'] == TARGETS
     assert len(saved['history']) == 5
@@ -205,6 +234,10 @@ def test_training_resume_validation_and_full_inference(setup, tmp_path, capsys):
     assert np.load(folder/'samples.npz')['patch_0_ensemble'].shape[2] == 16
     assert (path.parent/'best_v4.pt').exists()
     a = ArchiveV4(cfg)
+    incompatible = deepcopy(cfg)
+    incompatible['model']['base_channels'] += 1
+    with pytest.raises(ValueError, match='Checkpoint model mismatch'):
+        check_checkpoint(saved, incompatible, a)
     bad = dict(saved,hourly_fingerprint='wrong')
     with pytest.raises(ValueError,match='fingerprint'):
         check_checkpoint(bad,cfg,a)
@@ -300,6 +333,7 @@ def test_quick_preflight_skips_all_hours_file_scan(setup, tmp_path, monkeypatch)
 
 def test_four_process_training_with_plots(setup,tmp_path):
     cfg = deepcopy(setup)
+    cfg['model']['activation_checkpointing'] = False
     # Exercise worker startup after process-group setup, including the rank
     # with no validation samples. Production uses the same spawn context.
     cfg['train'].update(epochs=1, workers=1, output=str(tmp_path/'ddp'),validation_interval=1,validation_patches=3)
@@ -320,6 +354,7 @@ def test_four_process_training_with_plots(setup,tmp_path):
     assert result.returncode == 0, result.stdout+result.stderr
     assert 'Calibration 1/1' in result.stdout
     assert 'batch 2/2' in result.stdout
+    assert 'activation_checkpointing=False' in result.stdout
     assert 'Exception ignored in:' not in result.stderr
     assert 'terminate called' not in result.stderr
     saved = torch.load(Path(cfg['train']['output'])/'last_v4.pt',weights_only=True)

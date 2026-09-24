@@ -167,6 +167,7 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     if rank == 0:
         print(f'V4 flow: {sum(p.numel() for p in model.parameters()):,} parameters; world={world}; six targets; '
               f'frozen regression condition={conditioner is not None}; '
+              f'activation_checkpointing={model.checkpointing}; '
               f'effective batch={tr["batch_size"]*tr["accumulate"]*world}', flush=True)
     # Recover a validation artifact if a job ended after its durable checkpoint.
     if saved and 'crps' in history[-1]:

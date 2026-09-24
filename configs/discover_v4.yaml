@@ -27,7 +27,7 @@ model:
   base_channels: 64
   channel_mult: [1, 2, 3, 4]
   time_dim: 256
-  activation_checkpointing: true
+  activation_checkpointing: false
   blocks_per_level: 2
   attention_heads: 8
 train:
