@@ -23,6 +23,7 @@ from merraflow.v4 import (load_config, validate_config, ArchiveV4, DatasetV4, TA
     FrozenRegression, regression_bundle, make_model, objective, check_checkpoint)
 from merraflow.model_v2 import UNetV2
 from merraflow.train_v4 import train, calibrate
+from merraflow.cli_v4 import preflight
 from merraflow.inference_v4 import predict, sample_frame
 
 
@@ -255,6 +256,20 @@ def test_calibration_control_group_and_batch_limit(monkeypatch):
     assert calls == [group]
     torch.testing.assert_close(scale, expected)
     torch.testing.assert_close(conditioner.flow_scale, expected)
+
+
+def test_quick_preflight_skips_all_hours_file_scan(setup, tmp_path, monkeypatch):
+    cfg = deepcopy(setup)
+    cfg['train']['output'] = str(tmp_path/'quick_preflight')
+
+    def forbid_file_scan(*args, **kwargs):
+        raise RuntimeError('full scan invoked')
+
+    monkeypatch.setattr('merraflow.prepare_v3_precip.verify_target', forbid_file_scan)
+    monkeypatch.setattr('merraflow.prepare_v4.verify', forbid_file_scan)
+    preflight(cfg)
+    with pytest.raises(RuntimeError, match='full scan invoked'):
+        preflight(cfg, full=True)
 
 
 def test_four_process_training_with_plots(setup,tmp_path):

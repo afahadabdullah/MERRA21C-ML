@@ -100,7 +100,7 @@ def verify_target(cfg, archive, entry, provenance, checksum=False):
     return digest(meta)
 
 
-def validate_hourly_index(cfg, archive, index):
+def validate_hourly_index(cfg, archive, index, verify_files=True):
     provenance = ensure_provenance(cfg, archive)
     payload = {k: v for k, v in index.items() if k != 'fingerprint'}
     if (index.get('fingerprint') != digest(payload)
@@ -109,6 +109,10 @@ def validate_hourly_index(cfg, archive, index):
     entries = {e['id']: e for e in archive.index['entries']}
     if len(set(index['completed'])) != len(index['completed']):
         raise ValueError('Duplicate hourly target IDs')
+    if set(index['completed']) != set(index['target_fingerprints']) or not set(index['completed']) <= set(entries):
+        raise ValueError('Hourly target index entries are incomplete or unknown')
+    if not verify_files:
+        return
     for entry_id in index['completed']:
         if entry_id not in entries or verify_target(cfg, archive, entries[entry_id], provenance) != index['target_fingerprints'].get(entry_id):
             raise ValueError(f'Hourly target changed after finalization: {entry_id}')

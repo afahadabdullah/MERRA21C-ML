@@ -114,7 +114,7 @@ def finalize_humidity(cfg):
     return dict(hours=len(records), fingerprint=payload['fingerprint'])
 
 
-def load_index(cfg, archive):
+def load_index(cfg, archive, verify_files=True):
     path = Path(cfg['data']['humidity_targets'])/INDEX
     if not path.exists():
         raise FileNotFoundError(f'{path}: run cli_v4 prepare-humidity and finalize-humidity')
@@ -122,6 +122,10 @@ def load_index(cfg, archive):
     if (index['contract'] != contract(cfg, archive)
             or index['fingerprint'] != digest({k:v for k,v in index.items() if k != 'fingerprint'})):
         raise ValueError('Humidity index provenance mismatch')
+    if set(index['records']) != {entry['id'] for entry in archive.index['entries']}:
+        raise ValueError('Humidity index entries are incomplete or unknown')
+    if not verify_files:
+        return index
     for entry in archive.index['entries']:
         if index['records'].get(entry['id']) != verify(cfg, archive, entry):
             raise ValueError(f'Humidity changed after finalization: {entry["id"]}')

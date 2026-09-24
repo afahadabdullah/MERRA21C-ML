@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
-from .v4 import (VERSION, TARGETS, DatasetV4, make_model, objective, validate_config,
+from .v4 import (VERSION, TARGETS, ArchiveV4, DatasetV4, make_model, objective, validate_config,
                  check_checkpoint, FrozenRegression, regression_bundle)
 from .validation_v4 import validate, save_plots
 from .train_precip_direct_v2 import rank_zero_action
@@ -95,10 +95,11 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     if p['samples_per_epoch'] % world:
         raise ValueError('samples_per_epoch must divide world size')
     torch.manual_seed(tr['seed']+rank)
-    print(f'[rank {rank}] Loading training and validation archives', flush=True)
-    data = DatasetV4(cfg, 'train', p['samples_per_epoch'], tr['seed'])
-    val = DatasetV4(cfg, 'val', tr['validation_patches'], tr['seed']+991)
-    archive = data.archive
+    print(f'[rank {rank}] Checking v4 archive manifests', flush=True)
+    archive = ArchiveV4(cfg, verify_files=False)
+    print(f'[rank {rank}] V4 archive manifests valid; preparing train and val datasets', flush=True)
+    data = DatasetV4(cfg, 'train', p['samples_per_epoch'], tr['seed'], archive=archive)
+    val = DatasetV4(cfg, 'val', tr['validation_patches'], tr['seed']+991, archive=archive)
     sampler = DistributedSampler(data, world, rank, seed=tr['seed']) if world > 1 else None
     kwargs = dict(batch_size=tr['batch_size'], num_workers=tr['workers'], pin_memory=device.type == 'cuda')
     if tr['workers'] > 0:

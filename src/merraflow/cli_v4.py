@@ -34,10 +34,11 @@ def inspect_data(cfg):
     return summary
 
 
-def preflight(cfg, resume=None):
-    print('Preflight: checking prepared, hourly-rain, and humidity archive manifests/provenance...', flush=True)
-    archive = ArchiveV4(cfg)
-    print('Preflight: archive provenance valid', flush=True)
+def preflight(cfg, resume=None, full=False):
+    mode = 'full file audit' if full else 'quick manifest check'
+    print(f'Preflight: {mode}...', flush=True)
+    archive = ArchiveV4(cfg, verify_files=full)
+    print(f'Preflight: {mode} complete', flush=True)
     for split in ('train','val','test'):
         entries = archive.eligible(split)
         print(f'{split}: {len(entries)} hours with complete history and hourly rainfall', flush=True)
@@ -53,7 +54,7 @@ def preflight(cfg, resume=None):
     # Exercise real crops, humidity sidecars, previous-hour inputs and targets.
     for split in ('train', 'val'):
         print(f'Preflight: loading one {split} sample...', flush=True)
-        sample = DatasetV4(cfg, split, 1, cfg['train']['seed'])[0]
+        sample = DatasetV4(cfg, split, 1, cfg['train']['seed'], archive=archive)[0]
         if any(not torch.isfinite(value).all() for value in sample.values()):
             raise ValueError('Nonfinite preflight sample')
     print(f'V4 validated: six targets, {archive.channels} flow inputs, hourly rainfall, no CAPE.', flush=True)
@@ -68,6 +69,7 @@ def main():
     parser.add_argument('--regression-checkpoint')
     parser.add_argument('--resume')
     parser.add_argument('--checkpoint')
+    parser.add_argument('--full', action='store_true', help='Verify every prepared hourly target during preflight')
     parser.add_argument('--split', choices=['val','test'], default='test')
     parser.add_argument('--limit', type=int, default=1)
     parser.add_argument('--time')
@@ -86,7 +88,7 @@ def main():
         from .prepare_v4 import finalize_humidity
         print(finalize_humidity(cfg))
     elif args.command == 'preflight':
-        preflight(cfg, args.resume)
+        preflight(cfg, args.resume, full=args.full)
     elif args.command == 'train':
         from .train_v4 import train
         print(train(cfg, args.resume))

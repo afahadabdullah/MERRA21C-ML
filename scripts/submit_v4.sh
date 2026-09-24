@@ -14,7 +14,7 @@ submit=(--parsable --export=ALL)
 if [[ -n "${DEPENDENCY:-}" ]]; then
   submit+=(--dependency="afterok:${DEPENDENCY}" --kill-on-invalid-dep=yes)
 fi
-echo 'Preflight will run inside the training job before torchrun starts.' >&2
+echo 'Quick preflight will run inside the training job.' >&2
 mkdir -p logs_v4
 env -u SLURM_MEM_PER_CPU -u SLURM_MEM_PER_NODE -u SLURM_MEM_PER_GPU \
   sbatch "${submit[@]}" scripts/slurm_train_v4.sh

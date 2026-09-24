@@ -69,14 +69,14 @@ def validate_config(cfg):
 
 
 class ArchiveV4(PrecipArchive):
-    def __init__(self, cfg):
-        super().__init__(cfg)
+    def __init__(self, cfg, verify_files=True):
+        super().__init__(cfg, verify_files=verify_files)
         self.original = ArchiveV2(cfg['data']['prepared'])
         if 'QV2M' not in self.stats['predictors']:
             raise ValueError('v4 requires already prepared QV2M input')
         self.q_index = self.stats['predictors'].index('QV2M')
         self.humidity_root = Path(cfg['data']['humidity_targets'])
-        self.humidity_fingerprint = load_index(cfg, self)['fingerprint']
+        self.humidity_fingerprint = load_index(cfg, self, verify_files=verify_files)['fingerprint']
         self.target_rm = np.concatenate([self.rm, np.zeros((1,1,1), dtype='float32')])
         self.target_rs = np.concatenate([self.rs, np.full((1,1,1), cfg['data']['humidity_scale_kg_kg'], dtype='float32')])
 
@@ -99,12 +99,12 @@ class ArchiveV4(PrecipArchive):
 
 
 class DatasetV4(PrecipDataset):
-    def __init__(self, cfg, split, samples, seed=0):
+    def __init__(self, cfg, split, samples, seed=0, archive=None):
         # Parent sets candidate grids and input-only rain scoring, never uses old
         # truth proposal caches for coarse proposals.
         PatchDatasetV2.__init__(self, cfg['data']['prepared'], split, cfg['patch'], samples, seed)
         self.proposal_kind = 'coarse'
-        self.archive = ArchiveV4(cfg)
+        self.archive = archive if archive is not None else ArchiveV4(cfg)
         self.entries = self.archive.eligible(split)
         self.rain_scale = self.archive.scale
 

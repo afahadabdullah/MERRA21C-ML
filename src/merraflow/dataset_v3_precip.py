@@ -58,7 +58,7 @@ def rain_codec(cfg):
 
 
 class PrecipArchive(ArchiveV2):
-    def __init__(self, cfg):
+    def __init__(self, cfg, verify_files=True):
         super().__init__(cfg['data']['prepared'])
         if self.stats.get('target_channels') != ['t2m', 'precip', 'ps', 'u10m', 'v10m']:
             raise ValueError('Unexpected source target ordering')
@@ -89,7 +89,7 @@ class PrecipArchive(ArchiveV2):
             if index.get('archive_fingerprint') != self.index['fingerprint'] or index.get('method') != 'trapezoid_00_30_00':
                 raise ValueError('Hourly targets were prepared for a different archive or method')
             from .prepare_v3_precip import validate_hourly_index
-            validate_hourly_index(cfg, self, index)
+            validate_hourly_index(cfg, self, index, verify_files=verify_files)
             self.hourly_fingerprint = index['fingerprint']
             self.hourly_ids = set(index['completed'])
 
