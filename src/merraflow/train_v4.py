@@ -24,11 +24,13 @@ from .train_v3_precip import lr_lambda, reduce_totals, reduce_max
 def calibrate(conditioner, loader, cfg, device, group=None):
     rank = dist.get_rank() if dist.is_initialized() else 0
     started = time.monotonic()
-    batches = min(len(loader), cfg['train']['calibration_batches'])
+    batches = len(loader)
+    if batches > cfg['train']['calibration_batches']:
+        raise ValueError('Calibration requires a loader bounded to calibration_batches')
     print(f'[rank {rank}] Calibration starting: {batches} batches', flush=True)
     sums = torch.zeros(len(TARGETS)+1, dtype=torch.float64, device=device)
     halo, size = cfg['patch']['halo'], cfg['patch']['size']
-    for i, batch in enumerate(islice(loader, batches)):
+    for i, batch in enumerate(loader):
         b = to_device(batch, device)
         with autocast(device, cfg['train']['precision']):
             error = (b['target']-conditioner(b))[:, :, halo:halo+size, halo:halo+size]
@@ -127,7 +129,12 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     if saved:
         conditioner.flow_scale.copy_(saved['flow_scale'].to(device))
     else:
-        calibrate(conditioner, loader, cfg, device, group)
+        # Bound indices before workers start. Fully exhaust this loader so no
+        # prefetched training batches remain during calibration worker shutdown.
+        calibration_batches = list(islice(loader.batch_sampler, tr['calibration_batches']))
+        calibration_loader = DataLoader(data, batch_sampler=calibration_batches,
+                                       **{k: v for k, v in kwargs.items() if k != 'batch_size'})
+        calibrate(conditioner, calibration_loader, cfg, device, group)
     if saved:
         model.load_state_dict(saved['model'])
     print(f'[rank {rank}] Preparing training model', flush=True)
@@ -166,6 +173,8 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
     longest = 0.
     for epoch in range(start, tr['epochs']):
         epoch_started = time.monotonic()
+        if rank == 0:
+            print(f'Epoch {epoch+1}/{tr["epochs"]}: starting {len(loader)} training batches per rank', flush=True)
         data.epoch = epoch
         if sampler:
             sampler.set_epoch(epoch)
@@ -195,6 +204,9 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
                         averaged.lerp_(current, 1-tr['ema_decay'])
             total += loss.item()*len(b['target'])
             count += len(b['target'])
+            if rank == 0 and (i == 0 or (i+1) % 32 == 0 or i+1 == len(loader)):
+                print(f'Epoch {epoch+1}/{tr["epochs"]}: batch {i+1}/{len(loader)}; '
+                      f'loss={total/count:.6g}; elapsed={(time.monotonic()-epoch_started)/60:.1f} min', flush=True)
         total, count = reduce_totals([total, count], device)
         due = (epoch+1) % tr['validation_interval'] == 0 or epoch+1 == tr['epochs']
         metrics, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale) if due else ({}, [])

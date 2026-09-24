@@ -241,19 +241,23 @@ def test_calibration_control_group_and_batch_limit(monkeypatch):
             return torch.zeros_like(batch['target'])
 
     class Loader:
+        exhausted = False
+
         def __len__(self):
-            return 2
+            return 1
 
         def __iter__(self):
             yield dict(target=torch.full((2, 6, 1, 1), 2.), area=torch.ones(2, 1, 1))
-            raise AssertionError('Calibration fetched a batch beyond its limit')
+            self.exhausted = True
 
     cfg = dict(patch=dict(halo=0, size=1), train=dict(calibration_batches=1, precision='fp32'))
     conditioner = Conditioner()
-    scale = calibrate(conditioner, Loader(), cfg, torch.device('cpu'), group)
+    loader = Loader()
+    scale = calibrate(conditioner, loader, cfg, torch.device('cpu'), group)
     expected = torch.full((1, 6, 1, 1), (17/3)**.5)
     expected[:, 1] = 1.
     assert calls == [group]
+    assert loader.exhausted
     torch.testing.assert_close(scale, expected)
     torch.testing.assert_close(conditioner.flow_scale, expected)
 
@@ -277,6 +281,10 @@ def test_four_process_training_with_plots(setup,tmp_path):
     # Exercise worker startup after process-group setup, including the rank
     # with no validation samples. Production uses the same spawn context.
     cfg['train'].update(epochs=1, workers=1, output=str(tmp_path/'ddp'),validation_interval=1,validation_patches=3)
+    # Calibration must end its own loader normally before the longer training
+    # loader starts; this reproduces the production partial-epoch boundary.
+    cfg['patch']['samples_per_epoch'] = 16
+    cfg['train']['calibration_batches'] = 1
     path = tmp_path/'config.yaml'
     path.write_text(yaml.safe_dump(cfg))
     env = dict(os.environ,PYTHONPATH=str(Path('src').resolve()),OMP_NUM_THREADS='1',MPLBACKEND='Agg',
@@ -288,6 +296,10 @@ def test_four_process_training_with_plots(setup,tmp_path):
         f'--master-port={port}','--nnodes=1','--nproc-per-node=4',
         '-m','merraflow.cli_v4','train','--config',str(path)],env=env,capture_output=True,text=True,timeout=300)
     assert result.returncode == 0, result.stdout+result.stderr
+    assert 'Calibration 1/1' in result.stdout
+    assert 'batch 2/2' in result.stdout
+    assert 'Exception ignored in:' not in result.stderr
+    assert 'terminate called' not in result.stderr
     saved = torch.load(Path(cfg['train']['output'])/'last_v4.pt',weights_only=True)
     assert saved['world_size'] == 4 and len(saved['rng']) == 4
     assert (Path(cfg['train']['output'])/'validation_plots'/'epoch_0001'/'fields.png').exists()
