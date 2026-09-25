@@ -79,3 +79,19 @@ def test_evaluate_writes_maps_diagnostics_and_report(trained, tmp_path, cartopy)
     assert (case/'fields.nc').exists() == cartopy
     with pytest.raises(FileExistsError):
         evaluate(trained, 'best', out, split='test', samples=1, wettest=0, members=2, steps=1, log=lambda *a: None)
+
+
+def test_native_geosfp_fields_are_original_cells(trained):
+    from merraflow.evaluate_v4_1 import native_fields, Canvas
+    archive, *_ = load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))
+    entry = archive.eligible('test')[0]
+    fields, missing = native_fields(entry, archive.static['lat'], archive.static['lon'], log=lambda *a: None)
+    # Synthetic slv files carry T2M/PS/U10M/V10M but no QV2M: q2m falls back, the rest are native.
+    assert missing == ['q2m']
+    assert {'precip', 't2m', 'ps', 'u10m', 'v10m', 'wind_speed'} <= set(fields)
+    precip = fields['precip']
+    assert precip['values'].shape == (len(precip['lat']), len(precip['lon']))  # its own lat/lon grid
+    assert precip['values'].shape[0] < archive.shape[0] and (precip['values'] >= 0).all()
+    np.testing.assert_allclose(fields['wind_speed']['values'], np.hypot(fields['u10m']['values'], fields['v10m']['values']))
+    no_native = dict(entry, native=str(entry['native']).replace('flx_Nx', 'missing_Nx'))
+    assert native_fields(no_native, archive.static['lat'], archive.static['lon'], log=lambda *a: None)[0] == {}

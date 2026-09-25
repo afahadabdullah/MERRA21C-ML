@@ -231,28 +231,34 @@ class DomainSampler:
 # ----------------------------------------------------------------------------
 
 def _lcc(grid_path, ccrs):
+    """Candidate LCC projections from grid_v2.nc (declared radius first, then
+    the usual NWP sphere/ellipsoid choices); Canvas keeps the most regular."""
     import xarray as xr
     if not Path(grid_path).exists():
-        return None
+        return []
     with xr.open_dataset(grid_path) as grid:
         name = grid.attrs.get('grid_mapping_variable')
         attrs = dict(grid[name].attrs) if name and name in grid else {}
     if attrs.get('grid_mapping_name') != 'lambert_conformal_conic':
-        return None
+        return []
     parallels = np.atleast_1d(attrs['standard_parallel']).astype(float).tolist()
     parallels = (parallels*2)[:2] if len(parallels) == 1 else parallels[:2]
-    radius = attrs.get('earth_radius')
-    globe = ccrs.Globe(semimajor_axis=float(radius), semiminor_axis=float(radius)) if radius else None
-    return ccrs.LambertConformal(central_longitude=float(attrs['longitude_of_central_meridian']),
-                                 central_latitude=float(attrs['latitude_of_projection_origin']),
-                                 standard_parallels=tuple(parallels),
-                                 false_easting=float(attrs.get('false_easting', 0.)),
-                                 false_northing=float(attrs.get('false_northing', 0.)), globe=globe)
+    radii = [float(attrs['earth_radius'])] if attrs.get('earth_radius') else []
+    globes = [ccrs.Globe(semimajor_axis=r, semiminor_axis=r, ellipse=None) for r in radii+[6371229., 6370000.]]
+    globes.append(None)  # WGS84
+    return [ccrs.LambertConformal(central_longitude=float(attrs['longitude_of_central_meridian']),
+                                  central_latitude=float(attrs['latitude_of_projection_origin']),
+                                  standard_parallels=tuple(parallels),
+                                  false_easting=float(attrs.get('false_easting', 0.)),
+                                  false_northing=float(attrs.get('false_northing', 0.)), globe=globe)
+            for globe in globes]
 
 
 class Canvas:
-    """Native-grid maps: LCC imshow when the grid is regular in projected
-    coordinates, lon/lat pcolormesh otherwise, plain index plots without Cartopy."""
+    """Maps on the grids the data live on, always with nearest-neighbour imshow
+    so resolution differences stay visible: HWT on its LCC grid, GEOS-FP on its
+    native lat/lon grid. Falls back to lon/lat pcolormesh only if the LCC grid
+    cannot be reconstructed, and to index plots without Cartopy."""
 
     def __init__(self, archive, use_cartopy=True, features=True, log=print):
         self.lat, self.lon = np.asarray(archive.static['lat']), np.asarray(archive.static['lon'])
@@ -268,18 +274,22 @@ class Canvas:
         if self.ccrs is None:
             return
         ccrs = self.ccrs
-        proj = _lcc(archive.root/'grid_v2.nc', ccrs)
-        if proj is not None:
+        best = None
+        for proj in _lcc(archive.root/'grid_v2.nc', ccrs):
             points = proj.transform_points(ccrs.PlateCarree(), self.lon, self.lat)
             x, y = points[..., 0], points[..., 1]
             xc, yc = np.nanmedian(x, axis=0), np.nanmedian(y, axis=1)
             dx, dy = np.nanmedian(np.diff(xc)), np.nanmedian(np.diff(yc))
-            regular = (np.isfinite([dx, dy]).all() and dx != 0 and dy != 0
-                       and np.nanmax(abs(x-xc[None])) < .5*abs(dx) and np.nanmax(abs(y-yc[:, None])) < .5*abs(dy))
-            if regular:
-                self.mode, self.proj = 'lcc', proj
-                self.xc, self.yc, self.dx, self.dy = xc, yc, dx, dy
+            if not (np.isfinite([dx, dy]).all() and dx != 0 and dy != 0):
+                continue
+            residual = max(np.nanmax(abs(x-xc[None]))/abs(dx), np.nanmax(abs(y-yc[:, None]))/abs(dy))
+            if best is None or residual < best[0]:
+                best = (residual, proj, xc, yc, dx, dy)
+        if best is not None and best[0] < .5:
+            self.mode, self.proj, self.xc, self.yc, self.dx, self.dy = 'lcc', *best[1:]
+            log(f'Maps: native LCC grid drawn with imshow (max cell misplacement {best[0]:.3f} px)')
         if self.mode == 'index':
+            log('Maps: LCC grid mapping not recoverable from grid_v2.nc; high-res fields fall back to lon/lat pcolormesh')
             self.mode = 'mesh'
             self.proj = ccrs.LambertConformal(central_longitude=float(np.nanmedian(self.lon)),
                                               central_latitude=float(np.nanmedian(self.lat)),
@@ -343,6 +353,33 @@ class Canvas:
         self.decorate(ax, left, bottom)
         return image
 
+    def show_native(self, ax, native, region=None, cmap=None, norm=None, left=False, bottom=False):
+        """Original GEOS-FP cells with imshow on their own lat/lon grid (nearest,
+        never interpolated), framed to the same view as the high-resolution panels."""
+        ys, xs = self.region(region, (self.h, self.w))
+        values, lat, lon = native['values'], native['lat'], native['lon']
+        rlat, rlon = self.lat[ys, xs], self.lon[ys, xs]
+        pad_lat, pad_lon = 2*native['dlat'], 2*native['dlon']
+        iy = np.flatnonzero((lat >= np.nanmin(rlat)-pad_lat) & (lat <= np.nanmax(rlat)+pad_lat))
+        ix = np.flatnonzero((lon >= np.nanmin(rlon)-pad_lon) & (lon <= np.nanmax(rlon)+pad_lon))
+        if len(iy) < 1 or len(ix) < 1:
+            return None  # native grid does not cover this view
+        values, lat, lon = values[iy[0]:iy[-1]+1, ix[0]:ix[-1]+1], lat[iy[0]:iy[-1]+1], lon[ix[0]:ix[-1]+1]
+        extent = (lon[0]-native['dlon']/2, lon[-1]+native['dlon']/2, lat[0]-native['dlat']/2, lat[-1]+native['dlat']/2)
+        options = dict(origin='lower', extent=extent, cmap=cmap, norm=norm, interpolation='nearest')
+        if self.mode == 'index':
+            image = ax.imshow(values, aspect='auto', **options)
+            ax.set(xlabel='Longitude (°E)', ylabel='Latitude (°N)')
+            return image
+        image = ax.imshow(values, transform=self.ccrs.PlateCarree(), regrid_shape=1600, **options)
+        if self.mode == 'lcc':
+            ax.set_extent(self._extent(ys, xs), crs=self.proj)
+        else:
+            ax.set_extent([float(rlon.min()), float(rlon.max()), float(rlat.min()), float(rlat.max())],
+                          crs=self.ccrs.PlateCarree())
+        self.decorate(ax, left, bottom)
+        return image
+
     def decorate(self, ax, left=False, bottom=False):
         if self.mode == 'index':
             return
@@ -390,6 +427,73 @@ class Canvas:
         else:
             ax.add_patch(Rectangle((xs.start, ys.start), xs.stop-xs.start, ys.stop-ys.start, fill=False, ec=color, lw=1.3))
             ax.text(xs.start, ys.stop, f' {label}', fontsize=8, color=color)
+
+
+NATIVE = {'t2m': ('slv', 'T2M', 1.), 'precip': ('flx', 'PRECTOT', 3600.), 'ps': ('slv', 'PS', 1.),
+          'u10m': ('slv', 'U10M', 1.), 'v10m': ('slv', 'V10M', 1.), 'q2m': ('slv', 'QV2M', 1.)}
+
+
+def native_fields(entry, lat, lon, margin=2., log=print):
+    """The original ~25 km GEOS-FP hourly fields (tavg1_2d_flx/slv_Nx) over the
+    domain, on their own lat/lon grid: never the LCC interpolation.
+
+    Returns {name: dict(values, lat, lon, dlat, dlon)} for what is available and
+    the list of variables that fell back to the regridded coarse input."""
+    import xarray as xr
+    if not entry.get('native'):
+        return {}, list(NATIVE)
+    flx = Path(entry['native'])
+    paths = {'flx': flx, 'slv': flx.with_name(flx.name.replace('tavg1_2d_flx_Nx.', 'tavg1_2d_slv_Nx.'))}
+    box = (float(np.nanmin(lat))-margin, float(np.nanmax(lat))+margin,
+           float(np.nanmin(lon))-margin, float(np.nanmax(lon))+margin)
+    fields, missing = {}, []
+    for kind, path in paths.items():
+        names = [n for n, (k, _, _) in NATIVE.items() if k == kind]
+        if not path.is_file():
+            missing += names
+            continue
+        with xr.open_dataset(path) as ds:
+            if 'time' in ds.coords and ds.time.size == 1 and ds.time.values[0] != np.datetime64(entry['time']):
+                log(f'Native {path.name}: time {ds.time.values[0]} ≠ {entry["time"]}; using regridded coarse')
+                missing += names
+                continue
+            ds = ds.assign_coords(lon=((ds.lon+180) % 360)-180).sortby('lon').sortby('lat')
+            ds = ds.sel(lat=slice(box[0], box[1]), lon=slice(box[2], box[3]))
+            glat, glon = np.asarray(ds.lat.values, dtype='float64'), np.asarray(ds.lon.values, dtype='float64')
+            if glat.size < 2 or glon.size < 2:
+                missing += names
+                continue
+            for name in names:
+                var, factor = NATIVE[name][1], NATIVE[name][2]
+                if var not in ds:
+                    missing.append(name)
+                    continue
+                field = ds[var]
+                for dim in [d for d in field.dims if d not in ('lat', 'lon')]:
+                    field = field.isel({dim: 0})
+                value = np.asarray(field.transpose('lat', 'lon').values, dtype='float32')*factor
+                if name == 'precip':
+                    value = np.maximum(value, 0)
+                fields[name] = dict(values=value, lat=glat, lon=glon,
+                                    dlat=float(np.median(np.diff(glat))), dlon=float(np.median(np.diff(glon))))
+    if 'u10m' in fields and 'v10m' in fields:
+        fields['wind_speed'] = dict(fields['u10m'], values=np.hypot(fields['u10m']['values'], fields['v10m']['values']))
+    return fields, sorted(set(missing))
+
+
+def native_label(native):
+    return f'GEOS-FP native {native["dlat"]:.4g}°×{native["dlon"]:.4g}°'
+
+
+def native_stats(native, lat, lon):
+    """cos(lat)-weighted mean and max of native cells whose centres fall in the view."""
+    iy = (native['lat'] >= np.nanmin(lat)) & (native['lat'] <= np.nanmax(lat))
+    ix = (native['lon'] >= np.nanmin(lon)) & (native['lon'] <= np.nanmax(lon))
+    values = native['values'][np.ix_(iy, ix)]
+    if not values.size:
+        return float('nan'), float('nan')
+    weights = np.broadcast_to(np.cos(np.deg2rad(native['lat'][iy]))[:, None], values.shape)
+    return float((values*weights).sum()/weights.sum()), float(values.max())
 
 
 def event_window(rain, size):
@@ -511,19 +615,45 @@ def _stamp(ax, text):
             bbox=dict(boxstyle='round,pad=.25', fc='white', ec='none', alpha=.85))
 
 
+def _native_shown(item, name):
+    """Native GEOS-FP field in display units, or None (then the LCC coarse is shown)."""
+    native = item.get('native', {}).get(name)
+    if native is None:
+        return None
+    values = native['values'] if name == 'precip' else _display(name, native['values'])
+    return dict(native, values=values)
+
+
+def _coarse_panel(canvas, ax, item, name, fallback, region, cmap, norm, left, bottom):
+    """Draw the coarse input as the model's source sees it: native ~25 km GEOS-FP
+    cells on their own grid; regridded LCC coarse only if the native file is missing."""
+    native = _native_shown(item, name)
+    image = None if native is None else canvas.show_native(ax, native, region, cmap=cmap, norm=norm, left=left, bottom=bottom)
+    if image is not None:
+        ys, xs = canvas.region(region, fallback.shape)
+        mean, peak = native_stats(native, canvas.lat[ys, xs], canvas.lon[ys, xs])
+        return image, native_label(native), mean, peak
+    image = canvas.show(ax, fallback, region, cmap=cmap, norm=norm, left=left, bottom=bottom)
+    ys, xs = canvas.region(region, fallback.shape)
+    return image, 'Coarse input (LCC-regridded)', None, None
+
+
 def plot_conus_precip(canvas, item, path, plt):
     from matplotlib.gridspec import GridSpec
     cmap, norm = _rain_norm()
     area = item['area']
     rain = item['ensemble'][:, 1]
-    panels = [('Coarse input (GEOS-FP)', item['coarse'][1]), ('Frozen v2 regression', item['regression'][1]),
-              ('Truth (HWT hourly)', item['truth'][1]), ('Ensemble mean', rain.mean(0)),
-              ('Member 1', rain[0]), ('Member 2', rain[min(1, len(rain)-1)])]
+    panels = [('Frozen v2 regression', item['regression'][1]), ('Truth (HWT hourly)', item['truth'][1]),
+              ('Ensemble mean', rain.mean(0)), ('Member 1', rain[0]), ('Member 2', rain[min(1, len(rain)-1)])]
     fig = plt.figure(figsize=(26, 10.2), constrained_layout=True)
     grid = GridSpec(2, 4, figure=fig)
-    spots = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1)]
-    image = None
-    for (label, field), (r, c) in zip(panels, spots):
+    ax = canvas.axes(fig, grid[0, 0])
+    image, label, mean, peak = _coarse_panel(canvas, ax, item, 'precip', item['coarse'][1], None, cmap, norm, True, False)
+    ax.set_title(label, fontsize=11)
+    if mean is None:
+        mean, peak = weighted_mean(item['coarse'][1], area), float(item['coarse'][1].max())
+    _stamp(ax, f'mean {mean:.3f} · max {peak:.1f} mm/h (original cells)')
+    for (label, field), (r, c) in zip(panels, [(0, 1), (0, 2), (0, 3), (1, 0), (1, 1)]):
         ax = canvas.axes(fig, grid[r, c])
         image = canvas.show(ax, field, cmap=cmap, norm=norm, left=c == 0, bottom=r == 1)
         ax.set_title(label, fontsize=11)
@@ -546,10 +676,10 @@ def plot_conus_precip(canvas, item, path, plt):
     ax.set_title('Ensemble spread (std)', fontsize=11)
     fig.colorbar(image, ax=ax, shrink=.7, label='mm h⁻¹', extend='max')
     m = item['metrics']['precip']
-    fig.suptitle(f'{item["heading"]}\nRain: CRPS {m["ensemble"]["crps"]:.3f} vs coarse MAE {m["coarse"]["mae"]:.3f} '
+    fig.suptitle(f'{item["heading"]}\nRain: CRPS {m["ensemble"]["crps"]:.3f} vs regridded-coarse MAE {m["coarse"]["mae"]:.3f} '
                  f'vs regression MAE {m["regression"]["mae"]:.3f} mm/h · {len(rain)} members · boxes = zoom windows',
                  fontsize=13)
-    fig.savefig(path, dpi=110)
+    fig.savefig(path, dpi=140)
     plt.close(fig)
 
 
@@ -559,7 +689,7 @@ def plot_conus_states(canvas, item, path, plt):
     fig = plt.figure(figsize=(26, 4.3*len(names)), constrained_layout=True)
     grid = GridSpec(len(names), 5, figure=fig)
     for r, name in enumerate(names):
-        title, unit, *_ , cmap, _ = DISPLAY[name]
+        title, unit, *_, cmap, _ = DISPLAY[name]
         if name == 'wind_speed':
             coarse, truth, ens = speed(item['coarse']), speed(item['truth']), speed(item['ensemble'])
         else:
@@ -567,30 +697,36 @@ def plot_conus_states(canvas, item, path, plt):
             coarse, truth, ens = item['coarse'][c], item['truth'][c], item['ensemble'][:, c]
         mean = ens.mean(0)
         shown = [_display(name, v) for v in (coarse, truth, mean)]
-        norm = _norm(name, np.stack(shown)[:, ::4, ::4])
-        for j, (label, field) in enumerate(zip(('Coarse input', 'Truth', 'Ensemble mean'), shown)):
+        native = _native_shown(item, name)
+        pool = np.concatenate([np.stack(shown)[:, ::4, ::4].ravel()]+([native['values'].ravel()] if native else []))
+        norm = _norm(name, pool)
+        bottom = r == len(names)-1
+        ax = canvas.axes(fig, grid[r, 0])
+        image, label, *_ = _coarse_panel(canvas, ax, item, name, shown[0], None, cmap, norm, True, bottom)
+        ax.set_title(f'{title} · {label}', fontsize=10)
+        for j, (label, field) in enumerate(zip(('Truth', 'Ensemble mean'), shown[1:]), 1):
             ax = canvas.axes(fig, grid[r, j])
-            image = canvas.show(ax, field, cmap=cmap, norm=norm, left=j == 0, bottom=r == len(names)-1)
+            image = canvas.show(ax, field, cmap=cmap, norm=norm, bottom=bottom)
             ax.set_title(f'{title} · {label}', fontsize=10)
         fig.colorbar(image, ax=fig.axes[-3:], shrink=.85, label=unit, pad=.01)
         error = _display(name, mean-truth, difference=True)
         bound = max(float(np.quantile(abs(error), .995)), 1e-6)
         ax = canvas.axes(fig, grid[r, 3])
-        image = canvas.show(ax, error, cmap='RdBu_r', norm=plt.Normalize(-bound, bound), bottom=r == len(names)-1)
+        image = canvas.show(ax, error, cmap='RdBu_r', norm=plt.Normalize(-bound, bound), bottom=bottom)
         stats = item['metrics'][name]
         factor = DISPLAY[name][3]
-        _stamp(ax, f'RMSE {stats["ensemble"]["rmse"]*factor:.3g} · coarse {stats["coarse"]["rmse"]*factor:.3g} · '
+        _stamp(ax, f'RMSE {stats["ensemble"]["rmse"]*factor:.3g} · regridded coarse {stats["coarse"]["rmse"]*factor:.3g} · '
                    f'bias {stats["ensemble"]["bias"]*factor:+.2g} {unit}')
         ax.set_title(f'{title} · mean − truth', fontsize=10)
         fig.colorbar(image, ax=ax, shrink=.85, label=unit)
         spread = _display(name, ens.std(0), difference=True)
         ax = canvas.axes(fig, grid[r, 4])
         image = canvas.show(ax, spread, cmap='magma_r', norm=plt.Normalize(0, max(float(np.quantile(spread, .995)), 1e-6)),
-                            bottom=r == len(names)-1)
+                            bottom=bottom)
         ax.set_title(f'{title} · spread', fontsize=10)
         fig.colorbar(image, ax=ax, shrink=.85, label=unit, extend='max')
     fig.suptitle(f'{item["heading"]} · states (midpoint snapshot) and 10 m wind speed', fontsize=13)
-    fig.savefig(path, dpi=95)
+    fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
@@ -598,10 +734,10 @@ def plot_zoom(canvas, item, window, label, path, plt):
     from matplotlib.gridspec import GridSpec
     rain_cmap, rain_norm = _rain_norm()
     ys, xs = window
-    columns = ('Coarse input', 'Frozen regression', 'Truth', 'Member 1', 'Ensemble mean', 'Mean − truth', 'Spread')
+    columns = ('Frozen regression', 'Truth', 'Member 1', 'Ensemble mean', 'Mean − truth', 'Spread')
     names = list(TARGETS)
     fig = plt.figure(figsize=(29, 3.9*len(names)), constrained_layout=True)
-    grid = GridSpec(len(names), len(columns), figure=fig)
+    grid = GridSpec(len(names), len(columns)+1, figure=fig)
     area = item['area'][ys, xs]
     for r, name in enumerate(names):
         c = TARGETS.index(name)
@@ -609,16 +745,30 @@ def plot_zoom(canvas, item, window, label, path, plt):
         ens = item['ensemble'][:, c]
         fields = [item['coarse'][c], item['regression'][c], item['truth'][c], ens[0], ens.mean(0)]
         bottom = r == len(names)-1
+        native = _native_shown(item, name)
         if name == 'precip':
             cmap, norm = rain_cmap, rain_norm
             shown = fields
         else:
             shown = [_display(name, f) for f in fields]
-            norm = _norm(name, np.stack([s[ys, xs] for s in shown]))
-        for j, field in enumerate(shown):
+            pool = [s[ys, xs].ravel() for s in shown]
+            if native:
+                lat, lon = canvas.lat[ys, xs], canvas.lon[ys, xs]
+                keep = np.ix_((native['lat'] >= lat.min()) & (native['lat'] <= lat.max()),
+                              (native['lon'] >= lon.min()) & (native['lon'] <= lon.max()))
+                pool.append(native['values'][keep].ravel())
+            norm = _norm(name, np.concatenate(pool))
+        ax = canvas.axes(fig, grid[r, 0])
+        image, coarse_label, mean, peak = _coarse_panel(canvas, ax, item, name, shown[0], window, cmap, norm, True, bottom)
+        ax.set_title(f'{name} · {coarse_label}', fontsize=9.5)
+        if name == 'precip':
+            if mean is None:
+                mean, peak = weighted_mean(shown[0][ys, xs], area), float(shown[0][ys, xs].max())
+            _stamp(ax, f'mean {mean:.2f} · max {peak:.1f}')
+        for j, field in enumerate(shown[1:], 1):
             ax = canvas.axes(fig, grid[r, j])
-            image = canvas.show(ax, field, window, cmap=cmap, norm=norm, left=j == 0, bottom=bottom)
-            ax.set_title(f'{name} · {columns[j]}', fontsize=9.5)
+            image = canvas.show(ax, field, window, cmap=cmap, norm=norm, bottom=bottom)
+            ax.set_title(f'{name} · {columns[j-1]}', fontsize=9.5)
             if name == 'precip':
                 _stamp(ax, f'mean {weighted_mean(field[ys, xs], area):.2f} · max {float(field[ys, xs].max()):.1f}')
         fig.colorbar(image, ax=fig.axes[-5:], shrink=.85, pad=.01, label=unit,
@@ -629,19 +779,20 @@ def plot_zoom(canvas, item, window, label, path, plt):
         image = canvas.show(ax, error, window, cmap='RdBu_r', norm=plt.Normalize(-bound, bound), bottom=bottom)
         rmse = float(np.sqrt(weighted_mean((error[ys, xs])**2, area)))
         coarse_rmse = float(np.sqrt(weighted_mean(_display(name, item['coarse'][c]-item['truth'][c], True)[ys, xs]**2, area)))
-        _stamp(ax, f'RMSE {rmse:.3g} (coarse {coarse_rmse:.3g}) {unit}')
-        ax.set_title(f'{name} · {columns[5]}', fontsize=9.5)
+        _stamp(ax, f'RMSE {rmse:.3g} (regridded coarse {coarse_rmse:.3g}) {unit}')
+        ax.set_title(f'{name} · {columns[4]}', fontsize=9.5)
         fig.colorbar(image, ax=ax, shrink=.85, label=unit)
         spread = _display(name, ens.std(0), difference=True)
         ax = canvas.axes(fig, grid[r, 6])
         image = canvas.show(ax, spread, window, cmap='magma_r',
                             norm=plt.Normalize(0, max(float(np.quantile(spread[ys, xs], .995)), 1e-6)), bottom=bottom)
-        ax.set_title(f'{name} · {columns[6]}', fontsize=9.5)
+        ax.set_title(f'{name} · {columns[5]}', fontsize=9.5)
         fig.colorbar(image, ax=ax, shrink=.85, label=unit, extend='max')
     cy, cx = (ys.start+ys.stop)//2, (xs.start+xs.stop)//2
     fig.suptitle(f'{item["heading"]}\n{label} · rows {ys.start}-{ys.stop}, cols {xs.start}-{xs.stop} · '
-                 f'centre {float(canvas.lat[cy, cx]):.2f}°N {float(canvas.lon[cy, cx]):.2f}°E', fontsize=13)
-    fig.savefig(path, dpi=90)
+                 f'centre {float(canvas.lat[cy, cx]):.2f}°N {float(canvas.lon[cy, cx]):.2f}°E · '
+                 f'left column: original GEOS-FP cells, other panels: 2 km HWT grid', fontsize=13)
+    fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
@@ -852,7 +1003,7 @@ def save_fields(path, archive, item):
 
 def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wettest=1, timestamps=None,
              members=8, steps=None, zooms=2, zoom_size=256, seed=317, batch=32, threads=8,
-             use_cartopy=True, map_features=True, save=False, log=print):
+             use_cartopy=True, map_features=True, save=False, use_native=True, log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -905,7 +1056,10 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
         windows = [(event_window(truth[1], zoom_size), 'event')]
         windows += [(w, f'random {k+1}') for k, w in enumerate(random_windows(
             archive.shape, zoom_size, zooms, np.random.SeedSequence([seed, int(entry['id'].replace('_', ''))])))]
-        item = dict(truth=truth, coarse=coarse, regression=regression, ensemble=ensemble, area=area,
+        native, native_missing = (native_fields(entry, canvas.lat, canvas.lon, log=log) if use_native else ({}, list(NATIVE)))
+        if native_missing:
+            log(f'  native GEOS-FP unavailable for {native_missing}: showing regridded coarse for those')
+        item = dict(truth=truth, coarse=coarse, regression=regression, ensemble=ensemble, area=area, native=native,
                     time=entry['time'], metrics=report,
                     windows=[(w, 'E' if name == 'event' else f'Z{name.split()[-1]}') for w, name in windows],
                     heading=f'v4.1 · epoch {saved["epoch"]+1} ({label}) · {split} {entry["time"].replace("T", " ")[:16]} UTC · '
@@ -919,7 +1073,7 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
             plot_zoom(canvas, item, window, f'{"Rain-event" if name == "event" else "Random"} zoom ({name})', folder/file, plt)
         if save:
             save_fields(folder/'fields.nc', archive, item)
-        reports.append(dict(id=entry['id'], time=entry['time'], reason=case['reason'], metrics=report,
+        reports.append(dict(id=entry['id'], time=entry['time'], reason=case['reason'], metrics=report, native_missing=native_missing,
                             windows={name: dict(rows=[w[0].start, w[0].stop], cols=[w[1].start, w[1].stop])
                                      for w, name in windows}, seconds=round(time.monotonic()-started, 1)))
         diagnostics.append(diag)
@@ -958,6 +1112,8 @@ def main():
     parser.add_argument('--no-cartopy', action='store_true', help='Plot on grid indices')
     parser.add_argument('--no-map-features', action='store_true', help='Skip coastlines/states')
     parser.add_argument('--save-fields', action='store_true', help='Write truth/coarse/regression/mean/spread NetCDF per case')
+    parser.add_argument('--no-native', action='store_true',
+                        help='Show the LCC-regridded coarse input instead of original GEOS-FP cells')
     args = parser.parse_args()
     if args.cartopy_data_dir:
         import cartopy
@@ -965,7 +1121,7 @@ def main():
     cfg = load_config(args.config)
     evaluate(cfg, 'latest' if args.latest else args.checkpoint, args.output, args.split, args.samples, args.wettest,
              args.timestamps, args.members, args.steps, args.zooms, args.zoom_size, args.seed, args.batch, args.threads,
-             not args.no_cartopy, not args.no_map_features, args.save_fields,
+             not args.no_cartopy, not args.no_map_features, args.save_fields, not args.no_native,
              log=lambda message: print(message, flush=True))
 
 
