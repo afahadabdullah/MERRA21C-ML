@@ -10,8 +10,28 @@ from .train_v3_precip import reduce_totals
 from .metrics import crps_ensemble
 
 
+def _rain_key(item):
+    # Deterministic ties keep the same diagnostic patches across epochs.
+    return (-item['truth_rain_mean'], item['source_rank'], item['source_patch'])
+
+
+def _gather_rainy_previews(previews, limit, group):
+    if not dist.is_initialized():
+        return previews
+    rank, world = dist.get_rank(), dist.get_world_size()
+    scores = [None]*world
+    dist.all_gather_object(scores, [_rain_key(item) for item in previews], group=group)
+    selected = set(sorted(key for local in scores for key in local)[:limit])
+    # Transfer only the global winners, not every rank's ensembles. The trainer
+    # supplies its CPU Gloo group so these NumPy arrays stay off the GPUs.
+    local = [item for item in previews if _rain_key(item) in selected]
+    gathered = [None]*world if rank == 0 else None
+    dist.gather_object(local, gathered, dst=0, group=group)
+    return sorted((item for local in gathered for item in local), key=_rain_key) if rank == 0 else []
+
+
 @torch.no_grad()
-def validate(model, conditioner, loader, cfg, device, rain_scale=None):
+def validate(model, conditioner, loader, cfg, device, rain_scale=None, group=None):
     rank = dist.get_rank() if dist.is_initialized() else 0
     rng = torch.Generator(device=device).manual_seed(cfg['train']['seed']+7103+rank)
     halo, size = cfg['patch']['halo'], cfg['patch']['size']
@@ -22,6 +42,7 @@ def validate(model, conditioner, loader, cfg, device, rain_scale=None):
     sums.update(wet_fraction=0., truth_wet_fraction=0., false_wet_numerator=0., dry_area=0.,
                 missed_wet_numerator=0., wet_area=0.)
     count, previews = 0, []
+    preview_limit = cfg['train']['validation_plot_samples']
     for batch in loader:
         b = to_device(batch, device)
         with autocast(device, cfg['train']['precision']):
@@ -49,10 +70,17 @@ def validate(model, conditioner, loader, cfg, device, rain_scale=None):
                                missed_wet_numerator=(1-wet)*observed, wet_area=observed).items():
             sums[key] += float((value*area).sum())
         count += len(truth)
-        if rank == 0:
-            for j in range(min(len(truth), cfg['train']['validation_plot_samples']-len(previews))):
-                previews.append(dict(truth=truth[j], coarse=coarse[j], regression=regression[j],
-                                     ensemble=ensemble[:, j], area=area[j]))
+        for j in range(len(truth)):
+            metadata = dict(truth_rain_mean=float((truth[j, 1]*area[j]).sum()),
+                            truth_wet_fraction=float((observed[j]*area[j]).sum()),
+                            source_rank=rank, source_patch=count-len(truth)+j)
+            if preview_limit and (len(previews) < preview_limit or _rain_key(metadata) < _rain_key(previews[-1])):
+                # Copy only retained patches so views cannot hold whole batches.
+                previews.append(dict(truth=truth[j].copy(), coarse=coarse[j].copy(),
+                                     regression=regression[j].copy(), ensemble=ensemble[:, j].copy(),
+                                     area=area[j].copy(), **metadata))
+                previews.sort(key=_rain_key)
+                del previews[preview_limit:]
     totals = reduce_totals([*sums.values(), count], device)
     if totals[-1] == 0 or not np.isfinite(totals).all():
         raise FloatingPointError('Invalid v4 validation')
@@ -65,6 +93,7 @@ def validate(model, conditioner, loader, cfg, device, rain_scale=None):
         metrics[key] = numerator/denominator if denominator else None
     # Explicit aliases retain the shared trainer's rain-based checkpoint selection.
     metrics['crps'] = metrics['precip_crps']
+    previews = _gather_rainy_previews(previews, preview_limit, group)
     return metrics, previews
 
 
@@ -96,7 +125,12 @@ def save_plots(previews, history, out):
                     fig.colorbar(im, ax=axes[c,:6].tolist(), label=unit, shrink=.8, extend='both')
                 elif j == 6:
                     fig.colorbar(im, ax=axes[c,j], label=unit, shrink=.8, extend='max')
-        fig.suptitle(f'V4 epoch {history[-1]["epoch"]}: fixed uniform validation patch {i+1}; rain hourly, states midpoint')
+        label = (f'rain-selected diagnostic {i+1}; observed mean {item["truth_rain_mean"]:.3g} mm/h; '
+                 f'wet area (≥0.1 mm/h) {item["truth_wet_fraction"]:.1%}')
+        if item['truth_wet_fraction'] == 0:
+            label += '; no observed wet pixels'
+        fig.suptitle(f'V4 epoch {history[-1]["epoch"]}: {label}\n'
+                     'Selected from uniform validation samples; metrics use all patches; rain hourly, states midpoint')
         fig.savefig(out/('fields.png' if i == 0 else f'fields_patch_{i+1}.png'), dpi=110)
         plt.close(fig)
     fig, axes = plt.subplots(2, 4, figsize=(20, 8), constrained_layout=True)

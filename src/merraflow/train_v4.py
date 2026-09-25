@@ -179,7 +179,7 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
             missing = message[0]
         if missing:
             with torch.random.fork_rng(devices=[device.index] if device.type == 'cuda' else []):
-                _, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale)
+                _, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale, group=group)
             rank_zero_action(lambda: save_plots(previews, history, destination), rank, group)
     longest = 0.
     for epoch in range(start, tr['epochs']):
@@ -234,7 +234,7 @@ def _train(cfg, resume, initialize, device, rank, world, local, group):
         if due and rank == 0:
             print(f'Epoch {epoch+1}: validating {tr["validation_patches"]} patches, '
                   f'{tr["validation_members"]} members, {tr["validation_steps"]} steps', flush=True)
-        metrics, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale) if due else ({}, [])
+        metrics, previews = validate(ema, conditioner, vloader, cfg, device, data.rain_scale, group=group) if due else ({}, [])
         row = dict(epoch=epoch+1, training_loss=total/count, learning_rate=scheduler.get_last_lr()[0],
                    data_wait_s_per_rank=wait_total/world, step_s_per_rank=step_total/world, **metrics)
         if due:
