@@ -43,10 +43,10 @@ train:
   epochs: 250
   batch_size: 16           # v4: 8 x accumulate 2; same effective batch 64 on 4 GPUs
   accumulate: 1
-  workers: 10              # per rank; the job gets 12 cores per GPU
+  workers: 12              # per rank; the job gets 12 cores per GPU
   val_workers: 4
   persistent_workers: true
-  prefetch_factor: 4
+  prefetch_factor: 6
   fd_cache_size: 64
   learning_rate: 0.0002
   weight_decay: 0.01
@@ -58,12 +58,19 @@ train:
   time_limit_hours: 11.0
   calibration_batches: 64  # 64 x 16 = the same 1024 calibration patches as v4
   channel_weights: [1.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+  # Validation + diagnostic plots + a kept checkpoint fire together on this
+  # cadence: every validation_interval epochs, switching to the finer
+  # validation_interval_late after schedule_switch_epoch. Here: every 5 through
+  # epoch 20, then every 2. Kept checkpoints are named
+  # checkpoints/epoch_NNNN_crps<value>_v4_1.pt. Cadence is resume-safe: change
+  # it on a continuation without breaking exact resume.
   validation_interval: 5
+  validation_interval_late: 2
+  schedule_switch_epoch: 20
   validation_patches: 256
   validation_members: 8
   validation_steps: 24
   validation_plot_samples: 4   # fixed rainy validation patches, same every epoch
-  checkpoint_interval: 5       # also keep checkpoints/epoch_NNNN_v4_1.pt
   output: runs/merraflow_v4_1
 inference:
   steps: 32

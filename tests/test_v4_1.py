@@ -180,8 +180,9 @@ def test_training_resume_checkpoint_and_inference(packed_cfg, tmp_path, capsys):
     for name in ('rain_patch_1.png', 'states_patch_1.png', 'diagnostics.png', 'history.png', 'metrics.json'):
         assert (folder/name).exists(), name
     assert (path.parent/'best_v4_1.pt').exists()
-    assert (path.parent/'checkpoints'/'epoch_0005_v4_1.pt').exists()
-    assert not (path.parent/'checkpoints'/'epoch_0004_v4_1.pt').exists()
+    kept = list((path.parent/'checkpoints').glob('epoch_0005_crps*_v4_1.pt'))
+    assert len(kept) == 1 and f'{saved["history"][4]["crps"]:.4f}' in kept[0].name
+    assert not list((path.parent/'checkpoints').glob('epoch_0004_*.pt'))
     chosen = json.loads((path.parent/'preview_patches.json').read_text())
     assert chosen and chosen[0]['truth_rain_mean'] >= max(c['truth_rain_mean'] for c in chosen)
     metrics = json.loads((folder/'metrics.json').read_text())
@@ -212,7 +213,34 @@ def test_preflight_and_benchmark(packed_cfg, tmp_path, capsys):
     assert result['loader_samples_per_s_per_rank'] > 0
 
 
+def test_validation_schedule_and_resume_safety(packed_cfg):
+    from merraflow.v4_1 import validation_due, check_checkpoint
+    from merraflow.v4 import TARGETS
+    tr = dict(validation_interval=5, validation_interval_late=2, schedule_switch_epoch=20, epochs=250)
+    due = [e for e in range(1, 41) if validation_due(e, tr)]
+    assert due == [5, 10, 15, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40]
+    assert validation_due(250, tr)  # always on the final epoch
+    plain = dict(validation_interval=5, epochs=250)
+    assert [e for e in range(1, 21) if validation_due(e, plain)] == [5, 10, 15, 20]
+    # Changing cadence (and adding the schedule keys) must not break exact resume.
+    base = deepcopy(packed_cfg)
+    archive = ArchiveV4(base_config(base))
+    packed = PackedArchive(base, archive)
+    saved = dict(version='v4.1', targets=list(TARGETS),
+                 fingerprint=archive.index['fingerprint'], stats=archive.stats,
+                 hourly_fingerprint=archive.hourly_fingerprint, humidity_fingerprint=archive.humidity_fingerprint,
+                 packed_fingerprint=packed.fingerprint, world_size=1, config=deepcopy(base))
+    changed = deepcopy(base)
+    changed['train'].update(validation_interval=5, validation_interval_late=2, schedule_switch_epoch=20)
+    check_checkpoint(saved, changed, archive, packed.fingerprint, world=1)  # no raise
+
+
 def test_config_rejects_misaligned_stride(packed_cfg):
+    bad = deepcopy(packed_cfg)
+    bad['train'] = dict(bad['train'], schedule_switch_epoch=20)
+    bad['train'].pop('validation_interval_late', None)
+    with pytest.raises(ValueError, match='together, or neither'):
+        validate_config(bad)
     bad = deepcopy(packed_cfg)
     bad['patch']['sampling_stride'] = 8
     with pytest.raises(ValueError, match='pooling factor'):

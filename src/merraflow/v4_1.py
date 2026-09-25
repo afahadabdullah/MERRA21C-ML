@@ -28,7 +28,29 @@ from .v4 import TARGETS, validate_config as validate_v4, ArchiveV4
 
 VERSION = 'v4.1'
 TRAIN_ONLY_KEYS = ('val_workers', 'fd_cache_size', 'persistent_workers', 'checkpoint_interval',
-                   'validation_plot_samples')
+                   'validation_plot_samples', 'validation_interval', 'validation_interval_late',
+                   'schedule_switch_epoch')
+
+
+def validation_interval_at(epoch_number, tr):
+    """Validation/checkpoint cadence at a 1-based epoch.
+
+    Default: every ``validation_interval`` epochs. If ``schedule_switch_epoch``
+    and ``validation_interval_late`` are set, switch to the finer late interval
+    for epochs after the switch (e.g. every 5 through epoch 20, then every 2).
+    Cadence is metadata only: it never changes the training trajectory, so it
+    is resume-safe (see TRAIN_ONLY_KEYS) and may be changed on a continuation.
+    """
+    switch = tr.get('schedule_switch_epoch')
+    late = tr.get('validation_interval_late')
+    if switch and late and epoch_number > switch:
+        return late
+    return tr['validation_interval']
+
+
+def validation_due(epoch_number, tr, epochs=None):
+    epochs = tr['epochs'] if epochs is None else epochs
+    return epoch_number % validation_interval_at(epoch_number, tr) == 0 or epoch_number == epochs
 
 
 def base_config(cfg):
@@ -70,6 +92,14 @@ def validate_config(cfg):
             raise ValueError(f'train.{key} must be an integer >= {minimum}')
     if type(tr.get('checkpoint_interval', tr['validation_interval'])) is not int or tr.get('checkpoint_interval', 1) < 1:
         raise ValueError('train.checkpoint_interval must be a positive integer')
+    if type(tr['validation_interval']) is not int or tr['validation_interval'] < 1:
+        raise ValueError('train.validation_interval must be a positive integer')
+    if ('schedule_switch_epoch' in tr) != ('validation_interval_late' in tr):
+        raise ValueError('Set schedule_switch_epoch and validation_interval_late together, or neither')
+    if 'schedule_switch_epoch' in tr:
+        for key in ('schedule_switch_epoch', 'validation_interval_late'):
+            if type(tr[key]) is not int or tr[key] < 1:
+                raise ValueError(f'train.{key} must be a positive integer')
     if tr['validation_plot_samples'] < 1:
         raise ValueError('train.validation_plot_samples must be >= 1')
     if type(tr.get('persistent_workers', True)) is not bool:

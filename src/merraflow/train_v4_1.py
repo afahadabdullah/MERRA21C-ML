@@ -14,7 +14,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
 from .v4 import TARGETS, ArchiveV4, make_model, objective, FrozenRegression, regression_bundle
 from .v4_1 import (VERSION, validate_config, base_config, PackedArchive, DatasetV41, EpochSampler,
-                   check_checkpoint)
+                   check_checkpoint, validation_due)
 from .validation_v4_1 import validate, select_previews, previews, save_plots, EXPECTED
 from .train_v4 import calibrate
 from .train_precip_direct_v2 import rank_zero_action
@@ -208,7 +208,7 @@ def _train(cfg, resume, device, rank, world, local, group):
             waiting_since = time.monotonic()
         total, count, wait_total, step_total = reduce_totals([total, count, data_wait_s, step_s], device)
         train_wall = reduce_max(time.monotonic()-epoch_started, device)
-        due = (epoch+1) % tr['validation_interval'] == 0 or epoch+1 == tr['epochs']
+        due = validation_due(epoch+1, tr)
         validation_started = time.monotonic()
         if due and rank == 0:
             print(f'Epoch {epoch+1}: validating {tr["validation_patches"]} patches, '
@@ -241,14 +241,14 @@ def _train(cfg, resume, device, rank, world, local, group):
                        model=model.state_dict(), ema=ema.state_dict(), regression_condition=bundle,
                        optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict(),
                        rng=states, best=best, history=history, initialization=None)
-        keep = (epoch+1) % tr.get('checkpoint_interval', tr['validation_interval']) == 0 or epoch+1 == tr['epochs']
         def save():
             atomic_save(out/LAST, payload)
             if improved:
                 atomic_save(out/BEST, payload)
-            if keep:
+            # Kept checkpoints land on validation epochs, tagged with precip CRPS.
+            if due:
                 (out/'checkpoints').mkdir(exist_ok=True)
-                atomic_save(out/'checkpoints'/f'epoch_{epoch+1:04d}_v4_1.pt', payload)
+                atomic_save(out/'checkpoints'/f'epoch_{epoch+1:04d}_crps{metrics["crps"]:.4f}_v4_1.pt', payload)
             (out/'history.json').write_text(json.dumps(history, indent=2)+'\n')
             print(json.dumps(row), flush=True)
             if due:
