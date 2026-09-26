@@ -123,41 +123,101 @@ def test_sharpness_window_and_time_stepping():
 
 
 def test_sampler_sharpness_variants(trained):
+    from merraflow.evaluate_v4_1 import churn_time
     archive, model, conditioner, _ = load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))
     entry = archive.eligible('test')[0]
     base = base_config(trained)
-    base['inference']['steps'] = 2
     seed = member_seed(trained, entry, 0)
+    sampler = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'), batch=2, threads=2)
+    out_base = sampler.sample(seed, steps=2)
+    core = sampler.integrate(seed, 2)
+    np.testing.assert_array_equal(sampler.decode(core), out_base)
 
-    # 1. Baseline
-    sampler_hann = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'),
-                                 batch=2, threads=2, window_type='hann')
-    out_base = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0)
+    out_warp = sampler.sample(seed, steps=2, time_warp_gamma=1.5)
+    assert out_warp.shape == out_base.shape and np.isfinite(out_warp).all()
 
-    # 2. Time-warp
-    out_warp = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.5, residual_scale=1.0, dry_cutoff=0.0)
-    assert out_warp.shape == out_base.shape
+    # Residual scaling amplifies departures from the regression: a sample equal to
+    # the regression (rain z and state residuals) is left unchanged.
+    at_mean = np.zeros_like(core)
+    at_mean[1] = sampler.mean[1]
+    np.testing.assert_allclose(sampler.decode(at_mean, residual_scale=1.3), sampler.decode(at_mean), rtol=1e-6, atol=1e-6)
+    scaled = sampler.decode(core, residual_scale=1.1)
+    z = np.maximum(sampler.mean[1]+1.1*(core[1]-sampler.mean[1]), 0)
+    np.testing.assert_allclose(scaled[1], archive.scale*z*(z+2), rtol=1e-5, atol=1e-6)
+    assert not np.array_equal(scaled[0], out_base[0])
 
-    # 3. Residual scale
-    out_scale = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.1, dry_cutoff=0.0)
-    assert out_scale.shape == out_base.shape
-
-    # 4. Dry cutoff
-    out_cutoff = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.1)
+    out_cutoff = sampler.decode(core, dry_cutoff=0.1)
     assert (out_cutoff[1][out_cutoff[1] > 0] >= 0.1).all()
 
-    # 5. Tukey window
-    sampler_tukey = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'),
-                                  batch=2, threads=2, window_type='tukey', tukey_alpha=0.3)
-    out_tukey = sampler_tukey.sample(seed, steps=2)
-    assert out_tukey.shape == out_base.shape
+    # Churn: exact re-noising level, deterministic per seed, off by default.
+    t, gamma = .4, .25
+    t_hat = churn_time(t, gamma)
+    assert t_hat < t and np.isclose((1-t_hat)/t_hat, (1+gamma)*(1-t)/t)
+    churned = sampler.sample(seed, steps=3, churn=.2, churn_range=(0., 1.))
+    assert np.isfinite(churned).all() and not np.allclose(churned, sampler.sample(seed, steps=3))
+    np.testing.assert_array_equal(churned, sampler.sample(seed, steps=3, churn=.2, churn_range=(0., 1.)))
+
+    # Tukey window switches in place and back.
+    out_tukey = sampler.sample(seed, steps=2, window_type='tukey', tukey_alpha=0.3)
+    assert out_tukey.shape == out_base.shape and sampler.window_key == ('tukey', 0.3)
+    np.testing.assert_array_equal(sampler.sample(seed, steps=2, window_type='hann'), out_base)
+    with pytest.raises(ValueError):
+        sampler.integrate(seed, 2, guide_weight=1.5)
 
 
-def test_compare_sharpness_module_and_cli():
-    import merraflow.compare_sharpness_v4_1 as mod
-    assert hasattr(mod, 'compare_sharpness')
-    assert hasattr(mod, 'DEFAULT_METHODS')
-    assert len(mod.DEFAULT_METHODS) == 6
-    assert {m['id'] for m in mod.DEFAULT_METHODS} == {
-        'baseline', 'time_warp', 'residual_scale', 'wet_cutoff', 'tukey_window', 'combined'
-    }
+def test_autoguidance(trained):
+    from merraflow.evaluate_v4_1 import load_guide, find_guide_checkpoint
+    archive, model, conditioner, saved = load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))
+    entry = archive.eligible('test')[0]
+    base = base_config(trained)
+    seed = member_seed(trained, entry, 0)
+    plain = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'), batch=2, threads=2)
+    reference = plain.sample(seed, steps=2)
+    # A guide identical to the model leaves the sample unchanged for any weight.
+    same = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'), batch=2, threads=2, guide=model)
+    np.testing.assert_allclose(same.sample(seed, steps=2, guide_weight=2.), reference, rtol=1e-5, atol=1e-5)
+    weak = deepcopy(model)
+    with torch.no_grad():
+        weak.output[-1].weight.zero_()
+        weak.output[-1].bias.zero_()  # v_weak = 0, so guidance scales the velocity by w
+    guided = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'), batch=2, threads=2, guide=weak)
+    np.testing.assert_allclose(guided.sample(seed, steps=2, guide_weight=1.), reference, rtol=1e-5, atol=1e-5)
+    moved = guided.integrate(seed, 1, guide_weight=1.5)-plain.integrate(seed, 1)
+    assert np.abs(moved).max() > 0 and np.isfinite(moved).all()
+    # Only earlier kept checkpoints qualify as the weak model.
+    assert find_guide_checkpoint(trained, saved['epoch']+1) is None
+    assert find_guide_checkpoint(trained, saved['epoch']+5) is not None
+    assert load_guide(trained, 'auto', archive, saved, torch.device('cpu'), log=lambda *a: None) is None
+    later = dict(saved, epoch=saved['epoch']+4)
+    guide = load_guide(trained, 'auto', archive, later, torch.device('cpu'), log=lambda *a: None)
+    assert guide is not None and guide['epoch'] == saved['epoch']+1
+
+
+def test_compare_sharpness_end_to_end(trained, tmp_path):
+    from merraflow.compare_sharpness_v4_1 import compare_sharpness, build_methods, METHOD_IDS
+    specs = build_methods(METHOD_IDS, ('churn', 'autoguide', 'residual_scale'), 4, 1.5, .1, 1.5, 1.1, .1, .3)
+    combined = specs[-1]
+    assert combined['id'] == 'combined' and combined['churn'] == .1 and combined['guide_weight'] == 1.5
+    assert combined['residual_scale'] == 1.1 and combined['window_type'] == 'hann'
+    with pytest.raises(ValueError):
+        build_methods(('nope',), (), 4, 1.5, .1, 1.5, 1.1, .1, .3)
+    out = compare_sharpness(trained, 'best', tmp_path/'sharp', split='test', samples=1, wettest=1, steps=2,
+                            members=2, batch=4, threads=2, use_cartopy=False, map_features=False,
+                            log=lambda *a: None)
+    summary = json.loads((out/'summary_metrics.json').read_text())
+    methods = [m['id'] for m in summary['settings']['methods']]
+    # No earlier kept checkpoint in a one-epoch run: autoguidance is dropped, not faked.
+    assert 'autoguide' not in methods and summary['settings']['guide'] is None
+    assert methods[0] == 'baseline' and methods[-1] == 'combined'
+    assert summary['summary']['cases'] >= 1 and summary['summary']['members'] == 2
+    for m in methods:
+        s = summary['summary']['methods'][m]
+        assert s['crps'] >= 0 and s['large_scale_rmse'] >= 0
+    assert set(summary['verdicts']) == set(methods)-{'baseline'}
+    for folder in (out/'cases').iterdir():
+        for name in ('sharpness_compare_precip.png', 'sharpness_compare_zoom.png', 'sharpness_spectra.png', 'metrics.json'):
+            assert (folder/name).stat().st_size > 1000, name
+    assert (out/'summary_tradeoff.png').exists() and 'Verdicts' in (out/'report.md').read_text()
+    with pytest.raises(FileExistsError):
+        compare_sharpness(trained, 'best', out, split='test', samples=0, wettest=1, steps=1, members=1,
+                          log=lambda *a: None)

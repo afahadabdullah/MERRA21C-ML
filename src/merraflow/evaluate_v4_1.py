@@ -137,7 +137,18 @@ def select_cases(archive, split, timestamps=None, samples=3, wettest=1, seed=317
 
 
 # ----------------------------------------------------------------------------
+# Inference-time sharpening controls (no retraining)
+# ----------------------------------------------------------------------------
+
 def make_window(size, window_type='hann', tukey_alpha=0.3):
+    """Tile blending weights. ``hann`` is v4 inference's window.
+
+    ``tukey`` is flat in the middle and tapers over ``tukey_alpha*(size-1)/2``
+    pixels at each edge. With production tiles (192 px, 32 px halo, stride 96)
+    that taper is narrower than the halo, so the least-informed halo pixels get
+    full weight and neighbouring tiles are averaged 50/50 over most of their
+    overlap. It is kept as an ablation, not as a sharpening default.
+    """
     if window_type == 'tukey':
         w = np.ones(size, dtype='float32')
         edge = int(np.floor(tukey_alpha * (size - 1) / 2))
@@ -147,39 +158,110 @@ def make_window(size, window_type='hann', tukey_alpha=0.3):
             w[-edge:] = w[:edge][::-1]
         w = np.maximum(w, 1e-4)
         return np.outer(w, w).astype('float32')
+    if window_type != 'hann':
+        raise ValueError(f'Unknown window type {window_type!r}')
     return blend_window(size)
 
 
 def make_time_steps(steps, gamma=1.0):
+    """ODE times 0 (noise) -> 1 (data). gamma > 1 shortens the steps near t=1,
+    where fine structure is resolved: t = 1-(1-tau)^gamma."""
+    if steps < 1 or gamma <= 0:
+        raise ValueError('Need steps >= 1 and gamma > 0')
     if gamma == 1.0:
         return [i / steps for i in range(steps + 1)]
-    tau = np.arange(steps + 1, dtype='float32') / steps
-    return (1.0 - (1.0 - tau) ** gamma).tolist()
+    tau = np.arange(steps + 1, dtype='float64') / steps
+    times = 1.0 - (1.0 - tau) ** gamma
+    times[-1] = 1.0
+    return times.tolist()
 
 
+def churn_time(t, churn):
+    """EDM-style churn on the rectified path x_t = t*x1 + (1-t)*x0.
+
+    The path is a scaled variance-exploding path with noise level
+    sigma = (1-t)/t. Raising sigma by (1+churn) moves back to the earlier time
+    returned here; ``DomainSampler.integrate`` adds exactly the fresh noise that
+    keeps x on the model's training marginal at that time.
+    """
+    sigma = (1 - t) / t
+    return 1 / (1 + sigma * (1 + churn))
+
+
+def find_guide_checkpoint(cfg, main_epoch, fraction=1/3):
+    """Kept checkpoint of this run nearest to ``fraction`` of the main epoch."""
+    kept = []
+    for path in (Path(cfg['train']['output'])/'checkpoints').glob('epoch_*_v4_1.pt'):
+        try:
+            epoch = int(path.name.split('_')[1])
+        except (IndexError, ValueError):
+            continue
+        if epoch < main_epoch:
+            kept.append((abs(epoch - fraction*main_epoch), epoch, path))
+    return min(kept)[2] if kept else None
+
+
+def load_guide(cfg, spec, archive, main_saved, device, log=print):
+    """Autoguidance (Karras et al., NeurIPS 2024): guide the model with a weaker
+    version of itself, v = v_weak + w (v_main - v_weak). Here the weak model is
+    an earlier kept checkpoint of the same run, so it shares the frozen
+    regression, normalization and conditioning exactly.
+
+    spec: 'auto' (kept epoch nearest 1/3 of the main one) | epoch | path.
+    Returns dict(model, path, epoch) or None when no guide is available.
+    """
+    if spec in (None, '', 'none', 'off'):
+        return None
+    main_epoch = main_saved['epoch'] + 1
+    path = find_guide_checkpoint(cfg, main_epoch) if spec == 'auto' else resolve_checkpoint(cfg, spec)
+    if path is None:
+        log(f'Autoguidance: no kept checkpoint earlier than epoch {main_epoch}; skipped')
+        return None
+    saved = torch.load(path, map_location='cpu', weights_only=True)
+    check_checkpoint(saved, cfg, archive)
+    if saved['epoch'] + 1 >= main_epoch:
+        log(f'Autoguidance: {path.name} is not earlier than the main epoch {main_epoch}; skipped')
+        return None
+    if not torch.allclose(saved['flow_scale'].float(), main_saved['flow_scale'].float()):
+        log(f'Autoguidance: {path.name} has a different flow_scale calibration; skipped')
+        return None
+    model = make_model(archive.channels, base_config(cfg)).to(device).eval()
+    model.load_state_dict(saved['ema'])
+    model.requires_grad_(False)
+    log(f'Autoguidance: weak model {path.name} (epoch {saved["epoch"]+1}) guides epoch {main_epoch}')
+    return dict(model=model, path=path, epoch=saved['epoch'] + 1)
+
+
+# ----------------------------------------------------------------------------
 # Full-domain sampler (v4 math, batched tiles)
 # ----------------------------------------------------------------------------
 
 class DomainSampler:
-    """inference_v4.sample_frame with per-case inputs cached and tiles batched."""
+    """inference_v4.sample_frame with per-case inputs cached and tiles batched.
+
+    With default arguments ``sample`` reproduces v4 inference exactly. Optional
+    inference-time controls (none needs retraining):
+
+    * ``time_warp_gamma``: non-uniform ODE times, finer near the data end;
+    * ``churn``: EDM-style stochastic re-noising between Heun steps;
+    * ``guide_weight`` with a ``guide`` model: autoguidance;
+    * ``residual_scale``: amplify the sample's departure from the frozen
+      regression (for rain, in sqrt1p space around the regression rain);
+    * ``dry_cutoff``: zero rain below a threshold after decoding;
+    * ``window_type``: tile blending window (see ``make_window``).
+    """
 
     def __init__(self, model, conditioner, archive, entry, cfg, device, batch=32, threads=8,
-                 window_type='hann', tukey_alpha=0.3):
+                 window_type='hann', tukey_alpha=0.3, guide=None):
         p = cfg['patch']
         self.model, self.conditioner, self.archive, self.cfg, self.device = model, conditioner, archive, cfg, device
+        self.guide = guide
         self.h, self.w = archive.shape
         self.size, self.halo = p['size'], p['halo']
         self.width = self.size+2*self.halo
         self.batch = batch
         self.tiles = [(y, c) for y in starts(self.h, self.size, p['stride'])
                       for c in starts(self.w, self.size, p['stride'])]
-        self.window_type = window_type
-        self.window = torch.from_numpy(make_window(self.width, window_type, tukey_alpha)).to(device)
-        self.weight = torch.zeros((1, self.h+2*self.halo, self.w+2*self.halo), device=device)
-        for y, c in self.tiles:
-            self.weight[:, y:y+self.width, c:c+self.width] += self.window
-        if bool((self.weight <= 0).any()):
-            raise ValueError('Uncovered tile pixels')
         self.coarse = np.asarray(archive.coarse(entry), dtype='float32')
         first = archive.inputs_with_original(entry, *self.tiles[0], p)  # warm the map cache serially
         with ThreadPoolExecutor(max(1, threads)) as pool:
@@ -198,53 +280,101 @@ class DomainSampler:
                 with autocast(device, cfg['train']['precision']):
                     means.append(conditioner(b).float())
         self.means = torch.cat(means)
-        blended = torch.zeros((len(TARGETS), self.h+2*self.halo, self.w+2*self.halo), device=device)
-        for k, (y, c) in enumerate(self.tiles):
-            blended[:, y:y+self.width, c:c+self.width] += self.means[k]*self.window
-        self.mean = (blended/self.weight)[:, self.halo:self.halo+self.h, self.halo:self.halo+self.w].cpu().numpy()
         self.rs = conditioner.rs[0].cpu().numpy()
         self.rm = conditioner.rm[0].cpu().numpy()
         self.scale = conditioner.flow_scale[0].cpu().numpy()
-        regression = self.mean*self.rs+self.rm+self.coarse
-        z = np.maximum(self.mean[1], 0)
-        regression[1] = archive.scale*z*(z+2)
-        self.regression = regression.astype('float32')
+        self._windows = {}
+        self.set_window(window_type, tukey_alpha)
+
+    def set_window(self, window_type='hann', tukey_alpha=0.3):
+        """Select (and cache) a blending window with its blended regression mean."""
+        key = ('tukey', float(tukey_alpha)) if window_type == 'tukey' else (window_type, None)
+        if key not in self._windows:
+            window = torch.from_numpy(make_window(self.width, window_type, tukey_alpha)).to(self.device)
+            weight = torch.zeros((1, self.h+2*self.halo, self.w+2*self.halo), device=self.device)
+            for y, c in self.tiles:
+                weight[:, y:y+self.width, c:c+self.width] += window
+            if bool((weight <= 0).any()):
+                raise ValueError('Uncovered tile pixels')
+            blended = torch.zeros((len(TARGETS), self.h+2*self.halo, self.w+2*self.halo), device=self.device)
+            for k, (y, c) in enumerate(self.tiles):
+                blended[:, y:y+self.width, c:c+self.width] += self.means[k]*window
+            mean = (blended/weight)[:, self.halo:self.halo+self.h, self.halo:self.halo+self.w].cpu().numpy()
+            regression = mean*self.rs+self.rm+self.coarse
+            z = np.maximum(mean[1], 0)
+            regression[1] = self.archive.scale*z*(z+2)
+            self._windows[key] = (window, weight, mean, regression.astype('float32'))
+        self.window_key = key
+        self.window, self.weight, self.mean, self.regression = self._windows[key]
+        return self
 
     @torch.no_grad()
-    def velocity(self, state, time_value):
+    def velocity(self, state, time_value, guide_weight=1.0):
+        guided = self.guide is not None and guide_weight != 1.0
         result = torch.zeros_like(state)
         n, w = len(self.tiles), self.width
         for s in range(0, n, self.batch):
             tiles = self.tiles[s:s+self.batch]
             x = torch.stack([state[:, y:y+w, c:c+w] for y, c in tiles])
             t = torch.full((len(tiles),), float(time_value), device=self.device)
+            args = (x, t, self.condition[s:s+len(tiles)], self.context[s:s+len(tiles)], self.means[s:s+len(tiles)])
             with autocast(self.device, self.cfg['train']['precision']):
-                value = self.model(x, t, self.condition[s:s+len(tiles)], self.context[s:s+len(tiles)],
-                                   self.means[s:s+len(tiles)]).float()
+                value = self.model(*args).float()
+                if guided:
+                    weak = self.guide(*args).float()
+                    value = weak+guide_weight*(value-weak)
             value = value*self.window
             for k, (y, c) in enumerate(tiles):
                 result[:, y:y+w, c:c+w] += value[k]
         return result/self.weight
 
     @torch.no_grad()
-    def sample(self, seed, steps=None, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0):
+    def integrate(self, seed, steps=None, time_warp_gamma=1.0, churn=0.0, churn_range=(0.1, 0.8),
+                  guide_weight=1.0):
+        """Heun ODE (optionally with churn) from the member's noise; returns the
+        flow-space core (6, h, w) as a NumPy array."""
         steps = steps or self.cfg['inference']['steps']
-        t_schedule = make_time_steps(steps, time_warp_gamma)
+        if guide_weight != 1.0 and self.guide is None:
+            raise ValueError('guide_weight != 1 needs a guide model')
+        if churn < 0:
+            raise ValueError('churn must be >= 0')
+        schedule = make_time_steps(steps, time_warp_gamma)
         noise = np.random.default_rng(seed).standard_normal(
             (len(TARGETS), self.h+2*self.halo, self.w+2*self.halo)).astype('float32')
         x = torch.from_numpy(noise).to(self.device)
+        churn_rng = np.random.default_rng(np.random.SeedSequence([seed, 7919])) if churn > 0 else None
         for i in range(steps):
-            t_cur, t_next = t_schedule[i], t_schedule[i+1]
+            t_cur, t_next = schedule[i], schedule[i+1]
+            if churn > 0 and 0 < t_cur and churn_range[0] <= t_cur <= churn_range[1]:
+                t_hat = churn_time(t_cur, churn)
+                sigma, sigma_hat = (1-t_cur)/t_cur, (1-t_hat)/t_hat
+                fresh = torch.from_numpy(churn_rng.standard_normal(x.shape, dtype=np.float32)).to(self.device)
+                x = x*(t_hat/t_cur)+fresh*(t_hat*float(np.sqrt(sigma_hat**2-sigma**2)))
+                t_cur = t_hat
             dt = t_next - t_cur
-            first = self.velocity(x, t_cur)
-            second = self.velocity(x + first * dt, t_next)
+            first = self.velocity(x, t_cur, guide_weight)
+            second = self.velocity(x + first * dt, t_next, guide_weight)
             x = x + (first + second) * (dt / 2)
             if not bool(torch.isfinite(x).all()):
                 raise FloatingPointError('Nonfinite full-field trajectory')
-        core = x[:, self.halo:self.halo+self.h, self.halo:self.halo+self.w].cpu().numpy()
-        scaled_core = core * float(residual_scale)
-        value = (scaled_core * self.scale + self.mean) * self.rs + self.rm + self.coarse
-        z = np.maximum(scaled_core[1], 0)
+        return x[:, self.halo:self.halo+self.h, self.halo:self.halo+self.w].cpu().numpy()
+
+    def decode(self, core, residual_scale=1.0, dry_cutoff=0.0):
+        """Flow-space core -> physical fields with the current window's regression mean.
+
+        ``residual_scale`` multiplies each field's departure from the frozen
+        regression. States are already residuals in flow space. Rain is direct
+        sqrt1p, so it is scaled around the regression rain z: scaling z itself
+        would just multiply rain everywhere (a wet bias, not sharper structure).
+        """
+        mean = self.mean
+        core = np.array(core, dtype='float32', copy=True)
+        if residual_scale != 1.0:
+            rain = core[1].copy()
+            core *= float(residual_scale)
+            core[1] = mean[1]+float(residual_scale)*(rain-mean[1])
+        value = (core * self.scale + mean) * self.rs + self.rm + self.coarse
+        z = np.maximum(core[1], 0)
         value[1] = self.archive.scale * z * (z + 2)  # direct rain, no add-back
         if dry_cutoff > 0:
             value[1] = np.where(value[1] < dry_cutoff, 0.0, value[1])
@@ -252,6 +382,14 @@ class DomainSampler:
         if not np.isfinite(value).all():
             raise FloatingPointError('Nonfinite physical output')
         return value.astype('float32')
+
+    @torch.no_grad()
+    def sample(self, seed, steps=None, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0,
+               window_type=None, tukey_alpha=0.3, churn=0.0, churn_range=(0.1, 0.8), guide_weight=1.0):
+        if window_type is not None:
+            self.set_window(window_type, tukey_alpha)
+        core = self.integrate(seed, steps, time_warp_gamma, churn, churn_range, guide_weight)
+        return self.decode(core, residual_scale, dry_cutoff)
 
 
 # ----------------------------------------------------------------------------
@@ -1033,7 +1171,8 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
              members=8, steps=None, zooms=2, zoom_size=256, seed=317, batch=32, threads=8,
              use_cartopy=True, map_features=True, save=False, use_native=True,
              time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0,
-             window_type='hann', tukey_alpha=0.3, log=print):
+             window_type='hann', tukey_alpha=0.3, churn=0.0, churn_range=(0.1, 0.8),
+             guide_checkpoint=None, guide_weight=1.0, log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -1044,6 +1183,9 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
     path = resolve_checkpoint(cfg, checkpoint)
     device = device_for(cfg['train']['device'])
     archive, model, conditioner, saved = load_model(cfg, path, device)
+    guide = load_guide(cfg, guide_checkpoint, archive, saved, device, log) if guide_weight != 1.0 else None
+    if guide_weight != 1.0 and guide is None:
+        raise ValueError('guide_weight != 1 needs an earlier kept checkpoint (--guide-checkpoint)')
     digest = file_hash_v2(path)
     label = checkpoint if not Path(str(checkpoint)).is_file() else path.stem
     out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
@@ -1066,7 +1208,8 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
         entry = case['entry']
         started = time.monotonic()
         sampler = DomainSampler(model, conditioner, archive, entry, cfg, device, batch, threads,
-                                window_type=window_type, tukey_alpha=tukey_alpha)
+                                window_type=window_type, tukey_alpha=tukey_alpha,
+                                guide=guide['model'] if guide else None)
         log(f'[{number}/{len(cases)}] {entry["id"]}: {len(sampler.tiles)} tiles ready in {time.monotonic()-started:.0f}s')
         ensemble = []
         for m in range(members):
@@ -1074,7 +1217,8 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
             ensemble.append(sampler.sample(member_seed(cfg, entry, m), steps,
                                            time_warp_gamma=time_warp_gamma,
                                            residual_scale=residual_scale,
-                                           dry_cutoff=dry_cutoff))
+                                           dry_cutoff=dry_cutoff, churn=churn, churn_range=churn_range,
+                                           guide_weight=guide_weight))
             log(f'  member {m+1}/{members}: {time.monotonic()-t0:.0f}s')
         ensemble = np.stack(ensemble)
         truth = np.asarray(archive.physical_truth(entry), dtype='float32')
@@ -1119,7 +1263,10 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
                    checkpoint_sha256=digest, checkpoint_epoch=saved['epoch']+1, split=split, members=members,
                    ode_steps=steps, inference_seed=cfg['inference']['seed'], map_mode=canvas.mode, grid_km=dx_km,
                    sharpness=dict(time_warp_gamma=time_warp_gamma, residual_scale=residual_scale,
-                                  dry_cutoff=dry_cutoff, window_type=window_type, tukey_alpha=tukey_alpha),
+                                  dry_cutoff=dry_cutoff, window_type=window_type, tukey_alpha=tukey_alpha,
+                                  churn=churn, churn_range=list(churn_range), guide_weight=guide_weight,
+                                  guide_checkpoint=str(guide['path']) if guide else None,
+                                  guide_epoch=guide['epoch'] if guide else None),
                    cases=reports)
     write_json(out/'metrics_v4_1.json', json.loads(json.dumps(metrics, default=float)))
     write_report(out, metrics)
@@ -1153,13 +1300,21 @@ def main():
     parser.add_argument('--time-warp-gamma', type=float, default=1.0,
                         help='Concentrate ODE steps near t=1 using (1-(1-tau)^gamma); default 1.0 (uniform)')
     parser.add_argument('--residual-scale', type=float, default=1.0,
-                        help='Latent residual scaling alpha (e.g. 1.10); default 1.0')
+                        help='Scale departures from the frozen regression (rain: in sqrt space); default 1.0')
     parser.add_argument('--dry-cutoff', type=float, default=0.0,
                         help='Physical rain threshold cutoff in mm/h (e.g. 0.1); default 0.0')
     parser.add_argument('--window-type', choices=('hann', 'tukey'), default='hann',
-                        help='Tile blending window: hann (default) or tukey (flat-top, less overlap smoothing)')
+                        help='Tile blending window: hann (default, v4 inference) or tukey (ablation)')
     parser.add_argument('--tukey-alpha', type=float, default=0.3,
                         help='Tukey window cosine edge fraction; default 0.3')
+    parser.add_argument('--churn', type=float, default=0.0,
+                        help='EDM-style stochastic churn per Heun step (e.g. 0.1); default 0 (deterministic ODE)')
+    parser.add_argument('--churn-range', type=float, nargs=2, default=(0.1, 0.8), metavar=('TMIN', 'TMAX'),
+                        help='Flow times where churn is applied (0 noise .. 1 data); default 0.1 0.8')
+    parser.add_argument('--guide-checkpoint', default='auto',
+                        help='Autoguidance weak model: auto | <epoch> | <path> (used only if --guide-weight != 1)')
+    parser.add_argument('--guide-weight', type=float, default=1.0,
+                        help='Autoguidance weight w in v_weak + w (v - v_weak), e.g. 1.5; default 1 (off)')
     args = parser.parse_args()
     if args.cartopy_data_dir:
         import cartopy
@@ -1169,6 +1324,7 @@ def main():
              args.timestamps, args.members, args.steps, args.zooms, args.zoom_size, args.seed, args.batch, args.threads,
              not args.no_cartopy, not args.no_map_features, args.save_fields, not args.no_native,
              args.time_warp_gamma, args.residual_scale, args.dry_cutoff, args.window_type, args.tukey_alpha,
+             args.churn, tuple(args.churn_range), args.guide_checkpoint, args.guide_weight,
              log=lambda message: print(message, flush=True))
 
 

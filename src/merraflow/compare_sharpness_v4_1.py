@@ -1,417 +1,590 @@
-"""Compare inference sharpening methods against ground truth for v4.1.
+"""Inference-time sharpening ablation for v4.1 (no retraining).
 
-Evaluates and compares:
-  0. Baseline v4.1 (Standard uniform Heun, Hann window, alpha=1.0, dry_cutoff=0.0)
-  1. Time-Step Warping (concentrate ODE steps near t=1 with gamma=1.5)
-  2. Latent Residual Scaling (mild alpha=1.10 contrast boost in flow space)
-  3. Wet-Cutoff Thresholding (zero out trace mist < 0.1 mm/h)
-  4. Tile Window Blending (Tukey flat-top window instead of wide Hann)
-  5. Combined Sharpness (all four enhancements active together)
+Every method runs on the same case(s), from the same member noise, through the
+same synchronized tiled Heun sampler as ``evaluate_v4_1`` / ``cli_v4_1 predict``.
 
-All methods are evaluated on the exact same case(s) with the exact same member
-seed, and compared side-by-side with Ground Truth and Coarse inputs.
+Methods (ids for ``--methods``; knob values come from the CLI):
 
-Outputs (under <train.output>/evaluation/sharpness_<checkpoint>_<split>_<sha>/):
-  cases/<id>/
-    sharpness_compare_precip.png   CONUS maps comparing Truth, Coarse, and all 6 variants
-    sharpness_compare_zoom.png     Zoom into peak rain event comparing all variants
-    sharpness_spectra.png          Radial power spectra vs wavelength (km) vs Truth
-    metrics.json                   Raw quantitative metrics per method
-  report.md                        Markdown comparison table
-  summary_metrics.json             Domain summary across cases
+  baseline        v4 inference as trained: uniform Heun, Hann blending
+  more_steps      2x Heun steps. Control: if this barely changes the spectrum,
+                  discretization is not what limits sharpness, and schedule
+                  tweaks (time_warp) cannot help much either
+  time_warp       ODE times t = 1-(1-tau)^gamma, shorter steps near the data end
+  churn           EDM-style stochastic sampling: before each Heun step in
+                  --churn-range, re-noise from sigma to sigma*(1+churn) along the
+                  model's own path, then integrate. Re-injected noise is resolved
+                  by the model again, restoring small-scale variance an
+                  imperfect deterministic velocity field loses
+  autoguide       autoguidance (Karras et al. 2024): v = v_weak + w (v - v_weak)
+                  with an earlier kept checkpoint of this run as the weak model.
+                  Extrapolates away from the less-trained model's (blurrier)
+                  prediction; costs one extra forward pass per evaluation
+  residual_scale  amplify each field's departure from the frozen regression;
+                  rain is scaled in sqrt1p space around the regression rain (the
+                  old version scaled rain z itself: a domain-wide wet bias)
+  wet_cutoff      set rain below --dry-cutoff mm/h to 0 (drizzle cleanup: changes
+                  wet area, not sharpness)
+  tukey_window    flat-top Tukey tile blending (ablation; see make_window)
+  combined        knobs of the methods listed in --combine, applied together
+
+What counts as "better": sharper is not automatically better. A method helps if
+it moves the rain power spectrum toward truth at fine scales WITHOUT worsening
+the ensemble CRPS, the large-scale (~25 km block-mean) RMSE or the domain-mean
+rain bias. Pixel MAE/RMSE of single members always punish sharper fields
+(double penalty) and are reported only for completeness.
+
+Outputs (default <train.output>/evaluation/sharpness_<ckpt>_<split>_<sha>_<job>/):
+  cases/<id>/sharpness_compare_precip.png  CONUS maps: truth, coarse, member 1 of each method
+  cases/<id>/sharpness_compare_zoom.png    the same around the strongest rain feature
+  cases/<id>/sharpness_spectra.png         rain PSD and PSD ratio to truth vs wavelength
+  cases/<id>/metrics.json                  all scores for the case
+  summary_tradeoff.png                     fine-scale power vs CRPS / large-scale RMSE
+  summary_metrics.json, report.md          case-mean scores, verdicts, run settings
 """
 import argparse
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import time
 import numpy as np
 import torch
 
+from .config import write_json
+from .metrics import weighted_mean, radial_psd, crps_ensemble, fss
+from .train import device_for
+from .train_v2 import file_hash_v2
 from .v4 import TARGETS
 from .v4_1 import load_config
-from .config import write_json
-from .train_v2 import file_hash_v2
-from .metrics import weighted_mean, radial_psd
-from .evaluate_v4_1 import (resolve_checkpoint, load_model, DomainSampler, select_cases,
-                            member_seed, event_window, Canvas, native_fields, NATIVE,
-                            _rain_norm, RAIN_LEVELS, DISPLAY, UNITS, _stamp, _coarse_panel)
+from .evaluate_v4_1 import (resolve_checkpoint, load_model, load_guide, DomainSampler, select_cases,
+                            member_seed, event_window, Canvas, native_fields, NATIVE, _rain_norm,
+                            RAIN_LEVELS, _stamp)
+
+KNOBS = dict(steps_factor=1, time_warp_gamma=1.0, churn=0.0, guide_weight=1.0,
+             residual_scale=1.0, dry_cutoff=0.0, window_type='hann')
+METHOD_IDS = ('baseline', 'more_steps', 'time_warp', 'churn', 'autoguide', 'residual_scale',
+              'wet_cutoff', 'tukey_window', 'combined')
+TRAJECTORY_KNOBS = ('steps_factor', 'time_warp_gamma', 'churn', 'guide_weight', 'window_type')
+COLORS = ['#222222', '#8c8c8c', '#74add1', '#1a9850', '#7b3294', '#f46d43', '#fdae61', '#abd9e9',
+          '#d73027', '#01665e', '#c51b7d']
+STATE_NAMES = {0: 't2m', 2: 'ps', 3: 'u10m', 4: 'v10m', 5: 'q2m'}
+FINE_KM, MESO_KM = (0., 30.), (30., 150.)   # wavelength bands for power ratios
+LARGE_SCALE_KM = 25.                        # ~GEOS-FP cell: block size for large-scale RMSE
+FSS_RAIN = ((1., 25.), (5., 25.), (1., 100.))  # (mm/h threshold, neighbourhood km)
 
 
-DEFAULT_METHODS = [
-    dict(id='baseline', label='0. Baseline v4.1',
-         desc='Uniform Heun, Hann window, alpha=1.0, no cutoff',
-         time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0, window_type='hann', tukey_alpha=0.3,
-         color='#4575b4', ls='--'),
-    dict(id='time_warp', label='1. Time-Step Warping',
-         desc='More steps near t=1 (gamma=1.5)',
-         time_warp_gamma=1.5, residual_scale=1.0, dry_cutoff=0.0, window_type='hann', tukey_alpha=0.3,
-         color='#74add1', ls='-'),
-    dict(id='residual_scale', label='2. Latent Scale',
-         desc='Residual scale alpha=1.10',
-         time_warp_gamma=1.0, residual_scale=1.10, dry_cutoff=0.0, window_type='hann', tukey_alpha=0.3,
-         color='#f46d43', ls='-'),
-    dict(id='wet_cutoff', label='3. Wet Cutoff',
-         desc='Trace rain cutoff (<0.1 mm/h -> 0)',
-         time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.1, window_type='hann', tukey_alpha=0.3,
-         color='#fdae61', ls=':'),
-    dict(id='tukey_window', label='4. Tukey Window',
-         desc='Flat-top Tukey window (alpha=0.3)',
-         time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0, window_type='tukey', tukey_alpha=0.3,
-         color='#abd9e9', ls='-.'),
-    dict(id='combined', label='5. Combined Sharpness',
-         desc='Warp(1.5) + Scale(1.10) + Cutoff(0.1) + Tukey(0.3)',
-         time_warp_gamma=1.5, residual_scale=1.10, dry_cutoff=0.1, window_type='tukey', tukey_alpha=0.3,
-         color='#d73027', ls='-', lw=2.2),
-]
+def build_methods(names, combine, steps, warp_gamma, churn, guide_weight, residual_scale,
+                  dry_cutoff, tukey_alpha, steps_factor=2):
+    """Method specs (knobs + labels) for the requested ids, in order."""
+    single = {
+        'baseline': dict(label='Baseline (v4 inference)', desc=f'uniform Heun {steps} steps, Hann'),
+        'more_steps': dict(label=f'{steps_factor}× steps', desc=f'uniform Heun {steps*steps_factor} steps',
+                           steps_factor=steps_factor),
+        'time_warp': dict(label=f'Time warp γ={warp_gamma:g}', desc='t = 1-(1-τ)^γ',
+                          time_warp_gamma=warp_gamma),
+        'churn': dict(label=f'Churn {churn:g}', desc='EDM stochastic re-noising between Heun steps',
+                      churn=churn),
+        'autoguide': dict(label=f'Autoguidance w={guide_weight:g}', desc='v_weak + w (v - v_weak)',
+                          guide_weight=guide_weight),
+        'residual_scale': dict(label=f'Residual ×{residual_scale:g}',
+                               desc='departure from frozen regression (rain in sqrt space)',
+                               residual_scale=residual_scale),
+        'wet_cutoff': dict(label=f'Cutoff <{dry_cutoff:g} mm/h', desc='drizzle set to 0', dry_cutoff=dry_cutoff),
+        'tukey_window': dict(label=f'Tukey window α={tukey_alpha:g}', desc='flat-top tile blending',
+                             window_type='tukey'),
+    }
+    methods = []
+    for name in names:
+        if name == 'combined':
+            parts = [p for p in combine if p in single and p != 'baseline']
+            if not parts:
+                continue
+            spec = dict(label='Combined', desc=' + '.join(single[p]['label'] for p in parts))
+            for p in parts:
+                spec.update({k: v for k, v in single[p].items() if k in KNOBS})
+            spec['components'] = parts
+        elif name in single:
+            spec = deepcopy(single[name])
+        else:
+            raise ValueError(f'Unknown method {name!r}; choose from {", ".join(METHOD_IDS)}')
+        methods.append(dict(KNOBS, id=name, **spec))
+    for i, m in enumerate(methods):
+        m['color'] = COLORS[i % len(COLORS)]
+        m['tukey_alpha'] = tukey_alpha
+    return methods
 
 
-def evaluate_sharpness_case(archive, entry, model, conditioner, cfg, device,
-                            methods, seed, steps, batch=32, threads=8, log=print):
-    """Generate sample for each method with the exact same seed and calculate metrics."""
+def trajectory_key(method):
+    return tuple(method[k] for k in TRAJECTORY_KNOBS)
+
+
+def generate(sampler, methods, seeds, steps, churn_range, log=print):
+    """{method id: (members, 6, h, w)} with one ODE solve per distinct trajectory
+    per member; post-processing variants reuse that solve."""
+    ensembles = {m['id']: [] for m in methods}
+    seconds = {m['id']: 0. for m in methods}
+    for number, seed in enumerate(seeds, 1):
+        cores = {}
+        for m in methods:
+            key = trajectory_key(m)
+            sampler.set_window(m['window_type'], m['tukey_alpha'])
+            t0 = time.monotonic()
+            if key not in cores:
+                cores[key] = sampler.integrate(seed, steps*m['steps_factor'], m['time_warp_gamma'],
+                                               m['churn'], churn_range, m['guide_weight'])
+            ensembles[m['id']].append(sampler.decode(cores[key], m['residual_scale'], m['dry_cutoff']))
+            seconds[m['id']] += time.monotonic()-t0
+        log(f'  member {number}/{len(seeds)}: {len(cores)} ODE solves for {len(methods)} methods')
+    sampler.set_window('hann')
+    return {k: np.stack(v) for k, v in ensembles.items()}, seconds
+
+
+# ----------------------------------------------------------------------------
+# Scores
+# ----------------------------------------------------------------------------
+
+def mean_psd(fields):
+    fields = np.asarray(fields)
+    fields = fields[None] if fields.ndim == 2 else fields
+    freq, psd = radial_psd(fields[0])
+    for f in fields[1:]:
+        psd = psd+radial_psd(f)[1]
+    return freq, psd/len(fields)
+
+
+def band_ratio(freq, psd, truth_psd, dx_km, band):
+    """Geometric-mean power ratio to truth over a wavelength band (km)."""
+    wavelength = dx_km/np.maximum(freq, 1e-12)
+    keep = (freq > 0) & (wavelength >= band[0]) & (wavelength < band[1]) & (truth_psd > 0)
+    if not keep.any():
+        return None
+    return float(np.exp(np.mean(np.log(np.maximum(psd[keep], 1e-30)/truth_psd[keep]))))
+
+
+def block_mean(field, k):
+    h, w = field.shape[-2:]
+    h, w = h//k*k, w//k*k
+    x = field[..., :h, :w]
+    return x.reshape(*x.shape[:-2], h//k, k, w//k, k).mean((-3, -1))
+
+
+def odd_pixels(km, dx_km):
+    n = max(1, int(round(km/dx_km)))
+    return n if n % 2 else n+1
+
+
+def gradient_mean(field, area):
+    gy, gx = np.gradient(np.asarray(field, dtype='float64'))
+    return weighted_mean(np.hypot(gy, gx), area)
+
+
+def score_rain(ensemble, truth, area, dx_km, truth_psd):
+    """Rain scores of an ensemble (members, h, w) against truth (h, w)."""
+    k = max(1, int(round(LARGE_SCALE_KM/dx_km)))
+    area_k = block_mean(area, k)
+    truth_mean = weighted_mean(truth, area)
+    means = [weighted_mean(m, area) for m in ensemble]
+    freq, psd = mean_psd(ensemble)
+    truth_grad = gradient_mean(truth, area)
+    s = dict(
+        mean_rain=float(np.mean(means)),
+        bias_pct=float(100*(np.mean(means)-truth_mean)/truth_mean) if truth_mean > 0 else None,
+        wet_frac_0p1=float(np.mean([weighted_mean(m >= .1, area) for m in ensemble])),
+        wet_frac_1=float(np.mean([weighted_mean(m >= 1, area) for m in ensemble])),
+        p99=float(np.mean([np.quantile(m, .99) for m in ensemble])),
+        p99_9=float(np.mean([np.quantile(m, .999) for m in ensemble])),
+        peak=float(np.mean([m.max() for m in ensemble])),
+        fine_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, FINE_KM),
+        meso_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, MESO_KM),
+        gradient_ratio=float(np.mean([gradient_mean(m, area) for m in ensemble])/truth_grad) if truth_grad > 0 else None,
+        member_mae=float(np.mean([weighted_mean(abs(m-truth), area) for m in ensemble])),
+        member_rmse=float(np.mean([np.sqrt(weighted_mean((m-truth)**2, area)) for m in ensemble])),
+        crps=float(weighted_mean(crps_ensemble(ensemble, truth), area)),
+        large_scale_rmse=float(np.mean([np.sqrt(weighted_mean((block_mean(m, k)-block_mean(truth, k))**2, area_k))
+                                        for m in ensemble])),
+    )
+    for threshold, km in FSS_RAIN:
+        values = [fss(m, truth, threshold, odd_pixels(km, dx_km), area) for m in ensemble]
+        values = [v for v in values if v is not None]
+        s[f'fss_{threshold:g}mm_{km:g}km'] = float(np.mean(values)) if values else None
+    return s, freq, psd
+
+
+def score_states(ensemble, truth, area, dx_km):
+    """Per-state RMSE, CRPS and fine-scale power ratio (members, 6, h, w)."""
+    result = {}
+    for c, name in STATE_NAMES.items():
+        freq, truth_psd = radial_psd(truth[c])
+        _, psd = mean_psd(ensemble[:, c])
+        result[name] = dict(
+            member_rmse=float(np.mean([np.sqrt(weighted_mean((m-truth[c])**2, area)) for m in ensemble[:, c]])),
+            crps=float(weighted_mean(crps_ensemble(ensemble[:, c], truth[c]), area)),
+            fine_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, FINE_KM))
+    return result
+
+
+def evaluate_case(sampler, archive, entry, methods, seeds, steps, churn_range, dx_km, log=print):
     truth = np.asarray(archive.physical_truth(entry), dtype='float32')
-    coarse = np.asarray(archive.coarse(entry), dtype='float32')
+    coarse = sampler.coarse
     area = np.asarray(archive.static['area'], dtype='float64')
-    dx_km = float(np.sqrt(np.median(area))/1000)
-
-    # Samplers can be reused per window_type
-    samplers = {}
-    for m in methods:
-        w_type = m.get('window_type', 'hann')
-        t_alpha = m.get('tukey_alpha', 0.3)
-        key = (w_type, t_alpha)
-        if key not in samplers:
-            log(f'  building tile inputs for window={w_type}...')
-            samplers[key] = DomainSampler(model, conditioner, archive, entry, cfg, device,
-                                          batch=batch, threads=threads, window_type=w_type,
-                                          tukey_alpha=t_alpha)
-
+    ensembles, seconds = generate(sampler, methods, seeds, steps, churn_range, log)
+    t_freq, t_psd = radial_psd(truth[1])
+    references = {}
+    for name, field in (('truth', truth), ('coarse', coarse), ('regression', sampler.regression)):
+        s, _, psd = score_rain(field[None, 1], truth[1], area, dx_km, t_psd)
+        references[name] = dict(scores=s, psd=psd, rain=field[1])
     results = {}
     for m in methods:
-        mid = m['id']
-        t0 = time.monotonic()
-        sampler = samplers[(m.get('window_type', 'hann'), m.get('tukey_alpha', 0.3))]
-        field = sampler.sample(seed, steps=steps,
-                               time_warp_gamma=m.get('time_warp_gamma', 1.0),
-                               residual_scale=m.get('residual_scale', 1.0),
-                               dry_cutoff=m.get('dry_cutoff', 0.0))
-        sec = time.monotonic() - t0
-        rain = field[1]
-        truth_rain = truth[1]
-
-        # Calculate metrics
-        rain_diff = rain - truth_rain
-        mae = float(weighted_mean(np.abs(rain_diff), area))
-        rmse = float(np.sqrt(weighted_mean(rain_diff**2, area)))
-        peak = float(np.max(rain))
-        mean_rain = float(weighted_mean(rain, area))
-        wet_fraction = float(weighted_mean(rain >= 0.1, area))
-        p99_9 = float(np.quantile(rain, 0.999))
-
-        # Radial power spectrum for rain
-        freq, psd = radial_psd(rain)
-
-        log(f'  [{m["label"]}] peak {peak:.1f} mm/h · mean {mean_rain:.3f} mm/h · wet {wet_fraction:.1%} · MAE {mae:.3f} ({sec:.1f}s)')
-        results[mid] = dict(field=field, rain=rain, mae=mae, rmse=rmse, peak=peak,
-                            mean_rain=mean_rain, wet_fraction=wet_fraction, p99_9=p99_9,
-                            freq=freq, psd=psd, seconds=round(sec, 1), method=m)
-
-    # Truth and Coarse reference stats
-    t_freq, t_psd = radial_psd(truth[1])
-    c_freq, c_psd = radial_psd(coarse[1])
-    references = dict(
-        truth=dict(field=truth, rain=truth[1],
-                   peak=float(np.max(truth[1])),
-                   mean_rain=float(weighted_mean(truth[1], area)),
-                   wet_fraction=float(weighted_mean(truth[1] >= 0.1, area)),
-                   p99_9=float(np.quantile(truth[1], 0.999)),
-                   freq=t_freq, psd=t_psd),
-        coarse=dict(field=coarse, rain=coarse[1],
-                    peak=float(np.max(coarse[1])),
-                    mean_rain=float(weighted_mean(coarse[1], area)),
-                    wet_fraction=float(weighted_mean(coarse[1] >= 0.1, area)),
-                    p99_9=float(np.quantile(coarse[1], 0.999)),
-                    mae=float(weighted_mean(np.abs(coarse[1]-truth[1]), area)),
-                    rmse=float(np.sqrt(weighted_mean((coarse[1]-truth[1])**2, area))),
-                    freq=c_freq, psd=c_psd),
-    )
-    return results, references, area, dx_km
+        ens = ensembles[m['id']]
+        s, _, psd = score_rain(ens[:, 1], truth[1], area, dx_km, t_psd)
+        s['seconds_per_member'] = round(seconds[m['id']]/len(seeds), 1)
+        results[m['id']] = dict(scores=s, states=score_states(ens, truth, area, dx_km), psd=psd,
+                                rain=ens[0, 1], method=m)
+        log(f'  {m["label"]:<28} fine-power {_fmt(s["fine_power_ratio"])} · CRPS {s["crps"]:.4f} · '
+            f'LS-RMSE {s["large_scale_rmse"]:.4f} · bias {_fmt(s["bias_pct"], "+.1f")}% · '
+            f'p99.9 {s["p99_9"]:.2f} (truth {references["truth"]["scores"]["p99_9"]:.2f})')
+    return results, references, t_freq
 
 
-def plot_sharpness_compare_precip(canvas, results, references, native, heading, path, plt):
-    """3x3 panel grid comparing Truth, Coarse, Baseline, all 4 individual methods, and Combined."""
+def _fmt(value, spec='.3f'):
+    return 'n/a' if value is None else format(value, spec)
+
+
+# ----------------------------------------------------------------------------
+# Plots
+# ----------------------------------------------------------------------------
+
+def _grid(n, cols=4):
+    return (n+cols-1)//cols, cols
+
+
+def plot_maps(canvas, results, references, native, heading, path, plt, window=None):
     cmap, norm = _rain_norm()
-    area = results['baseline']['method']  # placeholder
-    fig, axes = plt.subplots(3, 3, figsize=(22, 17), constrained_layout=True)
-
-    panels = [
-        # (row, col, title, rain_field, stats_dict, is_coarse)
-        (0, 0, 'Ground Truth', references['truth']['rain'], references['truth'], False),
-        (0, 1, 'Coarse Input', references['coarse']['rain'], references['coarse'], True),
-        (0, 2, results['baseline']['method']['label'], results['baseline']['rain'], results['baseline'], False),
-        (1, 0, results['time_warp']['method']['label'], results['time_warp']['rain'], results['time_warp'], False),
-        (1, 1, results['residual_scale']['method']['label'], results['residual_scale']['rain'], results['residual_scale'], False),
-        (1, 2, results['wet_cutoff']['method']['label'], results['wet_cutoff']['rain'], results['wet_cutoff'], False),
-        (2, 0, results['tukey_window']['method']['label'], results['tukey_window']['rain'], results['tukey_window'], False),
-        (2, 1, results['combined']['method']['label'], results['combined']['rain'], results['combined'], False),
-    ]
-
-    last_image = None
-    for r, c, title, field, stats, is_coarse in panels:
-        ax = canvas.axes(fig, axes[r, c])
-        bottom = (r == 2)
-        left = (c == 0)
-        if is_coarse and native:
-            last_image = canvas.show_native(ax, native, cmap=cmap, norm=norm, bottom=bottom)
-            ax.set_title(f'{title} (native GEOS-FP cells)', fontsize=11, fontweight='bold')
+    panels = [('Ground truth (HWT)', references['truth']['rain'], references['truth']['scores'])]
+    panels.append(('Coarse input', references['coarse']['rain'], references['coarse']['scores']))
+    panels += [(r['method']['label']+' · member 1', r['rain'], r['scores']) for r in results.values()]
+    rows, cols = _grid(len(panels))
+    fig, axes = plt.subplots(rows, cols, figsize=(6.2*cols, (4.6 if window is None else 5.6)*rows),
+                             squeeze=False, subplot_kw=dict(projection=canvas.proj) if canvas.mode != 'index' else {},
+                             constrained_layout=True)
+    image = None
+    for k, (title, field, scores) in enumerate(panels):
+        ax = axes.flat[k]
+        r, c = divmod(k, cols)
+        shown = None
+        if title.startswith('Coarse') and native:
+            shown = canvas.show_native(ax, native, window, cmap=cmap, norm=norm, left=c == 0, bottom=r == rows-1)
+            if shown is not None:
+                title = 'Coarse input (native GEOS-FP cells)'
+        if shown is None:
+            shown = canvas.show(ax, field, window, cmap=cmap, norm=norm, left=c == 0, bottom=r == rows-1)
+        image = shown if shown is not None else image
+        ax.set_title(title, fontsize=10.5, fontweight='bold')
+        if window is None:
+            text = (f'mean {scores["mean_rain"]:.3f} · p99.9 {scores["p99_9"]:.1f} · max {scores["peak"]:.0f} mm/h · '
+                    f'wet {scores["wet_frac_0p1"]:.0%}')
+            if not title.startswith('Ground'):
+                text += f'\nfine-power ×{_fmt(scores["fine_power_ratio"], ".2f")} · CRPS {scores["crps"]:.3f}'
         else:
-            last_image = canvas.show(ax, field, cmap=cmap, norm=norm, bottom=bottom)
-            ax.set_title(title, fontsize=11, fontweight='bold')
-
-        # Annotation stamp
-        stamp = f'max {stats["peak"]:.1f} · mean {stats["mean_rain"]:.2f} mm/h · wet {stats["wet_fraction"]:.1%}'
-        if 'mae' in stats:
-            stamp += f' · MAE {stats["mae"]:.3f}'
-        _stamp(ax, stamp)
-
-    # 9th panel: Difference map between Combined and Truth
-    ax = canvas.axes(fig, axes[2, 2])
-    diff = results['combined']['rain'] - references['truth']['rain']
-    bound = max(float(np.quantile(abs(diff), 0.995)), 1.0)
-    diff_norm = plt.Normalize(-bound, bound)
-    diff_img = canvas.show(ax, diff, cmap='RdBu_r', norm=diff_norm, bottom=True)
-    ax.set_title('Combined − Truth (mm/h)', fontsize=11, fontweight='bold')
-    _stamp(ax, f'RMSE {results["combined"]["rmse"]:.3f} mm/h')
-    fig.colorbar(diff_img, ax=ax, shrink=0.8, label='mm/h', pad=0.01)
-
-    fig.colorbar(last_image, ax=axes[:2, :].ravel().tolist()+[axes[2, 0], axes[2, 1]],
-                 shrink=0.8, label='Precipitation (mm/h)', ticks=RAIN_LEVELS, extend='both', pad=0.01)
-    fig.suptitle(f'{heading}\nFull-CONUS Precipitation: Inference Sharpness Ablation vs Ground Truth',
-                 fontsize=14, fontweight='bold')
+            ys, xs = window
+            sub = field[ys, xs]
+            text = f'local mean {float(sub.mean()):.2f} · max {float(sub.max()):.1f} mm/h'
+        _stamp(ax, text)
+    for ax in list(axes.flat)[len(panels):]:
+        ax.set_visible(False)
+    fig.colorbar(image, ax=list(axes.flat)[:len(panels)], location='bottom', shrink=.45, pad=.01, extend='both',
+                 ticks=RAIN_LEVELS, label='Rain rate (mm h⁻¹)')
+    where = 'Full CONUS' if window is None else f'Rain-event zoom ({window[0].stop-window[0].start}×{window[1].stop-window[1].start} px)'
+    fig.suptitle(f'{heading}\n{where}: inference sharpening ablation (same noise for every method)',
+                 fontsize=13, fontweight='bold')
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
-def plot_sharpness_compare_zoom(canvas, results, references, window, heading, path, plt):
-    """Zoom centered on the strongest rain feature comparing all methods side-by-side."""
-    cmap, norm = _rain_norm()
-    ys, xs = window
-    fig, axes = plt.subplots(2, 4, figsize=(25, 11), constrained_layout=True)
-
-    panels = [
-        (0, 0, 'Ground Truth', references['truth']['rain']),
-        (0, 1, 'Coarse (Regridded)', references['coarse']['rain']),
-        (0, 2, results['baseline']['method']['label'], results['baseline']['rain']),
-        (0, 3, results['time_warp']['method']['label'], results['time_warp']['rain']),
-        (1, 0, results['residual_scale']['method']['label'], results['residual_scale']['rain']),
-        (1, 1, results['wet_cutoff']['method']['label'], results['wet_cutoff']['rain']),
-        (1, 2, results['tukey_window']['method']['label'], results['tukey_window']['rain']),
-        (1, 3, results['combined']['method']['label'], results['combined']['rain']),
-    ]
-
-    last_image = None
-    for idx, (r, c, title, field) in enumerate([(i//4, i%4, p[2], p[3]) for i, p in enumerate(panels)]):
-        ax = canvas.axes(fig, axes[r, c])
-        bottom = (r == 1)
-        sub = field[ys, xs]
-        last_image = canvas.show(ax, field, window, cmap=cmap, norm=norm, bottom=bottom)
-        ax.set_title(title, fontsize=11, fontweight='bold')
-        _stamp(ax, f'local max {float(sub.max()):.1f} mm/h · mean {float(sub.mean()):.2f}')
-
-    fig.colorbar(last_image, ax=axes.ravel().tolist(), shrink=0.8,
-                 label='Precipitation (mm/h)', ticks=RAIN_LEVELS, extend='both', pad=0.01)
-    fig.suptitle(f'{heading}\nZoom Event Window ({ys.stop-ys.start}×{xs.stop-xs.start} px): Sharpness Comparison',
-                 fontsize=14, fontweight='bold')
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
-
-
-def plot_sharpness_spectra(results, references, dx_km, heading, path, plt):
-    """Radial power spectrum (PSD) against spatial wavelength (km)."""
-    fig, (ax_lin, ax_ratio) = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
-
-    t_freq, t_psd = references['truth']['freq'], references['truth']['psd']
-    wavelength = dx_km / np.maximum(t_freq, 1e-9)
+def plot_spectra(results, references, t_freq, dx_km, heading, path, plt):
+    fig, (ax, ratio_ax) = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
     valid = t_freq > 0
-
-    # 1. Absolute PSD
-    ax_lin.loglog(wavelength[valid], np.maximum(t_psd[valid], 1e-30), label='Ground Truth',
-                  color='k', lw=2.5, zorder=10)
-    ax_lin.loglog(wavelength[valid], np.maximum(references['coarse']['psd'][valid], 1e-30),
-                  label='Coarse Input', color='#9e9e9e', lw=1.5, ls=':')
-
-    for mid, res in results.items():
-        m = res['method']
-        psd = res['psd']
-        ax_lin.loglog(wavelength[valid], np.maximum(psd[valid], 1e-30),
-                      label=m['label'], color=m['color'], lw=m.get('lw', 1.6), ls=m['ls'])
-
-    ax_lin.invert_xaxis()
-    ax_lin.set_xlabel('Spatial Wavelength (km)', fontsize=11)
-    ax_lin.set_ylabel('Precipitation PSD (mm/h)²', fontsize=11)
-    ax_lin.set_title('Precipitation Radial Power Spectrum', fontsize=12, fontweight='bold')
-    ax_lin.grid(True, which='both', ls='--', alpha=0.5)
-    ax_lin.legend(fontsize=9, loc='lower left')
-
-    # 2. Ratio to Truth (Spectral Fidelity)
-    ax_ratio.axhline(1.0, color='k', lw=2.0, ls='-', label='Truth (Ratio = 1.0)')
-    coarse_ratio = references['coarse']['psd'][valid] / np.maximum(t_psd[valid], 1e-30)
-    ax_ratio.semilogx(wavelength[valid], coarse_ratio, label='Coarse Input', color='#9e9e9e', lw=1.5, ls=':')
-
-    for mid, res in results.items():
-        m = res['method']
-        ratio = res['psd'][valid] / np.maximum(t_psd[valid], 1e-30)
-        ax_ratio.semilogx(wavelength[valid], ratio,
-                          label=m['label'], color=m['color'], lw=m.get('lw', 1.6), ls=m['ls'])
-
-    ax_ratio.invert_xaxis()
-    ax_ratio.set_xlabel('Spatial Wavelength (km)', fontsize=11)
-    ax_ratio.set_ylabel('Power Ratio (Method / Truth)', fontsize=11)
-    ax_ratio.set_ylim(0.0, 2.0)
-    ax_ratio.set_title('High-Frequency Energy Retention (Closer to 1.0 = Better Sharpness)', fontsize=12, fontweight='bold')
-    ax_ratio.grid(True, which='both', ls='--', alpha=0.5)
-    ax_ratio.legend(fontsize=9, loc='upper left')
-
-    fig.suptitle(f'{heading}\nSpectral Sharpness: High-Frequency Energy Retention vs Truth',
-                 fontsize=14, fontweight='bold')
+    wavelength = dx_km/t_freq[valid]
+    t_psd = references['truth']['psd'][valid]
+    ax.loglog(wavelength, np.maximum(t_psd, 1e-30), color='k', lw=2.6, label='Ground truth', zorder=10)
+    for name, style in (('coarse', dict(color='#9e9e9e', ls=':')), ('regression', dict(color='#9e9e9e', ls='--'))):
+        psd = references[name]['psd'][valid]
+        ax.loglog(wavelength, np.maximum(psd, 1e-30), lw=1.4, label=name.capitalize(), **style)
+        ratio_ax.semilogx(wavelength, psd/np.maximum(t_psd, 1e-30), lw=1.4, label=name.capitalize(), **style)
+    for r in results.values():
+        m = r['method']
+        width = 2.4 if m['id'] in ('baseline', 'combined') else 1.5
+        psd = r['psd'][valid]
+        ax.loglog(wavelength, np.maximum(psd, 1e-30), color=m['color'], lw=width, label=m['label'])
+        ratio_ax.semilogx(wavelength, psd/np.maximum(t_psd, 1e-30), color=m['color'], lw=width, label=m['label'])
+    for a in (ax, ratio_ax):
+        a.invert_xaxis()
+        a.set_xlabel('Wavelength (km)')
+        a.grid(True, which='both', ls='--', alpha=.4)
+        for edge in (FINE_KM[1], MESO_KM[1]):
+            a.axvline(edge, color='0.6', lw=.8)
+    ratio_ax.axhline(1, color='k', lw=1.6)
+    ratio_ax.set_ylim(0, 2)
+    ax.set_ylabel('Rain PSD (mm h⁻¹)²')
+    ratio_ax.set_ylabel('Power ratio to truth (1 = truth-like variance at that scale)')
+    ax.set_title('Rain radial power spectrum (member mean)')
+    ratio_ax.set_title(f'Ratio to truth · fine < {FINE_KM[1]:g} km < meso < {MESO_KM[1]:g} km')
+    ax.legend(fontsize=8.5, loc='lower left')
+    fig.suptitle(heading, fontsize=13, fontweight='bold')
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
 
-def write_sharpness_report(out, case_summaries, methods):
-    lines = ['# v4.1 Inference Sharpness Ablation Report', '',
-             'Comparison of 5 post-hoc inference sharpening methods against Ground Truth and Coarse inputs.', '',
-             '| Configuration | Description | Parameters |',
-             '|---|---|---|',
-             '| **0. Baseline v4.1** | Standard production Heun sampler | `warp=1.0, alpha=1.0, cutoff=0.0, hann` |',
-             '| **1. Time-Step Warping** | Concentrates ODE steps near $t=1$ | `gamma=1.5` |',
-             '| **2. Latent Scale** | Mild contrast boost in latent flow space | `alpha=1.10` |',
-             '| **3. Wet Cutoff** | Zero out sub-instrumental trace rain | `cutoff=0.1 mm/h` |',
-             '| **4. Tukey Window** | Flat-top 2D blending (less overlap averaging) | `tukey_alpha=0.3` |',
-             '| **5. Combined** | All four enhancements active together | `gamma=1.5, alpha=1.10, cutoff=0.1, tukey` |',
-             '', '## Case Metrics Table', '']
-
-    for case_id, summary in case_summaries.items():
-        lines.append(f'### Case `{case_id}`')
-        lines.append('')
-        lines.append('| Model / Method | Peak Rain (mm/h) | Mean Rain (mm/h) | Wet Area (≥0.1) | 99.9th Pct | Rain MAE | Rain RMSE | Runtime (s) |')
-        lines.append('|---|---:|---:|---:|---:|---:|---:|---:|')
-
-        # Truth
-        t = summary['references']['truth']
-        lines.append(f'| **Ground Truth** | **{t["peak"]:.1f}** | **{t["mean_rain"]:.3f}** | **{t["wet_fraction"]:.1%}** | **{t["p99_9"]:.2f}** | 0.000 | 0.000 | - |')
-
-        # Coarse
-        c = summary['references']['coarse']
-        lines.append(f'| Coarse Input | {c["peak"]:.1f} | {c["mean_rain"]:.3f} | {c["wet_fraction"]:.1%} | {c["p99_9"]:.2f} | {c["mae"]:.3f} | {c["rmse"]:.3f} | - |')
-
-        # Methods
-        for m in methods:
-            r = summary['results'][m['id']]
-            lines.append(f'| {m["label"]} | {r["peak"]:.1f} | {r["mean_rain"]:.3f} | {r["wet_fraction"]:.1%} | {r["p99_9"]:.2f} | {r["mae"]:.3f} | {r["rmse"]:.3f} | {r["seconds"]}s |')
-        lines.append('')
-
-    lines += ['## Key Takeaways', '',
-              '1. **Time-Step Warping ($\gamma=1.5$)**: Reduces numerical diffusion in fine gradients without altering physical mass balance.',
-              '2. **Latent Residual Scale ($\alpha=1.10$)**: Elevates peak convective cores closer to observed extreme quantiles (99.9th percentile).',
-              '3. **Wet-Cutoff ($0.1$ mm/h)**: Cleans up the unphysical faint halo around storm boundaries, improving wet area fraction agreement.',
-              '4. **Tukey Window**: Eliminates excessive multi-tile averaging blur in regions of tile overlap.',
-              '5. **Combined**: Achieves the highest visual crispness and closest match to the observed radial power spectrum while maintaining physical consistency.']
-
-    (out/'report.md').write_text('\n'.join(lines)+'\n')
+def plot_tradeoff(summary, methods, path, plt):
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6.5), constrained_layout=True)
+    base = summary['methods'].get('baseline')
+    specs = [('crps', 'Rain CRPS (mm/h, lower is better)'),
+             ('large_scale_rmse', f'Rain RMSE of ~{LARGE_SCALE_KM:g} km block means (lower is better)'),
+             ('bias_pct', 'Domain-mean rain bias (%)')]
+    for ax, (key, label) in zip(axes, specs):
+        for i, m in enumerate(methods):
+            s = summary['methods'][m['id']]
+            x, y = s.get('fine_power_ratio'), s.get(key)
+            if x is None or y is None:
+                continue
+            ax.scatter(x, y, s=90, color=m['color'], edgecolor='k', zorder=3, label=m['label'])
+            ax.annotate(m['label'], (x, y), textcoords='offset points', xytext=(6, 6-10*(i % 3)), fontsize=8)
+        ax.axvline(1, color='k', lw=1.2, ls='--')
+        if base and base.get(key) is not None and key != 'bias_pct':
+            ax.axhline(base[key], color='0.5', lw=1, ls=':')
+        if key == 'bias_pct':
+            ax.axhline(0, color='0.5', lw=1, ls=':')
+        ax.set_xscale('log')
+        ax.set_xlabel(f'Fine-scale rain power ratio to truth (< {FINE_KM[1]:g} km; 1 = truth)')
+        ax.set_ylabel(label)
+        ax.grid(True, which='both', ls='--', alpha=.4)
+    axes[0].legend(fontsize=8, loc='best')
+    fig.suptitle(f'Sharpness vs skill, mean over {summary["cases"]} case(s) × {summary["members"]} member(s): '
+                 'good methods move right toward 1 without rising', fontsize=13, fontweight='bold')
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
 
 
-def compare_sharpness(cfg, checkpoint='best', output=None, split='test',
-                      samples=1, wettest=1, timestamps=None, steps=None,
-                      warp_gamma=1.5, residual_scale=1.10, dry_cutoff=0.1, tukey_alpha=0.3,
-                      seed=317, batch=32, threads=8, use_cartopy=True, map_features=True,
-                      use_native=True, log=print):
+# ----------------------------------------------------------------------------
+# Summary and report
+# ----------------------------------------------------------------------------
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return float(np.mean(values)) if values else None
+
+
+def _gmean(values):
+    values = [v for v in values if v is not None and v > 0]
+    return float(np.exp(np.mean(np.log(values)))) if values else None
+
+
+def summarize(cases, methods, members):
+    ratio_keys = ('fine_power_ratio', 'meso_power_ratio', 'gradient_ratio')
+
+    def combine(score_dicts):
+        keys = score_dicts[0].keys()
+        return {k: (_gmean if k in ratio_keys else _mean)([d[k] for d in score_dicts]) for k in keys}
+
+    summary = dict(cases=len(cases), members=members, methods={}, references={}, states={})
+    for m in methods:
+        summary['methods'][m['id']] = combine([c['results'][m['id']]['scores'] for c in cases])
+        summary['states'][m['id']] = {name: combine([c['results'][m['id']]['states'][name] for c in cases])
+                                      for name in STATE_NAMES.values()}
+    for name in ('truth', 'coarse', 'regression'):
+        summary['references'][name] = combine([c['references'][name]['scores'] for c in cases])
+    return summary
+
+
+def verdicts(summary, methods, crps_tolerance=1., ls_tolerance=2., bias_tolerance=10.):
+    """Plain-language verdict per method against the baseline (tolerances in %)."""
+    base = summary['methods'].get('baseline')
+    if base is None:
+        return {}
+    result = {}
+    for m in methods:
+        if m['id'] == 'baseline':
+            continue
+        s = summary['methods'][m['id']]
+        issues, gains = [], []
+        if s['fine_power_ratio'] and base['fine_power_ratio']:
+            before, after = abs(np.log(base['fine_power_ratio'])), abs(np.log(s['fine_power_ratio']))
+            if after < before-.02:
+                gains.append(f'fine-scale power ×{base["fine_power_ratio"]:.2f} → ×{s["fine_power_ratio"]:.2f} (closer to truth)')
+            elif after > before+.02:
+                issues.append(f'fine-scale power ×{base["fine_power_ratio"]:.2f} → ×{s["fine_power_ratio"]:.2f} (further from truth)')
+        dcrps = 100*(s['crps']-base['crps'])/base['crps'] if base['crps'] else 0.
+        dls = 100*(s['large_scale_rmse']-base['large_scale_rmse'])/base['large_scale_rmse'] if base['large_scale_rmse'] else 0.
+        (issues if dcrps > crps_tolerance else gains if dcrps < -crps_tolerance else []).append(f'CRPS {dcrps:+.1f}%')
+        (issues if dls > ls_tolerance else gains if dls < -ls_tolerance else []).append(f'large-scale RMSE {dls:+.1f}%')
+        if s['bias_pct'] is not None and abs(s['bias_pct']) > bias_tolerance and \
+                abs(s['bias_pct']) > abs(base['bias_pct'] or 0)+2:
+            issues.append(f'rain bias {s["bias_pct"]:+.1f}%')
+        sharper = any(g.startswith('fine-scale') for g in gains)
+        verdict = ('recommended' if sharper and not issues else
+                   'trade-off' if sharper else
+                   'worse' if issues else 'no clear effect')
+        result[m['id']] = dict(verdict=verdict, gains=gains, issues=issues)
+    return result
+
+
+def write_report(out, summary, cases, methods, settings, judged):
+    L = ['# v4.1 inference sharpening ablation', '',
+         f'Checkpoint `{settings["checkpoint"]}` (epoch {settings["epoch"]}), split `{settings["split"]}`, '
+         f'{summary["cases"]} case(s) × {summary["members"]} member(s), {settings["steps"]} Heun steps. '
+         'Every method uses the same member noise.', '']
+    if settings.get('guide'):
+        L += [f'Autoguidance weak model: `{settings["guide"]}` (epoch {settings["guide_epoch"]}).', '']
+    elif settings.get('guide_note'):
+        L += [settings['guide_note'], '']
+    L += ['## Methods', '', '| Method | What it does |', '|---|---|']
+    L += [f'| {m["label"]} | {m["desc"]} |' for m in methods]
+    L += ['', '## Verdicts (mean over cases, vs baseline)', '',
+          'Recommended = fine-scale rain power moves toward truth with CRPS within ±1 %, large-scale RMSE '
+          'within ±2 % and no added rain bias beyond 10 %.', '',
+          '| Method | Verdict | Gains | Costs |', '|---|---|---|---|']
+    for m in methods:
+        if m['id'] in judged:
+            v = judged[m['id']]
+            L.append(f'| {m["label"]} | **{v["verdict"]}** | {"; ".join(v["gains"]) or "–"} | {"; ".join(v["issues"]) or "–"} |')
+    head = ('| | Fine power ×truth | Meso power ×truth | Gradient ×truth | CRPS | LS-RMSE | Bias % | '
+            'Wet ≥0.1 | p99.9 | Peak | FSS 1mm 25km | FSS 5mm 25km | Member MAE | s/member |')
+    rule = '|---|' + '---:|'*14
+
+    def row(name, s, seconds=None, bold=False):
+        cells = [_fmt(s['fine_power_ratio'], '.2f'), _fmt(s['meso_power_ratio'], '.2f'), _fmt(s['gradient_ratio'], '.2f'),
+                 f'{s["crps"]:.4f}', f'{s["large_scale_rmse"]:.4f}', _fmt(s['bias_pct'], '+.1f'),
+                 f'{s["wet_frac_0p1"]:.1%}', f'{s["p99_9"]:.2f}', f'{s["peak"]:.1f}',
+                 _fmt(s.get('fss_1mm_25km')), _fmt(s.get('fss_5mm_25km')), f'{s["member_mae"]:.4f}',
+                 '–' if seconds is None else f'{seconds:.0f}']
+        name = f'**{name}**' if bold else name
+        return f'| {name} | ' + ' | '.join(cells) + ' |'
+
+    def table(block, refs):
+        lines = [head, rule, row('Ground truth', refs['truth'], bold=True), row('Coarse input', refs['coarse']),
+                 row('Frozen regression', refs['regression'])]
+        lines += [row(m['label'], block[m['id']], block[m['id']].get('seconds_per_member')) for m in methods]
+        return lines
+
+    L += ['', '## Rain scores, mean over cases', '',
+          'Power and gradient ratios are geometric means over cases (1 = truth). CRPS equals member MAE when '
+          'there is one member. Member MAE/RMSE punish sharper fields (double penalty); judge sharpening by the '
+          'spectra, CRPS and large-scale RMSE instead.', '']
+    L += table(summary['methods'], summary['references'])
+    L += ['', '## Other fields: fine-scale power ratio / CRPS', '',
+          '| Method | ' + ' | '.join(STATE_NAMES.values()) + ' |', '|---|' + '---:|'*len(STATE_NAMES)]
+    for m in methods:
+        st = summary['states'][m['id']]
+        L.append(f'| {m["label"]} | ' + ' | '.join(f'×{_fmt(st[n]["fine_power_ratio"], ".2f")} / {st[n]["crps"]:.4g}'
+                                                   for n in STATE_NAMES.values()) + ' |')
+    for c in cases:
+        L += ['', f'## Case `{c["id"]}` ({c["reason"]})', '']
+        L += table({k: v['scores'] for k, v in c['results'].items()},
+                   {k: v['scores'] for k, v in c['references'].items()})
+    L += ['', '## Settings', '', '```json', json.dumps(settings, indent=2, default=str), '```']
+    (out/'report.md').write_text('\n'.join(L)+'\n')
+
+
+# ----------------------------------------------------------------------------
+# Driver
+# ----------------------------------------------------------------------------
+
+def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples=0, wettest=1, timestamps=None,
+                      steps=None, members=4, methods=METHOD_IDS, combine=('churn', 'autoguide', 'residual_scale'),
+                      warp_gamma=1.5, churn=0.1, churn_range=(0.1, 0.8), guide_checkpoint='auto', guide_weight=1.5,
+                      residual_scale=1.10, dry_cutoff=0.1, tukey_alpha=0.3, steps_factor=2,
+                      seed=317, batch=32, threads=8, use_cartopy=True, map_features=True, use_native=True,
+                      log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
     from .validation_v4_1 import _style
     _style(plt)
+    if members < 1:
+        raise ValueError('members must be >= 1')
 
     path = resolve_checkpoint(cfg, checkpoint)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = device_for(cfg['train']['device'])
     archive, model, conditioner, saved = load_model(cfg, path, device)
     digest = file_hash_v2(path)
-    label = checkpoint if not Path(str(checkpoint)).is_file() else path.stem
-    out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
-                                      f'sharpness_{path.stem}_{split}_{digest[:12]}')
-    out.mkdir(parents=True, exist_ok=True)
     steps = steps or cfg['inference']['steps']
+    methods = list(methods)
+    guide, guide_note = None, None
+    if 'autoguide' in methods or ('combined' in methods and 'autoguide' in combine):
+        guide = load_guide(cfg, guide_checkpoint, archive, saved, device, log)
+        if guide is None:
+            guide_note = 'Autoguidance skipped: no earlier kept checkpoint of this run.'
+            methods = [m for m in methods if m != 'autoguide']
+            combine = tuple(c for c in combine if c != 'autoguide')
+    specs = build_methods(methods, combine, steps, warp_gamma, churn, guide_weight, residual_scale,
+                          dry_cutoff, tukey_alpha, steps_factor)
+    if not specs:
+        raise ValueError('No methods to compare')
 
-    log(f'Sharpness Comparison on Checkpoint {path} (epoch {saved["epoch"]+1}); device {device}; {steps} steps; output {out}')
+    job = os.environ.get('SLURM_JOB_ID') or time.strftime('%Y%m%d_%H%M%S')
+    out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
+                                      f'sharpness_{path.stem}_{split}_{digest[:8]}_{job}')
+    if out.exists() and any(out.iterdir()):
+        raise FileExistsError(f'{out} is not empty; pass a fresh --output')
+    out.mkdir(parents=True, exist_ok=True)
+    label = checkpoint if not Path(str(checkpoint)).is_file() else path.stem
+    log(f'Sharpness ablation: {path} (epoch {saved["epoch"]+1}); device {device}; {steps} steps; '
+        f'{members} member(s); output {out}')
+    log('Methods: '+'; '.join(f'{m["label"]} [{m["desc"]}]' for m in specs))
     cases = select_cases(archive, split, timestamps, samples, wettest, seed, log)
     log('Cases: '+', '.join(f'{c["entry"]["id"]} ({c["reason"]})' for c in cases))
-
     canvas = Canvas(archive, use_cartopy, map_features, log)
+    area = np.asarray(archive.static['area'], dtype='float64')
+    dx_km = float(np.sqrt(np.median(area))/1000)
 
-    methods = deepcopy(DEFAULT_METHODS)
-    methods[1]['time_warp_gamma'] = warp_gamma
-    methods[2]['residual_scale'] = residual_scale
-    methods[3]['dry_cutoff'] = dry_cutoff
-    methods[4]['tukey_alpha'] = tukey_alpha
-    methods[5]['time_warp_gamma'] = warp_gamma
-    methods[5]['residual_scale'] = residual_scale
-    methods[5]['dry_cutoff'] = dry_cutoff
-    methods[5]['tukey_alpha'] = tukey_alpha
-
-    case_summaries = {}
+    reports = []
     for number, case in enumerate(cases, 1):
         entry = case['entry']
-        case_id = entry['id']
-        folder = out/'cases'/case_id
+        started = time.monotonic()
+        sampler = DomainSampler(model, conditioner, archive, entry, cfg, device, batch, threads,
+                                guide=guide['model'] if guide else None)
+        log(f'\n[{number}/{len(cases)}] {entry["id"]}: {len(sampler.tiles)} tiles ready in {time.monotonic()-started:.0f}s')
+        seeds = [member_seed(cfg, entry, k) for k in range(members)]
+        results, references, t_freq = evaluate_case(sampler, archive, entry, specs, seeds, steps,
+                                                    churn_range, dx_km, log)
+        del sampler
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        folder = out/'cases'/entry['id']
         folder.mkdir(parents=True, exist_ok=True)
-
         heading = (f'v4.1 · epoch {saved["epoch"]+1} ({label}) · {split} {entry["time"].replace("T", " ")[:16]} UTC · '
                    f'{case["reason"]}')
-        log(f'\n[{number}/{len(cases)}] Evaluating case {case_id}...')
+        native = native_fields(entry, canvas.lat, canvas.lon, log=log)[0].get('precip') if use_native else None
+        log('  rendering maps and spectra...')
+        plot_maps(canvas, results, references, native, heading, folder/'sharpness_compare_precip.png', plt)
+        plot_maps(canvas, results, references, native, heading, folder/'sharpness_compare_zoom.png', plt,
+                  window=event_window(references['truth']['rain'], 256))
+        plot_spectra(results, references, t_freq, dx_km, heading, folder/'sharpness_spectra.png', plt)
+        record = dict(id=entry['id'], time=entry['time'], reason=case['reason'],
+                      references={k: dict(scores=v['scores']) for k, v in references.items()},
+                      results={k: dict(scores=v['scores'], states=v['states']) for k, v in results.items()},
+                      seconds=round(time.monotonic()-started, 1))
+        write_json(folder/'metrics.json', record)
+        reports.append(record)
+        log(f'[{number}/{len(cases)}] {entry["id"]} done in {record["seconds"]:.0f}s → {folder}')
 
-        member_s = member_seed(cfg, entry, 0)
-        results, references, area, dx_km = evaluate_sharpness_case(
-            archive, entry, model, conditioner, cfg, device, methods,
-            seed=member_s, steps=steps, batch=batch, threads=threads, log=log)
-
-        native, _ = (native_fields(entry, canvas.lat, canvas.lon, log=log) if use_native else ({}, list(NATIVE)))
-
-        # Plot full-CONUS comparisons
-        log('  rendering CONUS comparison map...')
-        plot_sharpness_compare_precip(canvas, results, references, native.get('precip'),
-                                      heading, folder/'sharpness_compare_precip.png', plt)
-
-        # Plot zoom event window
-        log('  rendering zoom comparison...')
-        window = event_window(references['truth']['rain'], 256)
-        plot_sharpness_compare_zoom(canvas, results, references, window,
-                                    heading, folder/'sharpness_compare_zoom.png', plt)
-
-        # Plot power spectra
-        log('  rendering radial power spectra...')
-        plot_sharpness_spectra(results, references, dx_km,
-                               heading, folder/'sharpness_spectra.png', plt)
-
-        # Save metrics json for this case
-        case_metrics_dict = {
-            'references': {
-                'truth': {k: float(v) for k, v in references['truth'].items() if k not in ('field', 'rain', 'freq', 'psd')},
-                'coarse': {k: float(v) for k, v in references['coarse'].items() if k not in ('field', 'rain', 'freq', 'psd')},
-            },
-            'results': {
-                mid: {k: float(v) for k, v in res.items() if k not in ('field', 'rain', 'freq', 'psd', 'method')}
-                for mid, res in results.items()
-            }
-        }
-        write_json(folder/'metrics.json', case_metrics_dict)
-        case_summaries[case_id] = dict(results=results, references=references)
-        log(f'  case {case_id} complete → {folder}')
-
-    write_sharpness_report(out, case_summaries, methods)
-    write_json(out/'summary_metrics.json', json.loads(json.dumps(
-        {cid: {k: {kk: float(vv) for kk, vv in d.items() if kk not in ('field', 'rain', 'freq', 'psd', 'method')}
-               for k, d in s.items()} for cid, s in case_summaries.items()}, default=float)))
-    log(f'\nAll sharpness evaluations finished successfully! Output written to {out}')
+    summary = summarize(reports, specs, members)
+    judged = verdicts(summary, specs)
+    settings = dict(checkpoint=str(path.resolve()), checkpoint_sha256=digest, epoch=saved['epoch']+1, split=split,
+                    steps=steps, members=members, grid_km=dx_km, churn_range=list(churn_range),
+                    guide=str(guide['path']) if guide else None, guide_epoch=guide['epoch'] if guide else None,
+                    guide_note=guide_note, fine_band_km=list(FINE_KM), meso_band_km=list(MESO_KM),
+                    large_scale_km=LARGE_SCALE_KM,
+                    methods=[{k: v for k, v in m.items() if k != 'color'} for m in specs])
+    plot_tradeoff(summary, specs, out/'summary_tradeoff.png', plt)
+    write_report(out, summary, reports, specs, settings, judged)
+    write_json(out/'summary_metrics.json', dict(settings=settings, summary=summary, verdicts=judged))
+    log('\nVerdicts vs baseline:')
+    for m in specs:
+        if m['id'] in judged:
+            v = judged[m['id']]
+            log(f'  {m["label"]:<28} {v["verdict"]:<16} {"; ".join(v["gains"] + v["issues"])}')
+    log(f'Sharpness ablation written to {out}')
     return out
 
 
@@ -420,17 +593,28 @@ def main():
     parser.add_argument('--config', default='configs/discover_v4_1.yaml')
     parser.add_argument('--checkpoint', default='best', help='best (default) | latest | <epoch number> | <path>')
     parser.add_argument('--latest', action='store_true', help='Shortcut for --checkpoint latest')
-    parser.add_argument('--output', help='Output directory (default under <train.output>/evaluation/sharpness_*)')
+    parser.add_argument('--output', help='Fresh output directory (default under <train.output>/evaluation/)')
     parser.add_argument('--split', choices=('val', 'test'), default='test')
-    parser.add_argument('--samples', type=int, default=1, help='Seeded random hours')
-    parser.add_argument('--wettest', type=int, default=1, help='Wettest hours (default: 1)')
+    parser.add_argument('--samples', type=int, default=0, help='Seeded random hours')
+    parser.add_argument('--wettest', type=int, default=1, help='Wettest hours (≥12 h apart)')
     parser.add_argument('--timestamps', nargs='+', help='Exact IDs or ISO times')
     parser.add_argument('--steps', type=int, help='Heun steps (default: inference.steps)')
-    parser.add_argument('--warp-gamma', type=float, default=1.5, help='Time warp exponent (default: 1.5)')
-    parser.add_argument('--residual-scale', type=float, default=1.10, help='Residual alpha scale (default: 1.10)')
-    parser.add_argument('--dry-cutoff', type=float, default=0.1, help='Trace rain cutoff mm/h (default: 0.1)')
-    parser.add_argument('--tukey-alpha', type=float, default=0.3, help='Tukey cosine taper fraction (default: 0.3)')
-    parser.add_argument('--seed', type=int, default=317)
+    parser.add_argument('--members', type=int, default=4, help='Members per method (CRPS needs ≥ 2; default 4)')
+    parser.add_argument('--methods', default=','.join(METHOD_IDS), help=f'Comma list from: {", ".join(METHOD_IDS)}')
+    parser.add_argument('--combine', default='churn,autoguide,residual_scale',
+                        help='Methods whose knobs the "combined" method applies together')
+    parser.add_argument('--warp-gamma', type=float, default=1.5, help='Time-warp exponent (default 1.5)')
+    parser.add_argument('--steps-factor', type=int, default=2, help='Step multiplier for more_steps (default 2)')
+    parser.add_argument('--churn', type=float, default=0.1, help='Churn: noise-level increase per step (default 0.1)')
+    parser.add_argument('--churn-range', type=float, nargs=2, default=(0.1, 0.8), metavar=('TMIN', 'TMAX'),
+                        help='Flow times with churn (0 noise .. 1 data; default 0.1 0.8)')
+    parser.add_argument('--guide-checkpoint', default='auto',
+                        help='Autoguidance weak model: auto (kept epoch nearest 1/3 of main) | <epoch> | <path>')
+    parser.add_argument('--guide-weight', type=float, default=1.5, help='Autoguidance weight w (1 = off; default 1.5)')
+    parser.add_argument('--residual-scale', type=float, default=1.10, help='Residual scale (default 1.10)')
+    parser.add_argument('--dry-cutoff', type=float, default=0.1, help='Wet cutoff in mm/h (default 0.1)')
+    parser.add_argument('--tukey-alpha', type=float, default=0.3, help='Tukey taper fraction (default 0.3)')
+    parser.add_argument('--seed', type=int, default=317, help='Case selection seed')
     parser.add_argument('--batch', type=int, default=32)
     parser.add_argument('--threads', type=int, default=8)
     parser.add_argument('--cartopy-data-dir', help='Natural Earth cache')
@@ -438,19 +622,20 @@ def main():
     parser.add_argument('--no-map-features', action='store_true')
     parser.add_argument('--no-native', action='store_true')
     args = parser.parse_args()
-
     if args.cartopy_data_dir:
         import cartopy
         cartopy.config['pre_existing_data_dir'] = args.cartopy_data_dir
-
+    split = lambda text: tuple(s.strip() for s in text.split(',') if s.strip())
     cfg = load_config(args.config)
     compare_sharpness(
-        cfg, checkpoint='latest' if args.latest else args.checkpoint, output=args.output,
-        split=args.split, samples=args.samples, wettest=args.wettest, timestamps=args.timestamps,
-        steps=args.steps, warp_gamma=args.warp_gamma, residual_scale=args.residual_scale,
-        dry_cutoff=args.dry_cutoff, tukey_alpha=args.tukey_alpha, seed=args.seed,
-        batch=args.batch, threads=args.threads, use_cartopy=not args.no_cartopy,
-        map_features=not args.no_map_features, use_native=not args.no_native,
+        cfg, checkpoint='latest' if args.latest else args.checkpoint, output=args.output, split=args.split,
+        samples=args.samples, wettest=args.wettest, timestamps=args.timestamps, steps=args.steps,
+        members=args.members, methods=split(args.methods), combine=split(args.combine),
+        warp_gamma=args.warp_gamma, churn=args.churn, churn_range=tuple(args.churn_range),
+        guide_checkpoint=args.guide_checkpoint, guide_weight=args.guide_weight,
+        residual_scale=args.residual_scale, dry_cutoff=args.dry_cutoff, tukey_alpha=args.tukey_alpha,
+        steps_factor=args.steps_factor, seed=args.seed, batch=args.batch, threads=args.threads,
+        use_cartopy=not args.no_cartopy, map_features=not args.no_map_features, use_native=not args.no_native,
         log=lambda message: print(message, flush=True))
 
 
