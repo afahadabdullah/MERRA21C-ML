@@ -95,3 +95,59 @@ def test_native_geosfp_fields_are_original_cells(trained):
     np.testing.assert_allclose(fields['wind_speed']['values'], np.hypot(fields['u10m']['values'], fields['v10m']['values']))
     no_native = dict(entry, native=str(entry['native']).replace('flx_Nx', 'missing_Nx'))
     assert native_fields(no_native, archive.static['lat'], archive.static['lon'], log=lambda *a: None)[0] == {}
+
+
+def test_sharpness_window_and_time_stepping():
+    from merraflow.evaluate_v4_1 import make_window, make_time_steps
+    # Hann window
+    hann = make_window(32, 'hann')
+    assert hann.shape == (32, 32)
+    assert hann.max() <= 1.0 and hann.min() >= 1e-4
+
+    # Tukey window has flat center
+    tukey = make_window(32, 'tukey', tukey_alpha=0.3)
+    assert tukey.shape == (32, 32)
+    assert np.isclose(tukey[16, 16], 1.0)
+    assert (tukey == 1.0).sum() > 0
+
+    # Uniform time steps (gamma=1.0)
+    t_uni = make_time_steps(10, gamma=1.0)
+    assert len(t_uni) == 11 and t_uni[0] == 0.0 and t_uni[-1] == 1.0
+    np.testing.assert_allclose(np.diff(t_uni), 0.1)
+
+    # Warped time steps (gamma=1.5): earlier steps larger, later steps smaller
+    t_warp = make_time_steps(10, gamma=1.5)
+    assert len(t_warp) == 11 and t_warp[0] == 0.0 and np.isclose(t_warp[-1], 1.0)
+    dt = np.diff(t_warp)
+    assert dt[0] > dt[-1]  # concentrated near t=1
+
+
+def test_sampler_sharpness_variants(trained):
+    archive, model, conditioner, _ = load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))
+    entry = archive.eligible('test')[0]
+    base = base_config(trained)
+    base['inference']['steps'] = 2
+    seed = member_seed(trained, entry, 0)
+
+    # 1. Baseline
+    sampler_hann = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'),
+                                 batch=2, threads=2, window_type='hann')
+    out_base = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0)
+
+    # 2. Time-warp
+    out_warp = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.5, residual_scale=1.0, dry_cutoff=0.0)
+    assert out_warp.shape == out_base.shape
+
+    # 3. Residual scale
+    out_scale = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.1, dry_cutoff=0.0)
+    assert out_scale.shape == out_base.shape
+
+    # 4. Dry cutoff
+    out_cutoff = sampler_hann.sample(seed, steps=2, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.1)
+    assert (out_cutoff[1][out_cutoff[1] > 0] >= 0.1).all()
+
+    # 5. Tukey window
+    sampler_tukey = DomainSampler(model, conditioner, archive, entry, base, torch.device('cpu'),
+                                  batch=2, threads=2, window_type='tukey', tukey_alpha=0.3)
+    out_tukey = sampler_tukey.sample(seed, steps=2)
+    assert out_tukey.shape == out_base.shape

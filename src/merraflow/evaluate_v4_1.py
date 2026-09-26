@@ -137,13 +137,34 @@ def select_cases(archive, split, timestamps=None, samples=3, wettest=1, seed=317
 
 
 # ----------------------------------------------------------------------------
+def make_window(size, window_type='hann', tukey_alpha=0.3):
+    if window_type == 'tukey':
+        w = np.ones(size, dtype='float32')
+        edge = int(np.floor(tukey_alpha * (size - 1) / 2))
+        if edge > 0:
+            idx = np.arange(edge)
+            w[:edge] = 0.5 * (1 + np.cos(np.pi * (idx / edge - 1)))
+            w[-edge:] = w[:edge][::-1]
+        w = np.maximum(w, 1e-4)
+        return np.outer(w, w).astype('float32')
+    return blend_window(size)
+
+
+def make_time_steps(steps, gamma=1.0):
+    if gamma == 1.0:
+        return [i / steps for i in range(steps + 1)]
+    tau = np.arange(steps + 1, dtype='float32') / steps
+    return (1.0 - (1.0 - tau) ** gamma).tolist()
+
+
 # Full-domain sampler (v4 math, batched tiles)
 # ----------------------------------------------------------------------------
 
 class DomainSampler:
     """inference_v4.sample_frame with per-case inputs cached and tiles batched."""
 
-    def __init__(self, model, conditioner, archive, entry, cfg, device, batch=32, threads=8):
+    def __init__(self, model, conditioner, archive, entry, cfg, device, batch=32, threads=8,
+                 window_type='hann', tukey_alpha=0.3):
         p = cfg['patch']
         self.model, self.conditioner, self.archive, self.cfg, self.device = model, conditioner, archive, cfg, device
         self.h, self.w = archive.shape
@@ -152,7 +173,8 @@ class DomainSampler:
         self.batch = batch
         self.tiles = [(y, c) for y in starts(self.h, self.size, p['stride'])
                       for c in starts(self.w, self.size, p['stride'])]
-        self.window = torch.from_numpy(blend_window(self.width)).to(device)
+        self.window_type = window_type
+        self.window = torch.from_numpy(make_window(self.width, window_type, tukey_alpha)).to(device)
         self.weight = torch.zeros((1, self.h+2*self.halo, self.w+2*self.halo), device=device)
         for y, c in self.tiles:
             self.weight[:, y:y+self.width, c:c+self.width] += self.window
@@ -171,8 +193,8 @@ class DomainSampler:
         with torch.no_grad():
             for s in range(0, len(self.tiles), batch):
                 b = dict(original_condition=self.condition[s:s+batch, :self.channels],
-                         original_context=self.context[s:s+batch, :self.channels],
-                         coarse=coarse[s:s+batch].to(device))
+                          original_context=self.context[s:s+batch, :self.channels],
+                          coarse=coarse[s:s+batch].to(device))
                 with autocast(device, cfg['train']['precision']):
                     means.append(conditioner(b).float())
         self.means = torch.cat(means)
@@ -205,21 +227,27 @@ class DomainSampler:
         return result/self.weight
 
     @torch.no_grad()
-    def sample(self, seed, steps=None):
+    def sample(self, seed, steps=None, time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0):
         steps = steps or self.cfg['inference']['steps']
+        t_schedule = make_time_steps(steps, time_warp_gamma)
         noise = np.random.default_rng(seed).standard_normal(
             (len(TARGETS), self.h+2*self.halo, self.w+2*self.halo)).astype('float32')
         x = torch.from_numpy(noise).to(self.device)
         for i in range(steps):
-            first = self.velocity(x, i/steps)
-            second = self.velocity(x+first/steps, (i+1)/steps)
-            x = x+(first+second)/(2*steps)
+            t_cur, t_next = t_schedule[i], t_schedule[i+1]
+            dt = t_next - t_cur
+            first = self.velocity(x, t_cur)
+            second = self.velocity(x + first * dt, t_next)
+            x = x + (first + second) * (dt / 2)
             if not bool(torch.isfinite(x).all()):
                 raise FloatingPointError('Nonfinite full-field trajectory')
         core = x[:, self.halo:self.halo+self.h, self.halo:self.halo+self.w].cpu().numpy()
-        value = (core*self.scale+self.mean)*self.rs+self.rm+self.coarse
-        z = np.maximum(core[1], 0)
-        value[1] = self.archive.scale*z*(z+2)  # direct rain, no add-back
+        scaled_core = core * float(residual_scale)
+        value = (scaled_core * self.scale + self.mean) * self.rs + self.rm + self.coarse
+        z = np.maximum(scaled_core[1], 0)
+        value[1] = self.archive.scale * z * (z + 2)  # direct rain, no add-back
+        if dry_cutoff > 0:
+            value[1] = np.where(value[1] < dry_cutoff, 0.0, value[1])
         value[5] = np.clip(value[5], 0, 1)
         if not np.isfinite(value).all():
             raise FloatingPointError('Nonfinite physical output')
@@ -1003,7 +1031,9 @@ def save_fields(path, archive, item):
 
 def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wettest=1, timestamps=None,
              members=8, steps=None, zooms=2, zoom_size=256, seed=317, batch=32, threads=8,
-             use_cartopy=True, map_features=True, save=False, use_native=True, log=print):
+             use_cartopy=True, map_features=True, save=False, use_native=True,
+             time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0,
+             window_type='hann', tukey_alpha=0.3, log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -1035,12 +1065,16 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
     for number, case in enumerate(cases, 1):
         entry = case['entry']
         started = time.monotonic()
-        sampler = DomainSampler(model, conditioner, archive, entry, cfg, device, batch, threads)
+        sampler = DomainSampler(model, conditioner, archive, entry, cfg, device, batch, threads,
+                                window_type=window_type, tukey_alpha=tukey_alpha)
         log(f'[{number}/{len(cases)}] {entry["id"]}: {len(sampler.tiles)} tiles ready in {time.monotonic()-started:.0f}s')
         ensemble = []
         for m in range(members):
             t0 = time.monotonic()
-            ensemble.append(sampler.sample(member_seed(cfg, entry, m), steps))
+            ensemble.append(sampler.sample(member_seed(cfg, entry, m), steps,
+                                           time_warp_gamma=time_warp_gamma,
+                                           residual_scale=residual_scale,
+                                           dry_cutoff=dry_cutoff))
             log(f'  member {m+1}/{members}: {time.monotonic()-t0:.0f}s')
         ensemble = np.stack(ensemble)
         truth = np.asarray(archive.physical_truth(entry), dtype='float32')
@@ -1084,6 +1118,8 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
     metrics = dict(version='v4.1', checkpoint=str(path.resolve()), checkpoint_label=str(label),
                    checkpoint_sha256=digest, checkpoint_epoch=saved['epoch']+1, split=split, members=members,
                    ode_steps=steps, inference_seed=cfg['inference']['seed'], map_mode=canvas.mode, grid_km=dx_km,
+                   sharpness=dict(time_warp_gamma=time_warp_gamma, residual_scale=residual_scale,
+                                  dry_cutoff=dry_cutoff, window_type=window_type, tukey_alpha=tukey_alpha),
                    cases=reports)
     write_json(out/'metrics_v4_1.json', json.loads(json.dumps(metrics, default=float)))
     write_report(out, metrics)
@@ -1114,6 +1150,16 @@ def main():
     parser.add_argument('--save-fields', action='store_true', help='Write truth/coarse/regression/mean/spread NetCDF per case')
     parser.add_argument('--no-native', action='store_true',
                         help='Show the LCC-regridded coarse input instead of original GEOS-FP cells')
+    parser.add_argument('--time-warp-gamma', type=float, default=1.0,
+                        help='Concentrate ODE steps near t=1 using (1-(1-tau)^gamma); default 1.0 (uniform)')
+    parser.add_argument('--residual-scale', type=float, default=1.0,
+                        help='Latent residual scaling alpha (e.g. 1.10); default 1.0')
+    parser.add_argument('--dry-cutoff', type=float, default=0.0,
+                        help='Physical rain threshold cutoff in mm/h (e.g. 0.1); default 0.0')
+    parser.add_argument('--window-type', choices=('hann', 'tukey'), default='hann',
+                        help='Tile blending window: hann (default) or tukey (flat-top, less overlap smoothing)')
+    parser.add_argument('--tukey-alpha', type=float, default=0.3,
+                        help='Tukey window cosine edge fraction; default 0.3')
     args = parser.parse_args()
     if args.cartopy_data_dir:
         import cartopy
@@ -1122,8 +1168,10 @@ def main():
     evaluate(cfg, 'latest' if args.latest else args.checkpoint, args.output, args.split, args.samples, args.wettest,
              args.timestamps, args.members, args.steps, args.zooms, args.zoom_size, args.seed, args.batch, args.threads,
              not args.no_cartopy, not args.no_map_features, args.save_fields, not args.no_native,
+             args.time_warp_gamma, args.residual_scale, args.dry_cutoff, args.window_type, args.tukey_alpha,
              log=lambda message: print(message, flush=True))
 
 
 if __name__ == '__main__':
     main()
+
