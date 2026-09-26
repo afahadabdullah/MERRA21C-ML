@@ -39,4 +39,4 @@ if [[ -n "${TIMESTAMPS:-}" ]]; then
   read -r -a timestamp_args <<< "$TIMESTAMPS"
   args+=(--timestamps "${timestamp_args[@]}")
 fi
-srun python -m merraflow.evaluate_v4_1 "${args[@]}"
+srun --cpu-bind=none python -m merraflow.evaluate_v4_1 "${args[@]}"
