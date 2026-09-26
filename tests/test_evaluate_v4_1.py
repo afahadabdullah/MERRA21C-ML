@@ -151,3 +151,13 @@ def test_sampler_sharpness_variants(trained):
                                   batch=2, threads=2, window_type='tukey', tukey_alpha=0.3)
     out_tukey = sampler_tukey.sample(seed, steps=2)
     assert out_tukey.shape == out_base.shape
+
+
+def test_compare_sharpness_module_and_cli():
+    import merraflow.compare_sharpness_v4_1 as mod
+    assert hasattr(mod, 'compare_sharpness')
+    assert hasattr(mod, 'DEFAULT_METHODS')
+    assert len(mod.DEFAULT_METHODS) == 6
+    assert {m['id'] for m in mod.DEFAULT_METHODS} == {
+        'baseline', 'time_warp', 'residual_scale', 'wet_cutoff', 'tukey_window', 'combined'
+    }

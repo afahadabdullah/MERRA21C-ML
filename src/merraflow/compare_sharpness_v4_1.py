@@ -30,8 +30,9 @@ import torch
 
 from .v4 import TARGETS
 from .v4_1 import load_config
+from .config import write_json
+from .train_v2 import file_hash_v2
 from .metrics import weighted_mean, radial_psd
-from .train_precip_direct_v2 import file_hash_v2, write_json
 from .evaluate_v4_1 import (resolve_checkpoint, load_model, DomainSampler, select_cases,
                             member_seed, event_window, Canvas, native_fields, NATIVE,
                             _rain_norm, RAIN_LEVELS, DISPLAY, UNITS, _stamp, _coarse_panel)
