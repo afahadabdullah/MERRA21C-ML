@@ -296,8 +296,13 @@ STATE_STYLE = {'t2m': ('RdYlBu_r', False), 'ps': ('cividis', False), 'u10m': ('R
 
 
 def plot_states(item, epoch, path, plt):
+    """Coarse, truth, ensemble mean and two single members on one colour scale,
+    then mean - truth and spread. Members show whether individual samples are
+    sharp where the ensemble mean is smooth (e.g. at fronts)."""
     names = [n for n in TARGETS if n != 'precip']
-    fig, axes = plt.subplots(len(names), 5, figsize=(18, 3.3*len(names)), constrained_layout=True)
+    shown = min(2, len(item['ensemble']))
+    columns = 3+shown+2
+    fig, axes = plt.subplots(len(names), columns, figsize=(3.6*columns, 3.3*len(names)), constrained_layout=True)
     for r, name in enumerate(names):
         c = TARGETS.index(name)
         unit = UNITS[c]
@@ -309,22 +314,25 @@ def plot_states(item, epoch, path, plt):
             hi = max(abs(lo), abs(hi))
             lo = -hi
         hi = max(float(hi), float(lo)+1e-6)
-        for j, (label, field) in enumerate((('Coarse input', coarse), ('Truth', truth), ('Ensemble mean', mean))):
+        fields = [('Coarse input', coarse), ('Truth', truth), ('Ensemble mean', mean)]
+        fields += [(f'Member {m+1}', ensemble[m]) for m in range(shown)]
+        for j, (label, field) in enumerate(fields):
             im = _panel(axes[r, j], field, f'{name} · {label}', cmap=cmap, vmin=lo, vmax=hi)
-        fig.colorbar(im, ax=axes[r, :3].tolist(), label=unit, shrink=.9, pad=.01)
+        fig.colorbar(im, ax=axes[r, :len(fields)].tolist(), label=unit, shrink=.9, pad=.01)
         error = mean-truth
         bound = max(float(np.quantile(abs(error), .995)), 1e-6)
-        im = _panel(axes[r, 3], error, f'{name} · mean − truth', cmap='RdBu_r', vmin=-bound, vmax=bound)
+        k = len(fields)
+        im = _panel(axes[r, k], error, f'{name} · mean − truth', cmap='RdBu_r', vmin=-bound, vmax=bound)
         rmse = float(np.sqrt(((error**2)*item['area']).sum()))
         coarse_rmse = float(np.sqrt((((coarse-truth)**2)*item['area']).sum()))
-        _stamp(axes[r, 3], f'RMSE {rmse:.3g} (coarse {coarse_rmse:.3g}) {unit}')
-        fig.colorbar(im, ax=axes[r, 3], shrink=.9, label=unit)
+        _stamp(axes[r, k], f'RMSE {rmse:.3g} (coarse {coarse_rmse:.3g}) {unit}')
+        fig.colorbar(im, ax=axes[r, k], shrink=.9, label=unit)
         spread = ensemble.std(0)
-        im = _panel(axes[r, 4], spread, f'{name} · spread', cmap='magma_r', vmin=0,
+        im = _panel(axes[r, k+1], spread, f'{name} · spread', cmap='magma_r', vmin=0,
                     vmax=max(float(np.quantile(spread, .995)), 1e-6))
-        fig.colorbar(im, ax=axes[r, 4], shrink=.9, label=unit, extend='max')
+        fig.colorbar(im, ax=axes[r, k+1], shrink=.9, label=unit, extend='max')
     fig.suptitle(f'{_heading(item, epoch)} · states (midpoint snapshot)', fontsize=12)
-    fig.savefig(path, dpi=100)
+    fig.savefig(path, dpi=130)
     plt.close(fig)
 
 
