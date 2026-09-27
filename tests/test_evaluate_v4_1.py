@@ -236,3 +236,54 @@ def test_compare_sharpness_end_to_end(trained, tmp_path, monkeypatch, maps):
     with pytest.raises(FileExistsError):
         compare_sharpness(trained, 'best', out, split='test', samples=0, wettest=1, steps=1, members=1,
                           log=lambda *a: None)
+
+
+def test_front_diagnostic(trained, tmp_path):
+    from merraflow.diag_front_v4_1 import run, transition_width, profile
+    s = np.arange(-20., 21.)
+    step = np.where(s < 0, 0., 1.)
+    ramp = np.clip((s+10)/20, 0, 1)
+    assert transition_width(s, step, 2.) <= 2*2. and transition_width(s, ramp, 2.) > 25
+    field = np.tile(np.where(np.arange(40) < 20, 0., 1.), (40, 1))
+    offsets, values = profile(field, (20, 20), (0., 1.), 10, 4)
+    assert values[0] == 0 and values[-1] == 1
+    out = run(trained, 'best', split='test', members=2, output=tmp_path/'diag', batch=4, threads=2, dpi=50,
+              profile_length=6, profile_band=2, log=lambda *a: None)
+    metrics = json.loads((out/'metrics.json').read_text())
+    assert set(metrics['fields']) == {'q2m', 't2m', 'u10m', 'v10m', 'ps', 'precip'} and metrics['verdict']
+    for v in ('tiled@32', 'tiled@64', 'single@64'):
+        assert len(metrics['fields']['q2m'][v]['member_grad_tail_ratio']) == 3
+    for stem in ('profiles', 'gradient_tails', 'fields_q2m', 'fields_precip'):
+        assert (out/f'{stem}.png').exists() and (out/f'{stem}.pdf').exists()
+    assert 'Verdict' in (out/'report.md').read_text()
+
+
+def test_gradient_finetune_starts_from_checkpoint(trained, tmp_path):
+    from merraflow.v4_1 import objective, validate_config
+    from merraflow.v4 import objective as objective_v4
+    source = resolve_checkpoint(trained, 'latest')
+    cfg = deepcopy(trained)
+    cfg['train'].update(output=str(tmp_path/'ft'), epochs=1, time_limit_hours=None,
+                        finetune=dict(init=str(source), gradient_weight=1., late_time_fraction=.5, late_time_shift=3.))
+    validate_config(cfg)
+    with pytest.raises(ValueError):
+        validate_config(dict(deepcopy(cfg), train=dict(cfg['train'], finetune=dict(init=str(source), bogus=1))))
+    # Defaults reproduce the v4 objective exactly.
+    archive, model, conditioner, _ = load_model(trained, source, torch.device('cpu'))
+    from merraflow.v4_1 import DatasetV41
+    b = torch.utils.data.default_collate([DatasetV41(trained, 'train', 2, 0)[i] for i in range(2)])
+    conditioner.prepare(b)
+    a = objective(model, b, torch.Generator().manual_seed(3))
+    ref = objective_v4(model, b, torch.Generator().manual_seed(3))
+    assert torch.allclose(a, ref)
+    assert objective(model, b, torch.Generator().manual_seed(3), gradient_weight=1.) > a
+    train(cfg)
+    saved = torch.load(tmp_path/'ft'/'last_v4_1.pt', map_location='cpu', weights_only=True)
+    original = torch.load(source, map_location='cpu', weights_only=True)
+    assert saved['initialization']['path'] == str(source.resolve())
+    assert torch.equal(saved['flow_scale'], original['flow_scale'])
+    assert saved['epoch'] == 0 and saved['history'][-1]['training_loss'] > 0
+    bad = deepcopy(cfg)
+    bad['train']['output'] = str(source.parent)
+    with pytest.raises((ValueError, FileExistsError)):
+        train(bad)

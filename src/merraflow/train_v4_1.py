@@ -12,9 +12,9 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
-from .v4 import TARGETS, ArchiveV4, make_model, objective, FrozenRegression, regression_bundle
+from .v4 import TARGETS, ArchiveV4, make_model, FrozenRegression, regression_bundle
 from .v4_1 import (VERSION, validate_config, base_config, PackedArchive, DatasetV41, EpochSampler,
-                   check_checkpoint, validation_due)
+                   check_checkpoint, validation_due, objective)
 from .validation_v4_1 import validate, select_previews, previews, save_plots, EXPECTED
 from .train_v4 import calibrate
 from .train_precip_direct_v2 import rank_zero_action
@@ -109,15 +109,26 @@ def _train(cfg, resume, device, rank, world, local, group):
         check_checkpoint(saved, cfg, archive, packed.fingerprint, world)
         if Path(resume).resolve().parent != out.resolve():
             raise ValueError('Resume in the original output directory to retain best checkpoint and plots')
-    bundle = saved['regression_condition'] if saved else regression_bundle(cfg['conditioning']['checkpoint'], archive)
+    ft = tr.get('finetune') or {}
+    init = None
+    if ft and not saved:
+        # Fine-tune: weights, EMA, frozen regression and calibration from a trained
+        # run with the same data/patch/model; fresh optimizer and schedule.
+        init = torch.load(ft['init'], map_location='cpu', weights_only=True)
+        check_checkpoint(init, cfg, archive, packed.fingerprint)
+        if Path(ft['init']).resolve().parent in (out.resolve(), (out/'checkpoints').resolve()):
+            raise ValueError('Fine-tune into a new train.output, not the source run')
+    source = saved or init
+    bundle = source['regression_condition'] if source else regression_bundle(cfg['conditioning']['checkpoint'], archive)
     conditioner = FrozenRegression(bundle, archive.index['condition_channels'], archive.stats, archive.scale,
                                    cfg['data']['humidity_scale_kg_kg']).to(device)
     model = make_model(archive.channels, cfg).to(device)
-    if saved:
+    if source:
         if rank == 0:
-            print(f'Loaded checkpoint after epoch {saved["epoch"]+1}; using saved calibration.', flush=True)
-        conditioner.flow_scale.copy_(saved['flow_scale'].to(device))
-        model.load_state_dict(saved['model'])
+            what = 'Loaded checkpoint' if saved else f'Fine-tuning from {ft["init"]}'
+            print(f'{what} after epoch {source["epoch"]+1}; using saved calibration.', flush=True)
+        conditioner.flow_scale.copy_(source['flow_scale'].to(device))
+        model.load_state_dict(source['model'])
     else:
         # The first training batches of epoch 0, as v4 calibrated on, drawn
         # through the training loader itself: its persistent workers start
@@ -127,6 +138,15 @@ def _train(cfg, resume, device, rank, world, local, group):
     training_model = DDP(model, device_ids=[local] if device.type == 'cuda' else None,
                          find_unused_parameters=True) if world > 1 else model
     ema = deepcopy(model).eval().requires_grad_(False)
+    if init is not None:
+        ema.load_state_dict(init['ema'])
+    initialization = (dict(path=str(Path(ft['init']).resolve()), epoch=init['epoch']+1) if init is not None
+                      else saved.get('initialization') if saved else None)
+    loss_options = dict(gradient_weight=ft.get('gradient_weight', 0.), late_fraction=ft.get('late_time_fraction', 0.),
+                        shift=ft.get('late_time_shift', 1.))
+    if rank == 0 and ft:
+        print(f'Fine-tune loss: flow + {loss_options["gradient_weight"]} x gradient term; '
+              f'{loss_options["late_fraction"]:.0%} of flow times shifted toward data (s={loss_options["shift"]})', flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=tr['learning_rate'], weight_decay=tr['weight_decay'])
     total_steps = math.ceil(len(loader)/tr['accumulate'])*tr['epochs']
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda(dict(train=dict(tr, lr_schedule='cosine')), total_steps))
@@ -183,7 +203,7 @@ def _train(cfg, resume, device, rank, world, local, group):
             with training_model.no_sync() if world > 1 and not do_step else nullcontext():
                 with autocast(device, tr['precision']):
                     conditioner.prepare(b)
-                    loss = objective(training_model, b)
+                    loss = objective(training_model, b, **loss_options)
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite v4.1 flow loss')
                 (loss*len(b['target'])/window_samples).backward()
@@ -240,7 +260,7 @@ def _train(cfg, resume, device, rank, world, local, group):
                        flow_scale=conditioner.flow_scale.detach().cpu(),
                        model=model.state_dict(), ema=ema.state_dict(), regression_condition=bundle,
                        optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict(),
-                       rng=states, best=best, history=history, initialization=None)
+                       rng=states, best=best, history=history, initialization=initialization)
         def save():
             atomic_save(out/LAST, payload)
             if improved:

@@ -21,6 +21,7 @@ import torch
 import yaml
 from torch.utils.data import Dataset, Sampler
 from .dataset_v2 import box_means_v2, crop_v2, time_features
+from .loss_v2 import quadratic_v2, gradient_v2
 from .dataset_v3_precip import encode_rain
 from .physics_v2 import encode_fields_v2
 from .packed_v4_1 import SCORES, BASELINE, TRUTH, HourFiles, candidates_v4_1, load_manifest
@@ -106,7 +107,47 @@ def validate_config(cfg):
         raise ValueError('train.persistent_workers must be boolean')
     if type(tr['workers']) is not int:
         raise ValueError('train.workers must be an integer')
+    ft = tr.get('finetune')
+    if ft is not None:
+        if not isinstance(ft, dict) or set(ft) - {'init', 'gradient_weight', 'late_time_fraction', 'late_time_shift'}:
+            raise ValueError('train.finetune keys: init, gradient_weight, late_time_fraction, late_time_shift')
+        if not ft.get('init'):
+            raise ValueError('train.finetune.init must name the checkpoint to start from')
+        if not 0 <= ft.get('gradient_weight', 0.) or not 0 <= ft.get('late_time_fraction', 0.) <= 1 \
+                or ft.get('late_time_shift', 1.) < 1:
+            raise ValueError('finetune: gradient_weight >= 0, 0 <= late_time_fraction <= 1, late_time_shift >= 1')
     return cfg
+
+
+def flow_times(n, device, generator=None, late_fraction=0., shift=1.):
+    """Flow times (0 noise .. 1 data). A fraction of them is shifted toward the
+    data end, t' = s t / (1 + (s-1) t), where fronts and fine detail are resolved."""
+    t = torch.rand(n, device=device, generator=generator)
+    if late_fraction > 0 and shift > 1:
+        late = torch.rand(n, device=device, generator=generator) < late_fraction
+        t = torch.where(late, shift*t/(1+(shift-1)*t), t)
+    return t
+
+
+def objective(model, batch, generator=None, gradient_weight=0., late_fraction=0., shift=1.):
+    """v4 flow matching, optionally with a gradient term on the velocity error.
+
+    Both terms are quadratic in the velocity error (the gradient is a linear
+    operator), so the minimiser is still the conditional-mean velocity: the
+    gradient term does not bias samples toward smooth fields. It reweights the
+    loss toward sharp, small-scale errors such as misplaced or smeared fronts.
+    With the defaults this is exactly v4's objective."""
+    x1 = batch['target']
+    x0 = torch.randn(x1.shape, device=x1.device, generator=generator)
+    t = flow_times(len(x1), x1.device, generator, late_fraction, shift)
+    time = t[:, None, None, None]
+    velocity = model((1-time)*x0+time*x1, t, batch['condition'], batch['context'], batch['mean']).float()
+    weights = (model.module if hasattr(model, 'module') else model).channel_weights
+    error = velocity-(x1-x0)
+    loss = quadratic_v2(error, batch['area_full'], batch['importance'], weights)[0]
+    if gradient_weight:
+        loss = loss+gradient_weight*gradient_v2(error, batch['area_full'], batch['importance'], weights)
+    return loss
 
 
 class PackedArchive:
