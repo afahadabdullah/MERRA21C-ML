@@ -246,6 +246,8 @@ def _train(cfg, resume, device, rank, world, local, group):
                 print(f'Epoch {epoch+1}/{tr["epochs"]}: batch {i+1}/{len(loader)}; '
                       f'loss={total/count:.6g}; '
                       + (f'flow={flow_total/count:.6g}; ' if rollout else '')
+                      + (('scores=' + ','.join(f'{k}:{v:.4g}' for k, v in zip(rollout_v4_1.SCORES,
+                          (score_sums[:-1]/score_sums[-1].clamp_min(1)).tolist())) + '; ') if rollout else '')
                       + f'elapsed={elapsed/60:.1f} min; '
                       f'data_wait={data_wait_s/(i+1):.3f}s/batch; step={step_s/(i+1):.3f}s/batch; '
                       f'{(i+1)*tr["batch_size"]*world/elapsed:.1f} samples/s', flush=True)

@@ -20,7 +20,8 @@ Each training step (on ``patches`` patches of the batch, every ``interval`` step
      placement and amplitude stay right (scale-aware scoring).
    * variogram (edge) score: for lags of 1-8 px in four directions, the fair
      squared error between the members' expected |increment| and the truth's,
-     relative to the truth's mean squared increment. Too-smooth members have
+     relative to the mean of both squared increments (bounded, ~2 at most, so
+     dry or flat patches cannot dominate). Too-smooth members have
      too-small increments across fronts and are penalized; the finite-ensemble
      correction means extra noise does not lower the score.
    * bias guard: fair squared error of the members' patch-mean against the truth's
@@ -123,7 +124,11 @@ def variogram(members, truth, area, lags):
             observed = (truth[a]-truth[b]).abs()
             weights = (area[a]+area[b])/2
             fair = (increments.mean(0)-observed).square()-increments.var(0, correction=1)/n
-            scale = _average(observed.square(), weights).detach().clamp_min(1e-8)
+            # Symmetric relative error: normalized by the mean of truth's and the
+            # members' squared increments (detached, floored), so a patch scores at
+            # most ~2. Dividing by truth alone blew up in dry/flat patches.
+            scale = (.5*(_average(observed.square(), weights)+_average(increments.square().mean(0), weights))
+                     ).detach().clamp_min(1e-4)
             values.append(_average(fair, weights)/scale)
     return torch.stack(values).mean(0) if values else truth.new_zeros(truth.shape[:2])
 

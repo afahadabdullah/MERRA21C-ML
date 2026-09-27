@@ -79,7 +79,7 @@ train:
   finetune:
     init: runs/merraflow_v4_1/last_v4_1.pt   # set to the final kept main-run checkpoint
     rollout:
-      weight: 1.0              # sample-score weight relative to the flow loss
+      weight: 0.5              # sample-score weight relative to the flow loss (scores sum ~1-2 vs flow ~0.3)
       patches: 4               # patches per GPU step scored with generated members
       members: 2               # members per patch (>= 2; fair scores need independent draws)
       steps: 16                # Heun steps for training rollouts

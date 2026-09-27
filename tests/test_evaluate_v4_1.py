@@ -317,6 +317,9 @@ def test_sample_scores_are_proper_and_reward_edges():
     smooth = torch.sigmoid(x[None, :]/.2).expand(32, 32).expand(2, 1, 6, 32, 32).clone()
     assert variogram(sharp, truth, area, [1, 2, 4]).abs().max() < 1e-6
     assert (variogram(smooth, truth, area, [1, 2, 4]) > .1).all()
+    dry = torch.zeros(1, 6, 32, 32)  # flat truth + noisy members: bounded, not exploding
+    noisy = 1e-3*torch.randn(2, 1, 6, 32, 32, generator=g)
+    assert variogram(noisy, dry, area, [1, 2, 4]).max() < 2.5
     assert (afcrps(smooth, truth, area, .95) > afcrps(sharp, truth, area, .95)).all()
     assert multiscale_crps(smooth, truth, area, .95, [2, 4]).shape == (1, 6)
     from merraflow.rollout_v4_1 import bias
