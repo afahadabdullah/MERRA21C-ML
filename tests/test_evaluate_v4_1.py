@@ -193,7 +193,13 @@ def test_autoguidance(trained):
     assert guide is not None and guide['epoch'] == saved['epoch']+1
 
 
-def test_compare_sharpness_end_to_end(trained, tmp_path):
+@pytest.mark.parametrize('maps', ['index', 'cartopy', 'mesh'])
+def test_compare_sharpness_end_to_end(trained, tmp_path, monkeypatch, maps):
+    if maps != 'index':
+        pytest.importorskip('cartopy')
+    if maps == 'mesh':  # LCC grid not recoverable: lon/lat pcolormesh on GeoAxes (Discover's mode)
+        import merraflow.evaluate_v4_1 as ev
+        monkeypatch.setattr(ev, '_lcc', lambda *a, **k: [])
     from merraflow.compare_sharpness_v4_1 import compare_sharpness, build_methods, METHOD_IDS
     specs = build_methods(METHOD_IDS, ('churn', 'autoguide', 'residual_scale'), 4, 1.5, .1, 1.5, 1.1, .1, .3)
     combined = specs[-1]
@@ -202,7 +208,7 @@ def test_compare_sharpness_end_to_end(trained, tmp_path):
     with pytest.raises(ValueError):
         build_methods(('nope',), (), 4, 1.5, .1, 1.5, 1.1, .1, .3)
     out = compare_sharpness(trained, 'best', tmp_path/'sharp', split='test', samples=1, wettest=1, steps=2,
-                            members=2, batch=4, threads=2, use_cartopy=False, map_features=False,
+                            members=2, batch=4, threads=2, zoom_size=12, dpi=60, use_cartopy=maps != 'index', map_features=False,
                             log=lambda *a: None)
     summary = json.loads((out/'summary_metrics.json').read_text())
     methods = [m['id'] for m in summary['settings']['methods']]
@@ -215,9 +221,18 @@ def test_compare_sharpness_end_to_end(trained, tmp_path):
         assert s['crps'] >= 0 and s['large_scale_rmse'] >= 0
     assert set(summary['verdicts']) == set(methods)-{'baseline'}
     for folder in (out/'cases').iterdir():
-        for name in ('sharpness_compare_precip.png', 'sharpness_compare_zoom.png', 'sharpness_spectra.png', 'metrics.json'):
+        for name in ('sharpness_spectra.png', 'metrics.json', 'sharpness_all_fields_zoom.png',
+                     'sharpness_spectra_all_fields.png', 'sharpness_spectra.pdf'):
             assert (folder/name).stat().st_size > 1000, name
-    assert (out/'summary_tradeoff.png').exists() and 'Verdicts' in (out/'report.md').read_text()
+        for var in ('precip', 't2m', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed'):
+            for kind in ('conus', 'zoom'):
+                for suffix in ('png', 'pdf'):
+                    assert (folder/'maps'/f'{var}_{kind}.{suffix}').stat().st_size > 1000, (var, kind, suffix)
+    assert all((out/f'summary_{n}.{x}').exists() for n in ('tradeoff', 'scorecard') for x in ('png', 'pdf'))
+    report = (out/'report.md').read_text()
+    assert 'Verdicts' in report and all(f'(`{n}`)' in report for n in ('t2m', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed'))
+    states = summary['summary']['states']['baseline']
+    assert set(states) == {'t2m', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed'} and states['t2m']['crps'] >= 0
     with pytest.raises(FileExistsError):
         compare_sharpness(trained, 'best', out, split='test', samples=0, wettest=1, steps=1, members=1,
                           log=lambda *a: None)

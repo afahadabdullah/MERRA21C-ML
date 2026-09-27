@@ -34,6 +34,7 @@
 #   WARP_GAMMA=1.5  CHURN=0.1  CHURN_RANGE="0.1 0.8"
 #   GUIDE_CHECKPOINT=auto (kept epoch nearest 1/3 of the main one) | <epoch> | <path>  GUIDE_WEIGHT=1.5
 #   RESIDUAL_SCALE=1.10  DRY_CUTOFF=0.1  TUKEY_ALPHA=0.3
+#   DPI=300  NO_PDF=0 (every figure as PNG + PDF)
 #   TIMESTAMPS="20260223_0530"  OUTPUT=<fresh dir>
 #   CARTOPY_DATA_DIR=<Natural Earth cache> for coastlines/states on offline nodes
 set -euo pipefail
@@ -63,6 +64,8 @@ if [[ -n "${GUIDE_WEIGHT:-}" ]]; then args+=(--guide-weight "$GUIDE_WEIGHT"); fi
 if [[ -n "${RESIDUAL_SCALE:-}" ]]; then args+=(--residual-scale "$RESIDUAL_SCALE"); fi
 if [[ -n "${DRY_CUTOFF:-}" ]]; then args+=(--dry-cutoff "$DRY_CUTOFF"); fi
 if [[ -n "${TUKEY_ALPHA:-}" ]]; then args+=(--tukey-alpha "$TUKEY_ALPHA"); fi
+if [[ -n "${DPI:-}" ]]; then args+=(--dpi "$DPI"); fi
+if [[ "${NO_PDF:-0}" == 1 ]]; then args+=(--no-pdf); fi
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi
 if [[ -n "${CARTOPY_DATA_DIR:-}" ]]; then args+=(--cartopy-data-dir "$CARTOPY_DATA_DIR"); fi
 if [[ -n "${TIMESTAMPS:-}" ]]; then

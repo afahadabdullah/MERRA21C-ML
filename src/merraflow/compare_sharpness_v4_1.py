@@ -30,19 +30,27 @@ Methods (ids for ``--methods``; knob values come from the CLI):
 What counts as "better": sharper is not automatically better. A method helps if
 it moves the rain power spectrum toward truth at fine scales WITHOUT worsening
 the ensemble CRPS, the large-scale (~25 km block-mean) RMSE or the domain-mean
-rain bias. Pixel MAE/RMSE of single members always punish sharper fields
+rain bias, and without worsening the CRPS of the other fields (every method
+acts on all six outputs; each field gets the same scores and spectra). Pixel MAE/RMSE of single members always punish sharper fields
 (double penalty) and are reported only for completeness.
 
 Outputs (default <train.output>/evaluation/sharpness_<ckpt>_<split>_<sha>_<job>/):
-  cases/<id>/sharpness_compare_precip.png  CONUS maps: truth, coarse, member 1 of each method
-  cases/<id>/sharpness_compare_zoom.png    the same around the strongest rain feature
+  cases/<id>/maps/<var>_conus.{png,pdf}    per variable (precip, t2m, ps, u10m, v10m, q2m,
+                                           wind_speed): truth, coarse, member 1 of each method
+  cases/<id>/maps/<var>_zoom.{png,pdf}     the same around the strongest rain feature
+  cases/<id>/sharpness_all_fields_zoom.png every field (rain, t2m, ps, u10m, v10m, q2m, wind speed)
+                                           × truth, coarse and each method, in the rain-event zoom
   cases/<id>/sharpness_spectra.png         rain PSD and PSD ratio to truth vs wavelength
+  cases/<id>/sharpness_spectra_all_fields.png  PSD ratio to truth for every field
   cases/<id>/metrics.json                  all scores for the case
-  summary_tradeoff.png                     fine-scale power vs CRPS / large-scale RMSE
+  summary_tradeoff.png                     rain fine-scale power vs CRPS / large-scale RMSE / bias
+  summary_scorecard.png                    methods × fields: CRPS change vs baseline, fine-scale power
+Every figure is written as PNG and PDF at --dpi (default 300; --no-pdf for PNG only).
   summary_metrics.json, report.md          case-mean scores, verdicts, run settings
 """
 import argparse
 from copy import deepcopy
+import gc
 import json
 import os
 from pathlib import Path
@@ -57,17 +65,19 @@ from .train_v2 import file_hash_v2
 from .v4 import TARGETS
 from .v4_1 import load_config
 from .evaluate_v4_1 import (resolve_checkpoint, load_model, load_guide, DomainSampler, select_cases,
-                            member_seed, event_window, Canvas, native_fields, NATIVE, _rain_norm,
-                            RAIN_LEVELS, _stamp)
+                            member_seed, event_window, Canvas, native_fields, _rain_norm, RAIN_LEVELS,
+                            _stamp, _display, _norm, _coarse_panel, DISPLAY)
 
 KNOBS = dict(steps_factor=1, time_warp_gamma=1.0, churn=0.0, guide_weight=1.0,
              residual_scale=1.0, dry_cutoff=0.0, window_type='hann')
 METHOD_IDS = ('baseline', 'more_steps', 'time_warp', 'churn', 'autoguide', 'residual_scale',
               'wet_cutoff', 'tukey_window', 'combined')
 TRAJECTORY_KNOBS = ('steps_factor', 'time_warp_gamma', 'churn', 'guide_weight', 'window_type')
-COLORS = ['#222222', '#8c8c8c', '#74add1', '#1a9850', '#7b3294', '#f46d43', '#fdae61', '#abd9e9',
+COLORS = ['#2166ac', '#8c8c8c', '#74add1', '#1a9850', '#7b3294', '#f46d43', '#fdae61', '#abd9e9',
           '#d73027', '#01665e', '#c51b7d']
-STATE_NAMES = {0: 't2m', 2: 'ps', 3: 'u10m', 4: 'v10m', 5: 'q2m'}
+STATE_FIELDS = ('t2m', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed')
+FIELDS = ('precip',)+STATE_FIELDS
+STATE_CRPS_TOLERANCE = 2.   # % CRPS worsening per non-rain field that blocks a 'recommended' verdict
 FINE_KM, MESO_KM = (0., 30.), (30., 150.)   # wavelength bands for power ratios
 LARGE_SCALE_KM = 25.                        # ~GEOS-FP cell: block size for large-scale RMSE
 FSS_RAIN = ((1., 25.), (5., 25.), (1., 100.))  # (mm/h threshold, neighbourhood km)
@@ -210,17 +220,35 @@ def score_rain(ensemble, truth, area, dx_km, truth_psd):
     return s, freq, psd
 
 
+def field_of(stack, name):
+    """One field from (..., 6, h, w); wind_speed is derived from u10m/v10m."""
+    if name == 'wind_speed':
+        return np.hypot(stack[..., TARGETS.index('u10m'), :, :], stack[..., TARGETS.index('v10m'), :, :])
+    return stack[..., TARGETS.index(name), :, :]
+
+
 def score_states(ensemble, truth, area, dx_km):
-    """Per-state RMSE, CRPS and fine-scale power ratio (members, 6, h, w)."""
-    result = {}
-    for c, name in STATE_NAMES.items():
-        freq, truth_psd = radial_psd(truth[c])
-        _, psd = mean_psd(ensemble[:, c])
-        result[name] = dict(
-            member_rmse=float(np.mean([np.sqrt(weighted_mean((m-truth[c])**2, area)) for m in ensemble[:, c]])),
-            crps=float(weighted_mean(crps_ensemble(ensemble[:, c], truth[c]), area)),
-            fine_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, FINE_KM))
-    return result
+    """Scores for every non-rain field of (members, 6, h, w) vs truth (6, h, w),
+    plus the member-mean power spectrum of each field."""
+    k = max(1, int(round(LARGE_SCALE_KM/dx_km)))
+    area_k = block_mean(area, k)
+    scores, spectra = {}, {}
+    for name in STATE_FIELDS:
+        ens, t = field_of(ensemble, name), field_of(truth, name)
+        freq, truth_psd = radial_psd(t)
+        _, psd = mean_psd(ens)
+        truth_grad = gradient_mean(t, area)
+        tk = block_mean(t, k)
+        scores[name] = dict(
+            bias=float(np.mean([weighted_mean(m, area) for m in ens])-weighted_mean(t, area)),
+            member_rmse=float(np.mean([np.sqrt(weighted_mean((m-t)**2, area)) for m in ens])),
+            crps=float(weighted_mean(crps_ensemble(ens, t), area)),
+            large_scale_rmse=float(np.mean([np.sqrt(weighted_mean((block_mean(m, k)-tk)**2, area_k)) for m in ens])),
+            fine_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, FINE_KM),
+            meso_power_ratio=band_ratio(freq, psd, truth_psd, dx_km, MESO_KM),
+            gradient_ratio=float(np.mean([gradient_mean(m, area) for m in ens])/truth_grad) if truth_grad > 0 else None)
+        spectra[name] = psd
+    return scores, spectra
 
 
 def evaluate_case(sampler, archive, entry, methods, seeds, steps, churn_range, dx_km, log=print):
@@ -232,14 +260,16 @@ def evaluate_case(sampler, archive, entry, methods, seeds, steps, churn_range, d
     references = {}
     for name, field in (('truth', truth), ('coarse', coarse), ('regression', sampler.regression)):
         s, _, psd = score_rain(field[None, 1], truth[1], area, dx_km, t_psd)
-        references[name] = dict(scores=s, psd=psd, rain=field[1])
+        states, spectra = score_states(field[None], truth, area, dx_km)
+        references[name] = dict(scores=s, psd=psd, rain=field[1], states=states, spectra=spectra, fields=field)
     results = {}
     for m in methods:
         ens = ensembles[m['id']]
         s, _, psd = score_rain(ens[:, 1], truth[1], area, dx_km, t_psd)
         s['seconds_per_member'] = round(seconds[m['id']]/len(seeds), 1)
-        results[m['id']] = dict(scores=s, states=score_states(ens, truth, area, dx_km), psd=psd,
-                                rain=ens[0, 1], method=m)
+        states, spectra = score_states(ens, truth, area, dx_km)
+        results[m['id']] = dict(scores=s, states=states, spectra=spectra, psd=psd,
+                                rain=ens[0, 1], fields=ens[0], method=m)
         log(f'  {m["label"]:<28} fine-power {_fmt(s["fine_power_ratio"])} · CRPS {s["crps"]:.4f} · '
             f'LS-RMSE {s["large_scale_rmse"]:.4f} · bias {_fmt(s["bias_pct"], "+.1f")}% · '
             f'p99.9 {s["p99_9"]:.2f} (truth {references["truth"]["scores"]["p99_9"]:.2f})')
@@ -258,47 +288,79 @@ def _grid(n, cols=4):
     return (n+cols-1)//cols, cols
 
 
-def plot_maps(canvas, results, references, native, heading, path, plt, window=None):
-    cmap, norm = _rain_norm()
-    panels = [('Ground truth (HWT)', references['truth']['rain'], references['truth']['scores'])]
-    panels.append(('Coarse input', references['coarse']['rain'], references['coarse']['scores']))
-    panels += [(r['method']['label']+' · member 1', r['rain'], r['scores']) for r in results.values()]
-    rows, cols = _grid(len(panels))
-    fig, axes = plt.subplots(rows, cols, figsize=(6.2*cols, (4.6 if window is None else 5.6)*rows),
-                             squeeze=False, subplot_kw=dict(projection=canvas.proj) if canvas.mode != 'index' else {},
-                             constrained_layout=True)
-    image = None
-    for k, (title, field, scores) in enumerate(panels):
-        ax = axes.flat[k]
-        r, c = divmod(k, cols)
-        shown = None
-        if title.startswith('Coarse') and native:
-            shown = canvas.show_native(ax, native, window, cmap=cmap, norm=norm, left=c == 0, bottom=r == rows-1)
-            if shown is not None:
-                title = 'Coarse input (native GEOS-FP cells)'
-        if shown is None:
-            shown = canvas.show(ax, field, window, cmap=cmap, norm=norm, left=c == 0, bottom=r == rows-1)
-        image = shown if shown is not None else image
-        ax.set_title(title, fontsize=10.5, fontweight='bold')
-        if window is None:
-            text = (f'mean {scores["mean_rain"]:.3f} · p99.9 {scores["p99_9"]:.1f} · max {scores["peak"]:.0f} mm/h · '
-                    f'wet {scores["wet_frac_0p1"]:.0%}')
-            if not title.startswith('Ground'):
-                text += f'\nfine-power ×{_fmt(scores["fine_power_ratio"], ".2f")} · CRPS {scores["crps"]:.3f}'
-        else:
-            ys, xs = window
-            sub = field[ys, xs]
-            text = f'local mean {float(sub.mean()):.2f} · max {float(sub.max()):.1f} mm/h'
-        _stamp(ax, text)
-    for ax in list(axes.flat)[len(panels):]:
-        ax.set_visible(False)
-    fig.colorbar(image, ax=list(axes.flat)[:len(panels)], location='bottom', shrink=.45, pad=.01, extend='both',
-                 ticks=RAIN_LEVELS, label='Rain rate (mm h⁻¹)')
-    where = 'Full CONUS' if window is None else f'Rain-event zoom ({window[0].stop-window[0].start}×{window[1].stop-window[1].start} px)'
-    fig.suptitle(f'{heading}\n{where}: inference sharpening ablation (same noise for every method)',
-                 fontsize=13, fontweight='bold')
-    fig.savefig(path, dpi=110)
+FIGURES = dict(dpi=300, pdf=True)   # set by compare_sharpness(dpi=, pdf=)
+
+
+def save_figure(fig, path, plt):
+    """PNG at FIGURES['dpi'], plus a PDF whose map rasters use the same dpi
+    (full-CONUS panels are ~native resolution at 300 dpi, so zooming stays sharp)."""
+    path = Path(path)
+    fig.savefig(path.with_suffix('.png'), dpi=FIGURES['dpi'])
+    if FIGURES['pdf']:
+        fig.savefig(path.with_suffix('.pdf'), dpi=FIGURES['dpi'])
+    fig.clf()
     plt.close(fig)
+    gc.collect()  # large Cartopy/Agg rasters; free them before the next map
+
+
+def plot_maps(canvas, results, references, native, name, heading, path, plt, window=None):
+    """One variable: truth, coarse (native GEOS-FP cells when available) and member 1
+    of every method, over full CONUS or a zoom window."""
+    title, unit, *_, cmap, _ = DISPLAY[name]
+    panels = _field_panels(results, references)
+    shown = [field_of(stack, name) for _, stack in panels]
+    ys, xs = window if window is not None else (slice(None), slice(None))
+    if name == 'precip':
+        cmap, norm = _rain_norm()
+    else:
+        shown = [_display(name, f) for f in shown]
+        norm = _norm(name, np.concatenate([shown[0][ys, xs][::2, ::2].ravel(), shown[1][ys, xs][::2, ::2].ravel()]))
+    item = dict(native=native or {})
+    rows, cols = _grid(len(panels))
+    fig = plt.figure(figsize=(6.2*cols, (4.6 if window is None else 5.6)*rows), constrained_layout=True)
+    from matplotlib.gridspec import GridSpec
+    grid = GridSpec(rows, cols, figure=fig)
+    image, axes = None, []
+    for k, ((label, _), field) in enumerate(zip(panels, shown)):
+        r, c = divmod(k, cols)
+        ax = canvas.axes(fig, grid[r, c])
+        axes.append(ax)
+        left, bottom = c == 0, r == rows-1 or k+cols >= len(panels)
+        if k == 1:
+            shown_image, label, *_ = _coarse_panel(canvas, ax, item, name, field, window, cmap, norm, left, bottom)
+        else:
+            shown_image = canvas.show(ax, field, window, cmap=cmap, norm=norm, left=left, bottom=bottom)
+            label = label if k == 0 else f'{label} · member 1'
+        image = shown_image if shown_image is not None else image
+        ax.set_title(label, fontsize=10.5, fontweight='bold')
+        sub = field[ys, xs]
+        if name == 'precip':
+            if k == 0:
+                stats = references['truth']['scores']
+            elif k == 1:
+                stats = references['coarse']['scores']
+            else:
+                stats = list(results.values())[k-2]['scores']
+            if window is None:
+                text = (f'mean {stats["mean_rain"]:.3f} · p99.9 {stats["p99_9"]:.1f} · max {stats["peak"]:.0f} mm/h · '
+                        f'wet {stats["wet_frac_0p1"]:.0%}')
+                if k:
+                    text += f'\nfine-power ×{_fmt(stats["fine_power_ratio"], ".2f")} · CRPS {stats["crps"]:.3f}'
+            else:
+                text = f'local mean {float(sub.mean()):.2f} · max {float(sub.max()):.1f} mm/h'
+        else:
+            gy, gx = np.gradient(np.asarray(sub, dtype='float64'))
+            text = f'mean {float(sub.mean()):.4g} · |∇| {float(np.hypot(gy, gx).mean()):.3g} {unit}/px'
+            if k >= 2 and window is None:
+                st = list(results.values())[k-2]['states'][name]
+                text += f'\nfine-power ×{_fmt(st["fine_power_ratio"], ".2f")} · CRPS {st["crps"]:.4g}'
+        _stamp(ax, text)
+    fig.colorbar(image, ax=axes, location='bottom', shrink=.45, pad=.01, extend='both',
+                 ticks=RAIN_LEVELS if name == 'precip' else None, label=f'{title} ({unit})')
+    where = 'Full CONUS' if window is None else f'Rain-event zoom ({ys.stop-ys.start}×{xs.stop-xs.start} px)'
+    fig.suptitle(f'{heading}\n{title} · {where}: inference sharpening ablation (same noise for every method)',
+                 fontsize=13, fontweight='bold')
+    save_figure(fig, path, plt)
 
 
 def plot_spectra(results, references, t_freq, dx_km, heading, path, plt):
@@ -331,8 +393,126 @@ def plot_spectra(results, references, t_freq, dx_km, heading, path, plt):
     ratio_ax.set_title(f'Ratio to truth · fine < {FINE_KM[1]:g} km < meso < {MESO_KM[1]:g} km')
     ax.legend(fontsize=8.5, loc='lower left')
     fig.suptitle(heading, fontsize=13, fontweight='bold')
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
+    save_figure(fig, path, plt)
+
+
+def _field_panels(results, references):
+    panels = [('Truth', references['truth']['fields']), ('Coarse', references['coarse']['fields'])]
+    return panels+[(r['method']['label'], r['fields']) for r in results.values()]
+
+
+def plot_all_fields_zoom(canvas, results, references, native, window, heading, path, plt):
+    """Every field (rows) × truth, coarse and member 1 of each method (columns) in one window."""
+    from matplotlib.gridspec import GridSpec
+    ys, xs = window
+    panels = _field_panels(results, references)
+    fig = plt.figure(figsize=(3.3*len(panels)+1.2, 3.1*len(FIELDS)), constrained_layout=True)
+    grid = GridSpec(len(FIELDS), len(panels), figure=fig)
+    item = dict(native=native or {})
+    for r, name in enumerate(FIELDS):
+        title, unit, *_, cmap, _ = DISPLAY[name]
+        shown = [field_of(stack, name) for _, stack in panels]
+        if name == 'precip':
+            cmap, norm = _rain_norm()
+        else:
+            shown = [_display(name, f) for f in shown]
+            norm = _norm(name, np.concatenate([shown[0][ys, xs].ravel(), shown[1][ys, xs].ravel()]))
+        bottom, row = r == len(FIELDS)-1, []
+        for c, ((label, _), field) in enumerate(zip(panels, shown)):
+            ax = canvas.axes(fig, grid[r, c])
+            row.append(ax)
+            if c == 1:
+                image, label, *_ = _coarse_panel(canvas, ax, item, name, field, window, cmap, norm, False, bottom)
+            else:
+                image = canvas.show(ax, field, window, cmap=cmap, norm=norm, left=c == 0, bottom=bottom)
+            ax.set_title(f'{label}' if r == 0 or c == 1 else '', fontsize=9, fontweight='bold' if r == 0 else None)
+            sub = field[ys, xs]
+            if name == 'precip':
+                _stamp(ax, f'mean {float(sub.mean()):.2f} · max {float(sub.max()):.1f}')
+            else:
+                gy, gx = np.gradient(np.asarray(sub, dtype='float64'))
+                _stamp(ax, f'mean {float(sub.mean()):.4g} · |∇| {float(np.hypot(gy, gx).mean()):.3g}')
+        if image is not None:
+            fig.colorbar(image, ax=row, location='right', shrink=.9, pad=.005,
+                         label=f'{title} ({unit})', extend='both', ticks=RAIN_LEVELS if name == 'precip' else None)
+    fig.suptitle(f'{heading}\nAll fields, rain-event zoom ({ys.stop-ys.start}×{xs.stop-xs.start} px): '
+                 'truth, coarse and member 1 of every method (same noise); |∇| = mean gradient per pixel',
+                 fontsize=13, fontweight='bold')
+    save_figure(fig, path, plt)
+
+
+def plot_all_spectra(results, references, t_freq, dx_km, heading, path, plt):
+    """Power ratio to truth vs wavelength for every field."""
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10.5), constrained_layout=True)
+    valid = t_freq > 0
+    wavelength = dx_km/t_freq[valid]
+
+    def spectrum(entry, name):
+        return (entry['psd'] if name == 'precip' else entry['spectra'][name])[valid]
+
+    for ax, name in zip(axes.flat, FIELDS):
+        truth = np.maximum(spectrum(references['truth'], name), 1e-30)
+        for ref, style in (('coarse', dict(color='#9e9e9e', ls=':')), ('regression', dict(color='#9e9e9e', ls='--'))):
+            ax.semilogx(wavelength, spectrum(references[ref], name)/truth, lw=1.3, label=ref.capitalize(), **style)
+        for r in results.values():
+            m = r['method']
+            ax.semilogx(wavelength, spectrum(r, name)/truth, color=m['color'],
+                        lw=2.3 if m['id'] in ('baseline', 'combined') else 1.4, label=m['label'])
+        ax.axhline(1, color='k', lw=1.5)
+        for edge in (FINE_KM[1], MESO_KM[1]):
+            ax.axvline(edge, color='0.6', lw=.8)
+        ax.invert_xaxis()
+        ax.set_ylim(0, 2)
+        ax.set_title(f'{DISPLAY[name][0]}', fontsize=11, fontweight='bold')
+        ax.set_xlabel('Wavelength (km)')
+        ax.set_ylabel('Power ratio to truth')
+        ax.grid(True, which='both', ls='--', alpha=.4)
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    axes.flat[-1].axis('off')
+    axes.flat[-1].legend(handles, labels, loc='center', fontsize=10)
+    fig.suptitle(f'{heading}\nPower ratio to truth for every field (member mean; 1 = truth-like variance at that scale)',
+                 fontsize=13, fontweight='bold')
+    save_figure(fig, path, plt)
+
+
+def plot_scorecard(summary, methods, path, plt):
+    """Methods × fields: CRPS change vs baseline, and fine-scale power ratio to truth."""
+    from matplotlib.colors import TwoSlopeNorm, LogNorm
+    others = [m for m in methods if m['id'] != 'baseline']
+    base = summary['methods'].get('baseline')
+
+    def score(mid, name, key):
+        return summary['methods'][mid][key] if name == 'precip' else summary['states'][mid][name][key]
+
+    fig, axes = plt.subplots(1, 2, figsize=(21, 1.1+.62*len(methods)), constrained_layout=True)
+    labels = [DISPLAY[n][0] for n in FIELDS]
+    if base and others:
+        delta = np.array([[100*(score(m['id'], n, 'crps')-score('baseline', n, 'crps'))/score('baseline', n, 'crps')
+                           if score('baseline', n, 'crps') else np.nan for n in FIELDS] for m in others])
+        bound = max(float(np.nanmax(abs(delta))) if np.isfinite(delta).any() else 1., 1.)
+        image = axes[0].imshow(delta, cmap='RdBu_r', norm=TwoSlopeNorm(0, -bound, bound), aspect='auto')
+        for (i, j), v in np.ndenumerate(delta):
+            axes[0].text(j, i, 'n/a' if np.isnan(v) else f'{v:+.1f}%', ha='center', va='center', fontsize=9)
+        axes[0].set_yticks(range(len(others)), [m['label'] for m in others])
+        fig.colorbar(image, ax=axes[0], label='CRPS change vs baseline (%) · blue = better')
+    else:
+        axes[0].axis('off')
+    axes[0].set_xticks(range(len(FIELDS)), labels, rotation=20, ha='right')
+    axes[0].set_title('Skill: ensemble CRPS change vs baseline', fontweight='bold')
+    ratio = np.array([[score(m['id'], n, 'fine_power_ratio') or np.nan for n in FIELDS] for m in methods], dtype=float)
+    finite = ratio[np.isfinite(ratio) & (ratio > 0)]
+    spread = min(max(float(np.max(abs(np.log10(finite)))) if finite.size else .3, .05), 1.)  # colours cap at ×0.1/×10
+    image = axes[1].imshow(np.where(ratio > 0, ratio, np.nan), cmap='PuOr_r', aspect='auto',
+                           norm=LogNorm(10**-spread, 10**spread))
+    for (i, j), v in np.ndenumerate(ratio):
+        axes[1].text(j, i, 'n/a' if np.isnan(v) else f'×{v:.3g}', ha='center', va='center', fontsize=9)
+    axes[1].set_yticks(range(len(methods)), [m['label'] for m in methods])
+    axes[1].set_xticks(range(len(FIELDS)), labels, rotation=20, ha='right')
+    axes[1].set_title(f'Sharpness: power ratio to truth at < {FINE_KM[1]:g} km (×1 = truth)', fontweight='bold')
+    fig.colorbar(image, ax=axes[1], label='< 1 too smooth · > 1 too noisy')
+    fig.suptitle(f'All-field scorecard, mean over {summary["cases"]} case(s) × {summary["members"]} member(s)',
+                 fontsize=13, fontweight='bold')
+    save_figure(fig, path, plt)
 
 
 def plot_tradeoff(summary, methods, path, plt):
@@ -361,8 +541,7 @@ def plot_tradeoff(summary, methods, path, plt):
     axes[0].legend(fontsize=8, loc='best')
     fig.suptitle(f'Sharpness vs skill, mean over {summary["cases"]} case(s) × {summary["members"]} member(s): '
                  'good methods move right toward 1 without rising', fontsize=13, fontweight='bold')
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
+    save_figure(fig, path, plt)
 
 
 # ----------------------------------------------------------------------------
@@ -390,9 +569,12 @@ def summarize(cases, methods, members):
     for m in methods:
         summary['methods'][m['id']] = combine([c['results'][m['id']]['scores'] for c in cases])
         summary['states'][m['id']] = {name: combine([c['results'][m['id']]['states'][name] for c in cases])
-                                      for name in STATE_NAMES.values()}
+                                      for name in STATE_FIELDS}
+    summary['reference_states'] = {}
     for name in ('truth', 'coarse', 'regression'):
         summary['references'][name] = combine([c['references'][name]['scores'] for c in cases])
+        summary['reference_states'][name] = {f: combine([c['references'][name]['states'][f] for c in cases])
+                                             for f in STATE_FIELDS}
     return summary
 
 
@@ -420,6 +602,13 @@ def verdicts(summary, methods, crps_tolerance=1., ls_tolerance=2., bias_toleranc
         if s['bias_pct'] is not None and abs(s['bias_pct']) > bias_tolerance and \
                 abs(s['bias_pct']) > abs(base['bias_pct'] or 0)+2:
             issues.append(f'rain bias {s["bias_pct"]:+.1f}%')
+        for name in STATE_FIELDS:
+            b, v = summary['states']['baseline'][name]['crps'], summary['states'][m['id']][name]['crps']
+            change = 100*(v-b)/b if b else 0.
+            if change > STATE_CRPS_TOLERANCE:
+                issues.append(f'{name} CRPS {change:+.1f}%')
+            elif change < -STATE_CRPS_TOLERANCE:
+                gains.append(f'{name} CRPS {change:+.1f}%')
         sharper = any(g.startswith('fine-scale') for g in gains)
         verdict = ('recommended' if sharper and not issues else
                    'trade-off' if sharper else
@@ -440,8 +629,9 @@ def write_report(out, summary, cases, methods, settings, judged):
     L += ['## Methods', '', '| Method | What it does |', '|---|---|']
     L += [f'| {m["label"]} | {m["desc"]} |' for m in methods]
     L += ['', '## Verdicts (mean over cases, vs baseline)', '',
-          'Recommended = fine-scale rain power moves toward truth with CRPS within ±1 %, large-scale RMSE '
-          'within ±2 % and no added rain bias beyond 10 %.', '',
+          'Recommended = fine-scale rain power moves toward truth with rain CRPS within ±1 %, large-scale RMSE '
+          f'within ±2 %, no added rain bias beyond 10 % and no other field\'s CRPS worse by more than '
+          f'{STATE_CRPS_TOLERANCE:g} %.', '',
           '| Method | Verdict | Gains | Costs |', '|---|---|---|---|']
     for m in methods:
         if m['id'] in judged:
@@ -471,12 +661,20 @@ def write_report(out, summary, cases, methods, settings, judged):
           'there is one member. Member MAE/RMSE punish sharper fields (double penalty); judge sharpening by the '
           'spectra, CRPS and large-scale RMSE instead.', '']
     L += table(summary['methods'], summary['references'])
-    L += ['', '## Other fields: fine-scale power ratio / CRPS', '',
-          '| Method | ' + ' | '.join(STATE_NAMES.values()) + ' |', '|---|' + '---:|'*len(STATE_NAMES)]
-    for m in methods:
-        st = summary['states'][m['id']]
-        L.append(f'| {m["label"]} | ' + ' | '.join(f'×{_fmt(st[n]["fine_power_ratio"], ".2f")} / {st[n]["crps"]:.4g}'
-                                                   for n in STATE_NAMES.values()) + ' |')
+    L += ['', '## Other fields, mean over cases', '',
+          'Fine/meso = power ratio to truth below 30 km / at 30–150 km (1 = truth). Bias and RMSE in physical '
+          'units (K, Pa, m/s, kg/kg). LS-RMSE = RMSE of ~25 km block means.', '']
+    for name in STATE_FIELDS:
+        L += [f'### {DISPLAY[name][0]} (`{name}`)', '',
+              '| | Fine ×truth | Meso ×truth | Gradient ×truth | CRPS | LS-RMSE | Member RMSE | Bias |',
+              '|---|' + '---:|'*7]
+        rows = [(r.capitalize(), summary['reference_states'][r][name]) for r in ('coarse', 'regression')]
+        rows += [(m['label'], summary['states'][m['id']][name]) for m in methods]
+        for label, st in rows:
+            L.append(f'| {label} | {_fmt(st["fine_power_ratio"], ".2f")} | {_fmt(st["meso_power_ratio"], ".2f")} | '
+                     f'{_fmt(st["gradient_ratio"], ".2f")} | {st["crps"]:.4g} | {st["large_scale_rmse"]:.4g} | '
+                     f'{st["member_rmse"]:.4g} | {st["bias"]:+.3g} |')
+        L.append('')
     for c in cases:
         L += ['', f'## Case `{c["id"]}` ({c["reason"]})', '']
         L += table({k: v['scores'] for k, v in c['results'].items()},
@@ -493,7 +691,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
                       steps=None, members=4, methods=METHOD_IDS, combine=('churn', 'autoguide', 'residual_scale'),
                       warp_gamma=1.5, churn=0.1, churn_range=(0.1, 0.8), guide_checkpoint='auto', guide_weight=1.5,
                       residual_scale=1.10, dry_cutoff=0.1, tukey_alpha=0.3, steps_factor=2,
-                      seed=317, batch=32, threads=8, use_cartopy=True, map_features=True, use_native=True,
+                      zoom_size=256, dpi=300, pdf=True, seed=317, batch=32, threads=8, use_cartopy=True, map_features=True, use_native=True,
                       log=print):
     import matplotlib
     matplotlib.use('Agg')
@@ -502,6 +700,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
     _style(plt)
     if members < 1:
         raise ValueError('members must be >= 1')
+    FIGURES.update(dpi=dpi, pdf=pdf)
 
     path = resolve_checkpoint(cfg, checkpoint)
     device = device_for(cfg['train']['device'])
@@ -554,14 +753,21 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
         folder.mkdir(parents=True, exist_ok=True)
         heading = (f'v4.1 · epoch {saved["epoch"]+1} ({label}) · {split} {entry["time"].replace("T", " ")[:16]} UTC · '
                    f'{case["reason"]}')
-        native = native_fields(entry, canvas.lat, canvas.lon, log=log)[0].get('precip') if use_native else None
-        log('  rendering maps and spectra...')
-        plot_maps(canvas, results, references, native, heading, folder/'sharpness_compare_precip.png', plt)
-        plot_maps(canvas, results, references, native, heading, folder/'sharpness_compare_zoom.png', plt,
-                  window=event_window(references['truth']['rain'], 256))
+        native = native_fields(entry, canvas.lat, canvas.lon, log=log)[0] if use_native else {}
+        window = event_window(references['truth']['rain'], zoom_size)
+        (folder/'maps').mkdir(exist_ok=True)
+        for name in FIELDS:
+            log(f'  rendering {name} maps...')
+            plot_maps(canvas, results, references, native, name, heading, folder/'maps'/f'{name}_conus.png', plt)
+            plot_maps(canvas, results, references, native, name, heading, folder/'maps'/f'{name}_zoom.png', plt,
+                      window=window)
+        log('  rendering all-field zoom and spectra...')
+        plot_all_fields_zoom(canvas, results, references, native, window, heading,
+                             folder/'sharpness_all_fields_zoom.png', plt)
         plot_spectra(results, references, t_freq, dx_km, heading, folder/'sharpness_spectra.png', plt)
+        plot_all_spectra(results, references, t_freq, dx_km, heading, folder/'sharpness_spectra_all_fields.png', plt)
         record = dict(id=entry['id'], time=entry['time'], reason=case['reason'],
-                      references={k: dict(scores=v['scores']) for k, v in references.items()},
+                      references={k: dict(scores=v['scores'], states=v['states']) for k, v in references.items()},
                       results={k: dict(scores=v['scores'], states=v['states']) for k, v in results.items()},
                       seconds=round(time.monotonic()-started, 1))
         write_json(folder/'metrics.json', record)
@@ -577,6 +783,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
                     large_scale_km=LARGE_SCALE_KM,
                     methods=[{k: v for k, v in m.items() if k != 'color'} for m in specs])
     plot_tradeoff(summary, specs, out/'summary_tradeoff.png', plt)
+    plot_scorecard(summary, specs, out/'summary_scorecard.png', plt)
     write_report(out, summary, reports, specs, settings, judged)
     write_json(out/'summary_metrics.json', dict(settings=settings, summary=summary, verdicts=judged))
     log('\nVerdicts vs baseline:')
@@ -614,6 +821,9 @@ def main():
     parser.add_argument('--residual-scale', type=float, default=1.10, help='Residual scale (default 1.10)')
     parser.add_argument('--dry-cutoff', type=float, default=0.1, help='Wet cutoff in mm/h (default 0.1)')
     parser.add_argument('--tukey-alpha', type=float, default=0.3, help='Tukey taper fraction (default 0.3)')
+    parser.add_argument('--zoom-size', type=int, default=256, help='Rain-event zoom edge in grid pixels')
+    parser.add_argument('--dpi', type=int, default=300, help='Figure resolution for PNG and PDF map rasters (default 300)')
+    parser.add_argument('--no-pdf', action='store_true', help='PNG only (PDFs of every figure by default)')
     parser.add_argument('--seed', type=int, default=317, help='Case selection seed')
     parser.add_argument('--batch', type=int, default=32)
     parser.add_argument('--threads', type=int, default=8)
@@ -634,7 +844,7 @@ def main():
         warp_gamma=args.warp_gamma, churn=args.churn, churn_range=tuple(args.churn_range),
         guide_checkpoint=args.guide_checkpoint, guide_weight=args.guide_weight,
         residual_scale=args.residual_scale, dry_cutoff=args.dry_cutoff, tukey_alpha=args.tukey_alpha,
-        steps_factor=args.steps_factor, seed=args.seed, batch=args.batch, threads=args.threads,
+        steps_factor=args.steps_factor, zoom_size=args.zoom_size, dpi=args.dpi, pdf=not args.no_pdf, seed=args.seed, batch=args.batch, threads=args.threads,
         use_cartopy=not args.no_cartopy, map_features=not args.no_map_features, use_native=not args.no_native,
         log=lambda message: print(message, flush=True))
 
