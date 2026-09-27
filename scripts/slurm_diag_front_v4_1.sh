@@ -16,7 +16,8 @@
 # (no blending, 64 steps). Answers: is the front blur from the tiling or the model?
 #   CHECKPOINT=latest (default) | best | <epoch> | <path>   CONFIG=configs/discover_v4_1.yaml
 #   TIMESTAMP=20260307_1930 (default: wettest hour)  SPLIT=test|val  MEMBERS=4
-#   CENTER="ROW COL" (front point on the full grid; default: strongest truth q2m+t2m front)
+#   CENTER="ROW COL" or CENTER_LATLON="LAT LON" (front point; default: strongest truth q2m+t2m
+#   front near the strongest rain feature)   ANYWHERE=1 (search the whole domain instead)
 #   DPI=200  NO_PDF=1  OUTPUT=<dir>
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
@@ -34,6 +35,8 @@ args=(--config "${CONFIG:-configs/discover_v4_1.yaml}" --checkpoint "${CHECKPOIN
       --split "${SPLIT:-test}" --members "${MEMBERS:-4}")
 if [[ -n "${TIMESTAMP:-}" ]]; then args+=(--timestamp "$TIMESTAMP"); fi
 if [[ -n "${CENTER:-}" ]]; then read -r -a center <<< "$CENTER"; args+=(--center "${center[@]}"); fi
+if [[ -n "${CENTER_LATLON:-}" ]]; then read -r -a latlon <<< "$CENTER_LATLON"; args+=(--center-latlon "${latlon[@]}"); fi
+if [[ "${ANYWHERE:-0}" == 1 ]]; then args+=(--anywhere); fi
 if [[ -n "${DPI:-}" ]]; then args+=(--dpi "$DPI"); fi
 if [[ "${NO_PDF:-0}" == 1 ]]; then args+=(--no-pdf); fi
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi

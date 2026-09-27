@@ -45,9 +45,10 @@ FIELDS = ('q2m', 't2m', 'u10m', 'v10m', 'ps', 'precip')
 QUANTILES = (.95, .99, .999)
 
 
-def find_front(truth, shape, width, halo, center=None, smooth=3.):
+def find_front(truth, shape, width, halo, center=None, smooth=3., region=None):
     """Tile origin (y, x) and front point/normal. The front point is the maximum of
-    the combined, normalised q2m+t2m gradient (smoothed) unless ``center`` is given."""
+    the combined, normalised q2m+t2m gradient (smoothed) inside ``region`` (rows, cols
+    slices; default whole domain) unless ``center`` is given."""
     h, w = shape
     score = 0
     for name in ('q2m', 't2m'):
@@ -59,6 +60,10 @@ def find_front(truth, shape, width, halo, center=None, smooth=3.):
         margin = width//2
         inner = np.full(score.shape, -np.inf)
         inner[margin:h-margin, margin:w-margin] = score[margin:h-margin, margin:w-margin]
+        if region is not None:
+            keep = np.zeros(score.shape, dtype=bool)
+            keep[region] = True
+            inner[~keep] = -np.inf
         cy, cx = np.unravel_index(np.argmax(inner), inner.shape)
     else:
         cy, cx = center
@@ -111,6 +116,18 @@ def transition_width(offsets, values, dx_km, edge=.15):
     return float(abs(b-a)*dx_km)
 
 
+def slope_width(offsets, values, dx_km, edge=.15):
+    """Max-slope (equivalent) width: jump between the profile ends divided by the
+    steepest slope. Measures the sharpest part of the transition, so a gradual
+    ramp ahead of a sharp front does not inflate it."""
+    k = max(2, int(edge*len(values)))
+    jump = abs(float(np.mean(values[-k:])-np.mean(values[:k])))
+    slope = float(np.max(np.abs(np.gradient(values, offsets))))
+    if jump < 1e-12 or slope < 1e-12:
+        return None
+    return jump/slope*dx_km
+
+
 def gradient_tail(field, quantiles=QUANTILES):
     gy, gx = np.gradient(np.asarray(field, dtype='float64'))
     return np.quantile(np.hypot(gy, gx), quantiles)
@@ -152,7 +169,8 @@ def decode_tile(sampler, core, mean, y, x):
 
 
 def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, center=None, output=None,
-        batch=32, threads=8, dpi=200, pdf=True, profile_length=60, profile_band=24, log=print):
+        batch=32, threads=8, dpi=200, pdf=True, profile_length=60, profile_band=24, center_latlon=None,
+        anywhere=False, log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -171,7 +189,15 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
     started = time.monotonic()
     sampler = DomainSampler(model, conditioner, archive, entry, cfg, device, batch, threads)
     w, halo = sampler.width, sampler.halo
-    origin, point, normal = find_front(truth_full, archive.shape, w, halo, center)
+    if center is None and center_latlon is not None:
+        lat, lon = np.asarray(archive.static['lat']), np.asarray(archive.static['lon'])
+        dist = (lat-center_latlon[0])**2+((lon-center_latlon[1])*np.cos(np.deg2rad(center_latlon[0])))**2
+        center = tuple(int(v) for v in np.unravel_index(np.argmin(dist), dist.shape))
+    # By default look for the front near the strongest rain feature (storm-related
+    # boundaries), not domain-wide, where static coastlines/terrain edges dominate.
+    from .evaluate_v4_1 import event_window
+    region = None if anywhere or center is not None else event_window(truth_full[1], 384)
+    origin, point, normal = find_front(truth_full, archive.shape, w, halo, center, region=region)
     tile_index = sampler.tiles.index(origin) if origin in sampler.tiles else None
     if tile_index is None:
         # Build the inputs of this exact tile position (it need not be on the stride grid).
@@ -226,12 +252,14 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
         t = truth[c]
         t_tail = gradient_tail(t)
         s, t_prof = profile(t, local_point, normal, profile_length, profile_band)
-        entry_m = dict(truth=dict(width_km=transition_width(s, t_prof, dx_km), grad_tail=t_tail.tolist()))
+        entry_m = dict(truth=dict(width_km=transition_width(s, t_prof, dx_km), slope_width_km=slope_width(s, t_prof, dx_km),
+                                  grad_tail=t_tail.tolist()))
         prof = dict(truth=t_prof, coarse=profile(coarse[c], local_point, normal, profile_length, profile_band)[1])
         for vname, ens in variants.items():
             f = ens[:, c]
-            member_widths = [transition_width(s, profile(mm, local_point, normal, profile_length, profile_band)[1], dx_km)
-                             for mm in f]
+            member_profiles = [profile(mm, local_point, normal, profile_length, profile_band)[1] for mm in f]
+            member_widths = [transition_width(s, mp, dx_km) for mp in member_profiles]
+            slopes = [v for v in (slope_width(s, mp, dx_km) for mp in member_profiles) if v is not None]
             member_tails = np.array([gradient_tail(mm) for mm in f])
             mean_prof = profile(f.mean(0), local_point, normal, profile_length, profile_band)[1]
             entry_m[vname] = dict(
@@ -239,13 +267,16 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
                 member_width_km_median=float(np.median([v for v in member_widths if v is not None]))
                 if any(v is not None for v in member_widths) else None,
                 mean_width_km=transition_width(s, mean_prof, dx_km),
+                member_slope_width_km_median=float(np.median(slopes)) if slopes else None,
+                mean_slope_width_km=slope_width(s, mean_prof, dx_km),
                 member_grad_tail_ratio=(member_tails.mean(0)/np.maximum(t_tail, 1e-30)).tolist(),
                 mean_grad_tail_ratio=(gradient_tail(f.mean(0))/np.maximum(t_tail, 1e-30)).tolist(),
                 member_rmse=float(np.mean([np.sqrt(weighted_mean((mm-t)**2, tile_area)) for mm in f])),
                 mean_rmse=float(np.sqrt(weighted_mean((f.mean(0)-t)**2, tile_area))))
             prof[vname] = [profile(mm, local_point, normal, profile_length, profile_band)[1] for mm in f]
             prof[vname+' mean'] = mean_prof
-        entry_m['coarse'] = dict(width_km=transition_width(s, prof['coarse'], dx_km))
+        entry_m['coarse'] = dict(width_km=transition_width(s, prof['coarse'], dx_km),
+                                 slope_width_km=slope_width(s, prof['coarse'], dx_km))
         metrics['fields'][name] = entry_m
         profiles[name] = (s, prof)
         log(f'  {name:>6}: 10-90% width truth {_km(entry_m["truth"]["width_km"])} · '
@@ -282,7 +313,8 @@ def verdict(metrics):
     lines = []
     for name in ('q2m', 't2m', 'v10m'):
         f = metrics['fields'][name]
-        tw, single, tiled = f['truth']['width_km'], f['single@64']['member_width_km_median'], f['tiled@64']['member_width_km_median']
+        tw, single, tiled = (f['truth']['slope_width_km'], f['single@64']['member_slope_width_km_median'],
+                             f['tiled@64']['member_slope_width_km_median'])
         st, tt = f['single@64']['member_grad_tail_ratio'][1], f['tiled@64']['member_grad_tail_ratio'][1]
         if single is None or tiled is None:
             lines.append(f'{name}: no clear front profile')
@@ -353,7 +385,10 @@ def plot_profiles(profiles, metrics, dx_km, heading, plt):
         f = metrics['fields'][name]
         ax.set_title(f'{DISPLAY[name][0]} · 10–90% width: truth {_km(f["truth"]["width_km"])}, '
                      f'single {_km(f["single@64"]["member_width_km_median"])}, '
-                     f'tiled {_km(f["tiled@64"]["member_width_km_median"])}', fontsize=9.5)
+                     f'tiled {_km(f["tiled@64"]["member_width_km_median"])}\n'
+                     f'max-slope width: truth {_km(f["truth"]["slope_width_km"])}, '
+                     f'single {_km(f["single@64"]["member_slope_width_km_median"])}, '
+                     f'tiled {_km(f["tiled@64"]["member_slope_width_km_median"])}', fontsize=9)
         ax.set_xlabel('Distance across front (km)')
         ax.set_ylabel(DISPLAY[name][1])
         ax.grid(True, ls='--', alpha=.4)
@@ -394,6 +429,14 @@ def write_report(out, metrics):
         cells += [_km(f[v]['mean_width_km']) for v in ('tiled@64', 'single@64')]
         cells += [f'{f[v]["member_grad_tail_ratio"][1]:.2f}' for v in ('tiled@32', 'tiled@64', 'single@64')]
         L.append(f'| {name} | ' + ' | '.join(cells) + ' |')
+    L += ['', '## Max-slope front width (km): jump / steepest slope (robust to gradual ramps)', '',
+          '| Field | Truth | Coarse | tiled@32 members | tiled@64 members | single@64 members | tiled@64 mean | single@64 mean |',
+          '|---|---:|---:|---:|---:|---:|---:|---:|']
+    for name, f in metrics['fields'].items():
+        cells = [_km(f['truth']['slope_width_km']), _km(f['coarse']['slope_width_km'])]
+        cells += [_km(f[v]['member_slope_width_km_median']) for v in ('tiled@32', 'tiled@64', 'single@64')]
+        cells += [_km(f[v]['mean_slope_width_km']) for v in ('tiled@64', 'single@64')]
+        L.append(f'| {name} | ' + ' | '.join(cells) + ' |')
     L += ['', 'Member widths close to truth with a wider ensemble-mean width = sharp members at slightly different '
           'positions (expected). Member widths far above truth = the members themselves are smooth.']
     (out/'report.md').write_text('\n'.join(L)+'\n')
@@ -408,6 +451,10 @@ def main():
     parser.add_argument('--members', type=int, default=4)
     parser.add_argument('--center', type=int, nargs=2, metavar=('ROW', 'COL'),
                         help='Front point on the full grid (default: strongest truth q2m+t2m front)')
+    parser.add_argument('--center-latlon', type=float, nargs=2, metavar=('LAT', 'LON'),
+                        help='Front point as latitude/longitude (e.g. 35.5 -90.5)')
+    parser.add_argument('--anywhere', action='store_true',
+                        help='Search the whole domain for the front (default: near the strongest rain feature)')
     parser.add_argument('--output')
     parser.add_argument('--batch', type=int, default=32)
     parser.add_argument('--threads', type=int, default=8)
@@ -416,7 +463,8 @@ def main():
     args = parser.parse_args()
     run(load_config(args.config), args.checkpoint, args.timestamp, args.split, args.members,
         tuple(args.center) if args.center else None, args.output, args.batch, args.threads, args.dpi,
-        not args.no_pdf, log=lambda message: print(message, flush=True))
+        not args.no_pdf, center_latlon=tuple(args.center_latlon) if args.center_latlon else None,
+        anywhere=args.anywhere, log=lambda message: print(message, flush=True))
 
 
 if __name__ == '__main__':

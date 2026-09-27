@@ -20,6 +20,7 @@ from .train_v4 import calibrate
 from .train_precip_direct_v2 import rank_zero_action
 from .train import device_for, autocast, to_device, atomic_save
 from .train_v3_precip import lr_lambda, reduce_totals, reduce_max
+from . import rollout_v4_1
 
 LAST, BEST = 'last_v4_1.pt', 'best_v4_1.pt'
 
@@ -115,7 +116,10 @@ def _train(cfg, resume, device, rank, world, local, group):
         # Fine-tune: weights, EMA, frozen regression and calibration from a trained
         # run with the same data/patch/model; fresh optimizer and schedule.
         init = torch.load(ft['init'], map_location='cpu', weights_only=True)
-        check_checkpoint(init, cfg, archive, packed.fingerprint)
+        # Same data, geometry and model; only the epoch length may differ.
+        comparable = deepcopy(cfg)
+        comparable['patch']['samples_per_epoch'] = init['config']['patch']['samples_per_epoch']
+        check_checkpoint(init, comparable, archive, packed.fingerprint)
         if Path(ft['init']).resolve().parent in (out.resolve(), (out/'checkpoints').resolve()):
             raise ValueError('Fine-tune into a new train.output, not the source run')
     source = saved or init
@@ -135,15 +139,22 @@ def _train(cfg, resume, device, rank, world, local, group):
         # once and go straight on into epoch 1 (no second worker pool).
         sampler.set_epoch(0)
         calibrate(conditioner, FirstBatches(loader, tr['calibration_batches']), cfg, device, group)
-    training_model = DDP(model, device_ids=[local] if device.type == 'cuda' else None,
-                         find_unused_parameters=True) if world > 1 else model
+    ft = tr.get('finetune') or {}
+    rollout = rollout_v4_1.settings_from(cfg)
+    loss_options = dict(gradient_weight=ft.get('gradient_weight', 0.), late_fraction=ft.get('late_time_fraction', 0.),
+                        shift=ft.get('late_time_shift', 1.))
+    # With sample scores every model call happens inside one module forward (one
+    # DDP forward per backward), as in rain_rollout_v2.
+    module = rollout_v4_1.RolloutObjective(model, rollout, loss_options, conditioner.rain_scale) if rollout else model
+    training_model = DDP(module, device_ids=[local] if device.type == 'cuda' else None,
+                         find_unused_parameters=True) if world > 1 else module
     ema = deepcopy(model).eval().requires_grad_(False)
     if init is not None:
         ema.load_state_dict(init['ema'])
     initialization = (dict(path=str(Path(ft['init']).resolve()), epoch=init['epoch']+1) if init is not None
                       else saved.get('initialization') if saved else None)
-    loss_options = dict(gradient_weight=ft.get('gradient_weight', 0.), late_fraction=ft.get('late_time_fraction', 0.),
-                        shift=ft.get('late_time_shift', 1.))
+    if rank == 0 and rollout:
+        print(f'Sample-score fine-tune: {json.dumps(rollout)}', flush=True)
     if rank == 0 and ft:
         print(f'Fine-tune loss: flow + {loss_options["gradient_weight"]} x gradient term; '
               f'{loss_options["late_fraction"]:.0%} of flow times shifted toward data (s={loss_options["shift"]})', flush=True)
@@ -191,6 +202,8 @@ def _train(cfg, resume, device, rank, world, local, group):
         training_model.train()
         optimizer.zero_grad(set_to_none=True)
         total, count = 0., 0
+        flow_total = 0.
+        score_sums = torch.zeros(len(rollout_v4_1.SCORES)+1, device=device, dtype=torch.float64)
         data_wait_s, step_s = 0., 0.
         waiting_since = time.monotonic()
         for i, batch in enumerate(loader):
@@ -203,7 +216,11 @@ def _train(cfg, resume, device, rank, world, local, group):
             with training_model.no_sync() if world > 1 and not do_step else nullcontext():
                 with autocast(device, tr['precision']):
                     conditioner.prepare(b)
-                    loss = objective(training_model, b, **loss_options)
+                    if rollout:
+                        level = rollout_v4_1.strength(rollout, epoch, i)
+                        loss, flow_part, scores = training_model(b, level)
+                    else:
+                        loss = objective(training_model, b, **loss_options)
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite v4.1 flow loss')
                 (loss*len(b['target'])/window_samples).backward()
@@ -216,17 +233,26 @@ def _train(cfg, resume, device, rank, world, local, group):
                     for averaged, current in zip(ema.parameters(), model.parameters()):
                         averaged.lerp_(current, 1-tr['ema_decay'])
             total += loss.item()*len(b['target'])
+            if rollout:
+                flow_total += flow_part.item()*len(b['target'])
+                if level:
+                    score_sums[:-1] += scores.double()
+                    score_sums[-1] += 1
             count += len(b['target'])
             # Includes transfer, compute and any DDP wait on slower ranks.
             step_s += time.monotonic()-batch_ready
             if rank == 0 and (i == 0 or (i+1) % 64 == 0 or i+1 == len(loader)):
                 elapsed = time.monotonic()-epoch_started
                 print(f'Epoch {epoch+1}/{tr["epochs"]}: batch {i+1}/{len(loader)}; '
-                      f'loss={total/count:.6g}; elapsed={elapsed/60:.1f} min; '
+                      f'loss={total/count:.6g}; '
+                      + (f'flow={flow_total/count:.6g}; ' if rollout else '')
+                      + f'elapsed={elapsed/60:.1f} min; '
                       f'data_wait={data_wait_s/(i+1):.3f}s/batch; step={step_s/(i+1):.3f}s/batch; '
                       f'{(i+1)*tr["batch_size"]*world/elapsed:.1f} samples/s', flush=True)
             waiting_since = time.monotonic()
-        total, count, wait_total, step_total = reduce_totals([total, count, data_wait_s, step_s], device)
+        total, count, wait_total, step_total, flow_total = reduce_totals([total, count, data_wait_s, step_s, flow_total], device)
+        if rollout and world > 1:
+            dist.all_reduce(score_sums)
         train_wall = reduce_max(time.monotonic()-epoch_started, device)
         due = validation_due(epoch+1, tr)
         validation_started = time.monotonic()
@@ -237,6 +263,9 @@ def _train(cfg, resume, device, rank, world, local, group):
         row = dict(epoch=epoch+1, training_loss=total/count, learning_rate=scheduler.get_last_lr()[0],
                    data_wait_s_per_rank=wait_total/world, step_s_per_rank=step_total/world,
                    train_wall_s=train_wall, samples_per_s=len(data)/train_wall, **metrics)
+        if rollout:
+            row['flow_loss'] = flow_total/count
+            row['sample_scores'] = dict(zip(rollout_v4_1.SCORES, (score_sums[:-1]/score_sums[-1].clamp_min(1)).tolist()))
         if due:
             row['validation_wall_s'] = reduce_max(time.monotonic()-validation_started, device)
         if device.type == 'cuda':

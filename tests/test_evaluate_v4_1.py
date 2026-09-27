@@ -244,6 +244,10 @@ def test_front_diagnostic(trained, tmp_path):
     step = np.where(s < 0, 0., 1.)
     ramp = np.clip((s+10)/20, 0, 1)
     assert transition_width(s, step, 2.) <= 2*2. and transition_width(s, ramp, 2.) > 25
+    from merraflow.diag_front_v4_1 import slope_width
+    ramp_then_step = np.where(s < 0, .3*(s+20)/20, 1.)  # gradual pre-frontal ramp, then a jump
+    assert slope_width(s, ramp_then_step, 2.) < transition_width(s, ramp_then_step, 2.)
+    assert abs(slope_width(s, ramp, 2.)-40) < 3
     field = np.tile(np.where(np.arange(40) < 20, 0., 1.), (40, 1))
     offsets, values = profile(field, (20, 20), (0., 1.), 10, 4)
     assert values[0] == 0 and values[-1] == 1
@@ -255,7 +259,13 @@ def test_front_diagnostic(trained, tmp_path):
         assert len(metrics['fields']['q2m'][v]['member_grad_tail_ratio']) == 3
     for stem in ('profiles', 'gradient_tails', 'fields_q2m', 'fields_precip'):
         assert (out/f'{stem}.png').exists() and (out/f'{stem}.pdf').exists()
-    assert 'Verdict' in (out/'report.md').read_text()
+    assert 'Verdict' in (out/'report.md').read_text() and 'Max-slope' in (out/'report.md').read_text()
+    assert 'slope_width_km' in metrics['fields']['q2m']['truth']
+    lat, lon = (float(np.asarray(v).mean()) for v in (load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))[0].static[k]
+                                                   for k in ('lat', 'lon')))
+    out2 = run(trained, 'best', split='test', members=1, output=tmp_path/'diag2', batch=4, threads=2, dpi=40, pdf=False,
+               profile_length=6, profile_band=2, center_latlon=(lat, lon), log=lambda *a: None)
+    assert (out2/'report.md').exists()
 
 
 def test_gradient_finetune_starts_from_checkpoint(trained, tmp_path):
@@ -287,3 +297,61 @@ def test_gradient_finetune_starts_from_checkpoint(trained, tmp_path):
     bad['train']['output'] = str(source.parent)
     with pytest.raises((ValueError, FileExistsError)):
         train(bad)
+
+
+def test_sample_scores_are_proper_and_reward_edges():
+    from merraflow.rollout_v4_1 import afcrps, variogram, multiscale_crps
+    from merraflow.metrics import crps_ensemble
+    g = torch.Generator().manual_seed(0)
+    members = torch.randn(4, 2, 6, 16, 16, generator=g)
+    truth = torch.randn(2, 6, 16, 16, generator=g)
+    area = torch.ones(2, 16, 16)
+    reference = crps_ensemble(members.numpy(), truth.numpy()).mean((-2, -1))
+    np.testing.assert_allclose(afcrps(members, truth, area, 0.).numpy(), reference, rtol=1e-5)  # alpha=0: standard CRPS
+    # A sharp front: truth-like members score ~0 on edges; smoothed members are penalized.
+    x = torch.linspace(-1, 1, 32)
+    front = (x[None, :] > 0).float().expand(32, 32)
+    truth = front.expand(1, 6, 32, 32).clone()
+    area = torch.ones(1, 32, 32)
+    sharp = truth.expand(2, 1, 6, 32, 32).clone()
+    smooth = torch.sigmoid(x[None, :]/.2).expand(32, 32).expand(2, 1, 6, 32, 32).clone()
+    assert variogram(sharp, truth, area, [1, 2, 4]).abs().max() < 1e-6
+    assert (variogram(smooth, truth, area, [1, 2, 4]) > .1).all()
+    assert (afcrps(smooth, truth, area, .95) > afcrps(sharp, truth, area, .95)).all()
+    assert multiscale_crps(smooth, truth, area, .95, [2, 4]).shape == (1, 6)
+    from merraflow.rollout_v4_1 import bias
+    assert bias(sharp, truth, area).abs().max() < 1e-6
+    shifted = sharp+.5  # a biased ensemble is penalized in every field, rain twice (z and mm/h)
+    assert (bias(shifted, truth, area) > .2).all() and bias(shifted, truth, area)[0, 1] > bias(shifted, truth, area)[0, 0]
+
+
+def test_rollout_loss_backpropagates_through_last_steps(trained):
+    from merraflow.rollout_v4_1 import rollout_loss, DEFAULTS, RolloutObjective
+    from merraflow.v4_1 import DatasetV41
+    archive, model, conditioner, _ = load_model(trained, resolve_checkpoint(trained), torch.device('cpu'))
+    model.train()
+    b = torch.utils.data.default_collate([DatasetV41(trained, 'train', 3, 0)[i] for i in range(3)])
+    conditioner.prepare(b)
+    settings = dict(DEFAULTS, patches=2, members=2, steps=3, grad_steps=1)
+    value, parts = rollout_loss(model, b, settings, torch.Generator().manual_seed(1))
+    assert torch.isfinite(value) and parts.shape == (4,)
+    value.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
+    wrapper = RolloutObjective(model, settings, {})
+    loss, flow, scores = wrapper(b, 0.)
+    assert torch.equal(scores, torch.zeros(4)) and torch.isclose(loss, flow)
+
+
+def test_rollout_finetune_trains_from_checkpoint(trained, tmp_path):
+    source = resolve_checkpoint(trained, 'latest')
+    cfg = deepcopy(trained)
+    cfg['model']['activation_checkpointing'] = True
+    cfg['patch']['samples_per_epoch'] = trained['patch']['samples_per_epoch']//2
+    cfg['train'].update(output=str(tmp_path/'ro'), epochs=1, time_limit_hours=None,
+                        finetune=dict(init=str(source), rollout=dict(patches=1, members=2, steps=3, grad_steps=1)))
+    train(cfg)
+    saved = torch.load(tmp_path/'ro'/'last_v4_1.pt', map_location='cpu', weights_only=True)
+    row = saved['history'][-1]
+    assert saved['initialization']['path'] == str(source.resolve())
+    assert set(row['sample_scores']) == {'crps', 'multiscale_crps', 'variogram', 'bias'} and row['flow_loss'] > 0
+    assert row['training_loss'] != row['flow_loss']

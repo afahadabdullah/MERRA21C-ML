@@ -109,8 +109,10 @@ def validate_config(cfg):
         raise ValueError('train.workers must be an integer')
     ft = tr.get('finetune')
     if ft is not None:
-        if not isinstance(ft, dict) or set(ft) - {'init', 'gradient_weight', 'late_time_fraction', 'late_time_shift'}:
-            raise ValueError('train.finetune keys: init, gradient_weight, late_time_fraction, late_time_shift')
+        if not isinstance(ft, dict) or set(ft) - {'init', 'gradient_weight', 'late_time_fraction', 'late_time_shift', 'rollout'}:
+            raise ValueError('train.finetune keys: init, gradient_weight, late_time_fraction, late_time_shift, rollout')
+        from .rollout_v4_1 import settings_from
+        settings_from(cfg)
         if not ft.get('init'):
             raise ValueError('train.finetune.init must name the checkpoint to start from')
         if not 0 <= ft.get('gradient_weight', 0.) or not 0 <= ft.get('late_time_fraction', 0.) <= 1 \

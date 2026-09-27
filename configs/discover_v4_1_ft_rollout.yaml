@@ -1,0 +1,102 @@
+# v4.1 sample-score fine-tune ("crisper members"): start from the trained v4.1 run
+# and add proper ensemble scores computed on the model's OWN members:
+#   loss = flow MSE (all patches)
+#        + weight * [afCRPS + multiscale afCRPS + fair variogram/edge score + bias guard]
+# on `patches` patches per step, `members` free members each, drawn with a
+# `steps`-step Heun ODE whose last `grad_steps` steps are differentiated.
+# See src/merraflow/rollout_v4_1.py. data/patch/model/conditioning must match
+# the source run (activation_checkpointing may differ). Launch:
+#   CONFIG=configs/discover_v4_1_ft_rollout.yaml sbatch --job-name=v4.1ro scripts/slurm_train_v4_1.sh
+version: v4.1
+conditioning:
+  checkpoint: runs/merraflow_annual_v2/regression_v2/best_v2.pt
+data:
+  prepared: data/paired_hourly_annual_v2
+  hourly_targets: data/hwt_hourly_mean_v3_precip
+  target_kind: hourly_mean_trapezoid
+  representation: sqrt1p
+  rain_scale_mm_h: 1.0
+  history_hours: [-1, 0]
+  humidity_targets: data/hwt_q2m_v4
+  humidity_target_variable: SPFH_2M
+  humidity_scale_kg_kg: 0.001
+packed:
+  root: data/packed_v4_1   # ~139 MB per packed hour; see `cli_v4_1 plan-packed`
+  splits: [train, val]
+  tile: 32                 # native-resolution tile edge (pixels)
+  context_tile: 32         # pooled-context tile edge (pooled pixels)
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 16384     # 256 optimizer steps/epoch: each step now also samples members
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 24      # must be a multiple of the pooling factor 576/96 = 6
+  detail_fraction: 0.5
+  proposal: coarse
+  loss_on_halo: true
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  time_dim: 256
+  activation_checkpointing: true   # memory for the differentiable rollout
+  blocks_per_level: 2
+  attention_heads: 8
+train:
+  device: auto
+  seed: 2026
+  epochs: 30
+  batch_size: 16           # v4: 8 x accumulate 2; same effective batch 64 on 4 GPUs
+  accumulate: 1
+  workers: 12              # per rank; the job gets 12 cores per GPU
+  val_workers: 4
+  persistent_workers: true
+  prefetch_factor: 6
+  fd_cache_size: 64
+  learning_rate: 0.00005     # refine, don't retrain
+  weight_decay: 0.01
+  warmup_steps: 300
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.9995
+  time_limit_hours: 11.0
+  calibration_batches: 64  # 64 x 16 = the same 1024 calibration patches as v4
+  channel_weights: [1.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+  # Validation + diagnostic plots + a kept checkpoint fire together on this
+  # cadence: every validation_interval epochs, switching to the finer
+  # validation_interval_late after schedule_switch_epoch. Here: every 5 through
+  # epoch 20, then every 2. Kept checkpoints are named
+  # checkpoints/epoch_NNNN_crps<value>_v4_1.pt. Cadence is resume-safe: change
+  # it on a continuation without breaking exact resume.
+  validation_interval: 2
+  validation_patches: 256
+  validation_members: 8
+  validation_steps: 24
+  validation_plot_samples: 4   # fixed rainy validation patches, same every epoch
+  output: runs/merraflow_v4_1_ft_rollout
+  finetune:
+    init: runs/merraflow_v4_1/last_v4_1.pt   # set to the final kept main-run checkpoint
+    rollout:
+      weight: 1.0              # sample-score weight relative to the flow loss
+      patches: 4               # patches per GPU step scored with generated members
+      members: 2               # members per patch (>= 2; fair scores need independent draws)
+      steps: 16                # Heun steps for training rollouts
+      grad_steps: 3            # last steps differentiated (truncated backprop)
+      interval: 1              # score every step
+      warmup_epochs: 0
+      ramp_epochs: 2           # strength ramps 0.5 -> 1 over the first 2 epochs
+      alpha: 0.95              # almost-fair CRPS
+      pool_scales: [2, 4, 8, 16]
+      lags: [1, 2, 4, 8]       # edge/variogram lags in pixels (~1.9-15 km)
+      crps_weight: 1.0
+      multiscale_weight: 1.0
+      variogram_weight: 1.0
+      bias_weight: 1.0         # fair patch-mean error per field + physical rain amount: keeps bias from drifting
+      channel_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # t2m precip ps u10m v10m q2m
+inference:
+  steps: 32
+  members: 16
+  seed: 317
+  output: runs/merraflow_v4_1_ft_rollout/predictions

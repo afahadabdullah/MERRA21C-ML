@@ -295,3 +295,33 @@ def test_submission_packs_months_then_finalizes_then_trains(packed_cfg, tmp_path
     train_script = Path('scripts/slurm_train_v4_1.sh').read_text()
     assert 'cli_v4_1 preflight' not in train_script
     assert '--cpus-per-gpu=12' in train_script
+
+
+def test_two_process_rollout_finetune(packed_cfg, tmp_path):
+    """Sample-score fine-tune under DDP: many model calls inside one module forward."""
+    from merraflow.train_v4_1 import train
+    base = deepcopy(packed_cfg)
+    base['train'].update(epochs=1, output=str(tmp_path/'source'), time_limit_hours=None)
+    train(base)
+    cfg = deepcopy(base)
+    cfg['model']['activation_checkpointing'] = True
+    cfg['train'].update(epochs=1, workers=1, val_workers=1, output=str(tmp_path/'ddp_ro'),
+                        validation_interval=1, validation_patches=3, calibration_batches=1,
+                        finetune=dict(init=str(tmp_path/'source'/'last_v4_1.pt'),
+                                      rollout=dict(patches=1, members=2, steps=3, grad_steps=2)))
+    cfg['patch']['samples_per_epoch'] = 8
+    path = tmp_path/'config.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    env = dict(os.environ, PYTHONPATH=str(Path('src').resolve()), OMP_NUM_THREADS='1', MPLBACKEND='Agg',
+               MPLCONFIGDIR=str(tmp_path/'mpl'), GLOO_SOCKET_IFNAME='lo0' if sys.platform == 'darwin' else 'lo')
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    result = subprocess.run([sys.executable, '-m', 'torch.distributed.run', '--master-addr=127.0.0.1',
+                             f'--master-port={port}', '--nnodes=1', '--nproc-per-node=2',
+                             '-m', 'merraflow.cli_v4_1', 'train', '--config', str(path)],
+                            env=env, capture_output=True, text=True, timeout=900)
+    assert result.returncode == 0, result.stdout+result.stderr
+    assert 'Sample-score fine-tune' in result.stdout and 'flow=' in result.stdout
+    saved = torch.load(Path(cfg['train']['output'])/'last_v4_1.pt', weights_only=True)
+    assert saved['world_size'] == 2 and saved['history'][-1]['sample_scores']['variogram'] != 0
