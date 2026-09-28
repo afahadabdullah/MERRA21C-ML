@@ -398,3 +398,18 @@ def test_rollout_round2_finetune_resumes_with_fixed_scales(trained, tmp_path):
     train(cfg, resume=str(tmp_path/'ro2'/'last_v4_1.pt'))
     second = torch.load(tmp_path/'ro2'/'last_v4_1.pt', map_location='cpu', weights_only=True)
     assert second['epoch'] == 1 and torch.equal(second['rollout_scales'], scales)
+
+
+def test_raw_and_ema_weights(trained, tmp_path):
+    from merraflow.diag_front_v4_1 import run
+    path = resolve_checkpoint(trained, 'latest')
+    _, ema, _, saved = load_model(trained, path, torch.device('cpu'))
+    _, raw, _, _ = load_model(trained, path, torch.device('cpu'), weights='raw')
+    for name, value in raw.state_dict().items():
+        assert torch.equal(value, saved['model'][name])
+    assert any(not torch.equal(a, b) for a, b in zip(ema.state_dict().values(), raw.state_dict().values()))
+    with pytest.raises(ValueError):
+        load_model(trained, path, torch.device('cpu'), weights='swa')
+    out = run(trained, 'latest', split='test', members=1, output=tmp_path/'raw', batch=4, threads=2, dpi=40,
+              pdf=False, profile_length=6, profile_band=2, weights='raw', log=lambda *a: None)
+    assert json.loads((out/'metrics.json').read_text())['weights'] == 'raw'

@@ -27,6 +27,7 @@
 # 4 members fits the 3 h limit comfortably.
 #
 # Environment variable overrides:
+#   WEIGHTS=ema (default) | raw   (raw = optimizer weights stored in the checkpoint)
 #   CHECKPOINT=best (default) | latest | <epoch number> | <path>
 #   SPLIT=test|val  SAMPLES=0  WETTEST=1  MEMBERS=4  STEPS=<inference.steps>
 #   METHODS=baseline,more_steps,time_warp,churn,autoguide,residual_scale,wet_cutoff,tukey_window,combined
@@ -53,6 +54,7 @@ unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 args=(--config "${CONFIG:-configs/discover_v4_1.yaml}" --checkpoint "${CHECKPOINT:-best}"
       --split "${SPLIT:-test}" --samples "${SAMPLES:-0}" --wettest "${WETTEST:-1}" --members "${MEMBERS:-4}")
 
+if [[ -n "${WEIGHTS:-}" ]]; then args+=(--weights "$WEIGHTS"); fi
 if [[ -n "${STEPS:-}" ]]; then args+=(--steps "$STEPS"); fi
 if [[ -n "${METHODS:-}" ]]; then args+=(--methods "$METHODS"); fi
 if [[ -n "${COMBINE:-}" ]]; then args+=(--combine "$COMBINE"); fi

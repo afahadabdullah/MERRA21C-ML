@@ -12,6 +12,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=logs_v4_1/eval_%j.log
 # v4.1 held-out evaluation on one A100 (safe to run while training uses others).
+#   WEIGHTS=ema (default) | raw   (raw = optimizer weights stored in the checkpoint)
 #   CHECKPOINT=best (default) | latest | <epoch number> | <path>
 #   SPLIT=test|val  SAMPLES=3  WETTEST=1  MEMBERS=8  ZOOMS=2  STEPS=<inference.steps>
 #   TIMESTAMPS="20260223_0530 20260110_1230"  OUTPUT=<fresh dir>  SAVE_FIELDS=1
@@ -34,6 +35,7 @@ unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 args=(--config "${CONFIG:-configs/discover_v4_1.yaml}" --checkpoint "${CHECKPOINT:-best}"
       --split "${SPLIT:-test}" --samples "${SAMPLES:-3}" --wettest "${WETTEST:-1}"
       --members "${MEMBERS:-8}" --zooms "${ZOOMS:-2}")
+if [[ -n "${WEIGHTS:-}" ]]; then args+=(--weights "$WEIGHTS"); fi
 if [[ -n "${STEPS:-}" ]]; then args+=(--steps "$STEPS"); fi
 if [[ -n "${OUTPUT:-}" ]]; then args+=(--output "$OUTPUT"); fi
 if [[ -n "${CARTOPY_DATA_DIR:-}" ]]; then args+=(--cartopy-data-dir "$CARTOPY_DATA_DIR"); fi

@@ -170,18 +170,18 @@ def decode_tile(sampler, core, mean, y, x):
 
 def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, center=None, output=None,
         batch=32, threads=8, dpi=200, pdf=True, profile_length=60, profile_band=24, center_latlon=None,
-        anywhere=False, log=print):
+        anywhere=False, weights='ema', log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
     path = resolve_checkpoint(cfg, checkpoint)
     device = device_for(cfg['train']['device'])
-    archive, model, conditioner, saved = load_model(cfg, path, device)
+    archive, model, conditioner, saved = load_model(cfg, path, device, weights)
     cases = select_cases(archive, split, [timestamp] if timestamp else None, 0, 0 if timestamp else 1, 317, log)
     entry = cases[0]['entry']
     job = os.environ.get('SLURM_JOB_ID') or time.strftime('%Y%m%d_%H%M%S')
     out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
-                                      f'front_diag_{path.stem}_{entry["id"]}_{job}')
+                                      f'front_diag_{path.stem}{"_raw" if weights == "raw" else ""}_{entry["id"]}_{job}')
     out.mkdir(parents=True, exist_ok=True)
     area = np.asarray(archive.static['area'], dtype='float64')
     dx_km = float(np.sqrt(np.median(area))/1000)
@@ -243,7 +243,7 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
     coarse = sampler.coarse[:, ys, xs]
 
     # Scores
-    metrics = dict(case=entry['id'], time=entry['time'], checkpoint=str(path), epoch=saved['epoch']+1,
+    metrics = dict(case=entry['id'], time=entry['time'], checkpoint=str(path), epoch=saved['epoch']+1, weights=weights,
                    front_point=list(point), normal=[float(v) for v in normal], tile_origin=list(origin),
                    grid_km=dx_km, members=members, fields={})
     profiles = {}
@@ -292,7 +292,7 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
             fig.savefig(out/f'{stem}.pdf', dpi=dpi)
         plt.close(fig)
 
-    heading = (f'v4.1 epoch {saved["epoch"]+1} ({path.stem}) · {split} {entry["time"][:16]} · front diagnostic · '
+    heading = (f'v4.1 epoch {saved["epoch"]+1} ({path.stem}, {weights} weights) · {split} {entry["time"][:16]} · front diagnostic · '
                f'tile origin {origin}, {w}×{w} px ({w*dx_km:.0f} km)')
     for name in FIELDS:
         save(plot_fields(name, truth, coarse, variants, local_point, normal, profile_length, heading, plt), f'fields_{name}')
@@ -446,6 +446,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', default='configs/discover_v4_1.yaml')
     parser.add_argument('--checkpoint', default='latest', help='best | latest (default) | <epoch> | <path>')
+    parser.add_argument('--weights', choices=('ema', 'raw'), default='ema', help='ema (default: exponential moving average) | raw (the optimizer weights at that checkpoint)')
     parser.add_argument('--timestamp', help='Case ID or ISO time (default: wettest hour of the split)')
     parser.add_argument('--split', choices=('val', 'test'), default='test')
     parser.add_argument('--members', type=int, default=4)
@@ -464,7 +465,7 @@ def main():
     run(load_config(args.config), args.checkpoint, args.timestamp, args.split, args.members,
         tuple(args.center) if args.center else None, args.output, args.batch, args.threads, args.dpi,
         not args.no_pdf, center_latlon=tuple(args.center_latlon) if args.center_latlon else None,
-        anywhere=args.anywhere, log=lambda message: print(message, flush=True))
+        anywhere=args.anywhere, weights=args.weights, log=lambda message: print(message, flush=True))
 
 
 if __name__ == '__main__':

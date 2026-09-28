@@ -691,7 +691,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
                       steps=None, members=4, methods=METHOD_IDS, combine=('churn', 'autoguide', 'residual_scale'),
                       warp_gamma=1.5, churn=0.1, churn_range=(0.1, 0.8), guide_checkpoint='auto', guide_weight=1.5,
                       residual_scale=1.10, dry_cutoff=0.1, tukey_alpha=0.3, steps_factor=2,
-                      zoom_size=256, dpi=300, pdf=True, seed=317, batch=32, threads=8, use_cartopy=True, map_features=True, use_native=True,
+                      zoom_size=256, dpi=300, pdf=True, weights='ema', seed=317, batch=32, threads=8, use_cartopy=True, map_features=True, use_native=True,
                       log=print):
     import matplotlib
     matplotlib.use('Agg')
@@ -704,7 +704,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
 
     path = resolve_checkpoint(cfg, checkpoint)
     device = device_for(cfg['train']['device'])
-    archive, model, conditioner, saved = load_model(cfg, path, device)
+    archive, model, conditioner, saved = load_model(cfg, path, device, weights)
     digest = file_hash_v2(path)
     steps = steps or cfg['inference']['steps']
     methods = list(methods)
@@ -722,7 +722,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
 
     job = os.environ.get('SLURM_JOB_ID') or time.strftime('%Y%m%d_%H%M%S')
     out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
-                                      f'sharpness_{path.stem}_{split}_{digest[:8]}_{job}')
+                                      f'sharpness_{path.stem}{"_raw" if weights == "raw" else ""}_{split}_{digest[:8]}_{job}')
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'{out} is not empty; pass a fresh --output')
     out.mkdir(parents=True, exist_ok=True)
@@ -776,7 +776,7 @@ def compare_sharpness(cfg, checkpoint='best', output=None, split='test', samples
 
     summary = summarize(reports, specs, members)
     judged = verdicts(summary, specs)
-    settings = dict(checkpoint=str(path.resolve()), checkpoint_sha256=digest, epoch=saved['epoch']+1, split=split,
+    settings = dict(checkpoint=str(path.resolve()), checkpoint_sha256=digest, epoch=saved['epoch']+1, weights=weights, split=split,
                     steps=steps, members=members, grid_km=dx_km, churn_range=list(churn_range),
                     guide=str(guide['path']) if guide else None, guide_epoch=guide['epoch'] if guide else None,
                     guide_note=guide_note, fine_band_km=list(FINE_KM), meso_band_km=list(MESO_KM),
@@ -799,6 +799,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', default='configs/discover_v4_1.yaml')
     parser.add_argument('--checkpoint', default='best', help='best (default) | latest | <epoch number> | <path>')
+    parser.add_argument('--weights', choices=('ema', 'raw'), default='ema', help='ema (default: exponential moving average) | raw (the optimizer weights at that checkpoint)')
     parser.add_argument('--latest', action='store_true', help='Shortcut for --checkpoint latest')
     parser.add_argument('--output', help='Fresh output directory (default under <train.output>/evaluation/)')
     parser.add_argument('--split', choices=('val', 'test'), default='test')
@@ -844,7 +845,7 @@ def main():
         warp_gamma=args.warp_gamma, churn=args.churn, churn_range=tuple(args.churn_range),
         guide_checkpoint=args.guide_checkpoint, guide_weight=args.guide_weight,
         residual_scale=args.residual_scale, dry_cutoff=args.dry_cutoff, tukey_alpha=args.tukey_alpha,
-        steps_factor=args.steps_factor, zoom_size=args.zoom_size, dpi=args.dpi, pdf=not args.no_pdf, seed=args.seed, batch=args.batch, threads=args.threads,
+        steps_factor=args.steps_factor, zoom_size=args.zoom_size, dpi=args.dpi, pdf=not args.no_pdf, weights=args.weights, seed=args.seed, batch=args.batch, threads=args.threads,
         use_cartopy=not args.no_cartopy, map_features=not args.no_map_features, use_native=not args.no_native,
         log=lambda message: print(message, flush=True))
 

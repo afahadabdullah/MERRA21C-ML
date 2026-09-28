@@ -82,13 +82,21 @@ def resolve_checkpoint(cfg, spec='best'):
     return path
 
 
-def load_model(cfg, checkpoint, device):
+WEIGHTS = ('ema', 'raw')
+
+
+def load_model(cfg, checkpoint, device, weights='ema'):
+    """weights: 'ema' (the exponential moving average used everywhere by default) or
+    'raw' (the optimizer's own weights at that checkpoint, stored as 'model')."""
+    if weights not in WEIGHTS:
+        raise ValueError(f'weights must be one of {WEIGHTS}')
     base = base_config(cfg)
     archive = ArchiveV4(base, verify_files=False)
     saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
     check_checkpoint(saved, cfg, archive)
     model = make_model(archive.channels, base).to(device).eval()
-    model.load_state_dict(saved['ema'])
+    state = saved['ema' if weights == 'ema' else 'model']
+    model.load_state_dict({k.removeprefix('module.'): v for k, v in state.items()})
     conditioner = FrozenRegression(saved['regression_condition'], archive.index['condition_channels'],
                                    archive.stats, archive.scale, cfg['data']['humidity_scale_kg_kg']).to(device)
     conditioner.flow_scale.copy_(saved['flow_scale'].to(device))
@@ -1172,7 +1180,7 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
              use_cartopy=True, map_features=True, save=False, use_native=True,
              time_warp_gamma=1.0, residual_scale=1.0, dry_cutoff=0.0,
              window_type='hann', tukey_alpha=0.3, churn=0.0, churn_range=(0.1, 0.8),
-             guide_checkpoint=None, guide_weight=1.0, log=print):
+             guide_checkpoint=None, guide_weight=1.0, weights='ema', log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -1182,14 +1190,14 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
         raise ValueError('Use at least two members')
     path = resolve_checkpoint(cfg, checkpoint)
     device = device_for(cfg['train']['device'])
-    archive, model, conditioner, saved = load_model(cfg, path, device)
+    archive, model, conditioner, saved = load_model(cfg, path, device, weights)
     guide = load_guide(cfg, guide_checkpoint, archive, saved, device, log) if guide_weight != 1.0 else None
     if guide_weight != 1.0 and guide is None:
         raise ValueError('guide_weight != 1 needs an earlier kept checkpoint (--guide-checkpoint)')
     digest = file_hash_v2(path)
     label = checkpoint if not Path(str(checkpoint)).is_file() else path.stem
     out = Path(output) if output else (Path(cfg['train']['output'])/'evaluation'/
-                                      f'{path.stem}_{split}_m{members}_{digest[:12]}')
+                                      f'{path.stem}{"_raw" if weights == "raw" else ""}_{split}_m{members}_{digest[:12]}')
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'{out} is not empty; pass a fresh --output')
     out.mkdir(parents=True, exist_ok=True)
@@ -1260,7 +1268,7 @@ def evaluate(cfg, checkpoint='best', output=None, split='test', samples=3, wette
     plot_summary(reports, diagnostics, out, dx_km, members, plt)
     plot_case_mean_maps(canvas, sums, len(reports), out, plt)
     metrics = dict(version='v4.1', checkpoint=str(path.resolve()), checkpoint_label=str(label),
-                   checkpoint_sha256=digest, checkpoint_epoch=saved['epoch']+1, split=split, members=members,
+                   checkpoint_sha256=digest, checkpoint_epoch=saved['epoch']+1, weights=weights, split=split, members=members,
                    ode_steps=steps, inference_seed=cfg['inference']['seed'], map_mode=canvas.mode, grid_km=dx_km,
                    sharpness=dict(time_warp_gamma=time_warp_gamma, residual_scale=residual_scale,
                                   dry_cutoff=dry_cutoff, window_type=window_type, tukey_alpha=tukey_alpha,
@@ -1278,6 +1286,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', default='configs/discover_v4_1.yaml')
     parser.add_argument('--checkpoint', default='best', help='best (default) | latest | <epoch number> | <path>')
+    parser.add_argument('--weights', choices=WEIGHTS, default='ema', help='ema (default: exponential moving average) | raw (the optimizer weights at that checkpoint)')
     parser.add_argument('--latest', action='store_true', help='Shortcut for --checkpoint latest')
     parser.add_argument('--output', help='Fresh output directory (default under <train.output>/evaluation/)')
     parser.add_argument('--split', choices=('val', 'test'), default='test')
@@ -1324,7 +1333,7 @@ def main():
              args.timestamps, args.members, args.steps, args.zooms, args.zoom_size, args.seed, args.batch, args.threads,
              not args.no_cartopy, not args.no_map_features, args.save_fields, not args.no_native,
              args.time_warp_gamma, args.residual_scale, args.dry_cutoff, args.window_type, args.tukey_alpha,
-             args.churn, tuple(args.churn_range), args.guide_checkpoint, args.guide_weight,
+             args.churn, tuple(args.churn_range), args.guide_checkpoint, args.guide_weight, args.weights,
              log=lambda message: print(message, flush=True))
 
 
