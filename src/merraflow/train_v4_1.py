@@ -145,7 +145,12 @@ def _train(cfg, resume, device, rank, world, local, group):
                         shift=ft.get('late_time_shift', 1.))
     # With sample scores every model call happens inside one module forward (one
     # DDP forward per backward), as in rain_rollout_v2.
-    module = rollout_v4_1.RolloutObjective(model, rollout, loss_options, conditioner.rain_scale) if rollout else model
+    # .to(device): the wrapper's own buffer (fixed increment scales) must live on the
+    # GPU too, or DDP's NCCL broadcast of module state fails at start-up.
+    module = (rollout_v4_1.RolloutObjective(model, rollout, loss_options, conditioner.rain_scale).to(device)
+              if rollout else model)
+    if rollout and module.scales.device != next(model.parameters()).device:
+        raise RuntimeError('RolloutObjective buffers are not on the model device')
     training_model = DDP(module, device_ids=[local] if device.type == 'cuda' else None,
                          find_unused_parameters=True) if world > 1 else module
     ema = deepcopy(model).eval().requires_grad_(False)
