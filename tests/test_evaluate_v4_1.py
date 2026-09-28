@@ -255,8 +255,12 @@ def test_front_diagnostic(trained, tmp_path):
               profile_length=6, profile_band=2, log=lambda *a: None)
     metrics = json.loads((out/'metrics.json').read_text())
     assert set(metrics['fields']) == {'q2m', 't2m', 'u10m', 'v10m', 'ps', 'precip'} and metrics['verdict']
-    for v in ('tiled@32', 'tiled@64', 'single@64'):
+    for v in ('tiled@32', 'tiled@64', 'single@64', 'guided@64'):
         assert len(metrics['fields']['q2m'][v]['member_grad_tail_ratio']) == 3
+        assert metrics['fields']['t2m'][v]['crps'] >= 0
+    assert set(metrics['jumps']) == {'q2m', 't2m', 'u10m', 'v10m', 'ps', 'precip'}
+    report_text = (out/'report.md').read_text()
+    assert 'Wind-guided sharpening' in report_text and 'Jump check' in report_text
     for stem in ('profiles', 'gradient_tails', 'fields_q2m', 'fields_precip'):
         assert (out/f'{stem}.png').exists() and (out/f'{stem}.pdf').exists()
     assert 'Verdict' in (out/'report.md').read_text() and 'Max-slope' in (out/'report.md').read_text()
@@ -413,3 +417,29 @@ def test_raw_and_ema_weights(trained, tmp_path):
     out = run(trained, 'latest', split='test', members=1, output=tmp_path/'raw', batch=4, threads=2, dpi=40,
               pdf=False, profile_length=6, profile_band=2, weights='raw', log=lambda *a: None)
     assert json.loads((out/'metrics.json').read_text())['weights'] == 'raw'
+
+
+def test_guided_sharpening_transfers_wind_edges_only_where_correlated():
+    from merraflow.diag_front_v4_1 import guided_sharpen, slope_width, profile, jump_check
+    n = 96
+    yy, xx = np.mgrid[:n, :n].astype(float)
+    d = xx-n/2+.3*(yy-n/2)                                   # a slanted front
+    wind_v = np.where(d > 0, 8., -4.)                        # sharp wind shift
+    wind_u = 2.+.1*np.sin(yy/7)
+    t2m_smooth = 290+2*np.tanh(d/12)                         # same front, smeared over ~12 px
+    out = guided_sharpen(t2m_smooth, (wind_u, wind_v), radius=8, eps=1e-2, sigma=2.)
+    normal = (.3/np.hypot(1, .3), 1/np.hypot(1, .3))
+    s, before = profile(t2m_smooth, (n//2, n//2), normal, 30, 6)
+    _, after = profile(out, (n//2, n//2), normal, 30, 6)
+    assert slope_width(s, after, 1.) < .8*slope_width(s, before, 1.)   # clearly sharper edge
+    assert abs(float(out.mean())-float(t2m_smooth.mean())) < .05       # mean kept
+    # A field that does not co-vary with the wind (terrain-like smooth pattern) is left alone.
+    unrelated = 285+np.sin(yy/9)*np.cos(xx/13)
+    kept = guided_sharpen(unrelated, (wind_u, wind_v), radius=8, eps=1e-2, sigma=2.)
+    far = np.abs(d) > 20                                     # away from the wind shift
+    assert np.abs(kept-unrelated)[far].max() < .05
+    # Jump check: the baseline carries part of the jump; the rest is the model's share.
+    truth = np.zeros((6, n, n)); truth[0] = np.where(d > 0, 294., 290.)
+    base = np.zeros((6, n, n)); base[0] = 290+2*(1+np.tanh(d/30))
+    j = jump_check(truth, base, truth.copy(), (n//2, n//2), normal, 40, 6)['t2m']
+    assert abs(j['truth_jump']-4) < .1 and 0 < j['residual_share'] < 1

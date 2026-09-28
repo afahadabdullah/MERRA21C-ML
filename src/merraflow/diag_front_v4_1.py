@@ -7,6 +7,12 @@ Samples the same member noise three ways and compares them with truth in one
   tiled@64     the same with 2x steps (the best setting from the sharpness ablation)
   single@64    ONLY the tile containing the front, no neighbours, no blending,
                64 steps -- what the model does on a patch, as in training/validation
+  guided@64    tiled@64 members post-processed with wind-guided sharpening of t2m, q2m
+               and ps (see guided_sharpen; --no-guided to skip). Truth-free, per member.
+
+Jump check: for every field, the truth's jump across the front in physical units,
+how much of it the frozen regression/coarse baseline already carries, and the jump
+the flow model itself must generate, in its own normalized units (1 = noise std).
 
 If single@64 has sharp fronts and tiled@64 does not, the tiling/blending is
 blurring them. If both are smooth, the model itself is.
@@ -30,10 +36,10 @@ import time
 from pathlib import Path
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.ndimage import gaussian_filter, map_coordinates, uniform_filter
 
 from .config import write_json
-from .metrics import weighted_mean
+from .metrics import weighted_mean, crps_ensemble
 from .train import device_for
 from .train_v2 import file_hash_v2
 from .v4 import TARGETS
@@ -42,6 +48,8 @@ from .evaluate_v4_1 import (resolve_checkpoint, load_model, DomainSampler, selec
                             _rain_norm, DISPLAY, _display)
 
 FIELDS = ('q2m', 't2m', 'u10m', 'v10m', 'ps', 'precip')
+GUIDED_FIELDS = ('t2m', 'q2m', 'ps')
+VARIANT_COLORS = {'tiled@32': '#74add1', 'tiled@64': '#2166ac', 'single@64': '#d6604d', 'guided@64': '#1a9850'}
 QUANTILES = (.95, .99, .999)
 
 
@@ -168,9 +176,79 @@ def decode_tile(sampler, core, mean, y, x):
     return value.astype('float32')
 
 
+def guided_sharpen(field, guides, radius=8, eps=1e-2, sigma=2.):
+    """Wind-guided sharpening of one member field (He et al. 2010 guided filter).
+
+    In every (2r+1)^2 window the field is regressed on the standardized guide
+    channels (u10m, v10m of the SAME member); the filtered field a.I + b inherits the
+    guide's edge shape with the field's own local amplitude and mean. The field's own
+    texture finer than ``sigma`` px is added back, and the result is blended with the
+    original by the local R^2 of that regression: where the field does not co-vary
+    with the wind (terrain, sea breeze, dryline), it is left unchanged.
+    """
+    p = np.asarray(field, dtype='float64')
+    size = 2*radius+1
+    box = lambda x: uniform_filter(x, size=size, mode='reflect')
+    # One shared scale for all guide channels (the wind vector's variability): a nearly
+    # constant component must stay weak, not be inflated into spurious edges.
+    guides = [np.asarray(g, dtype='float64') for g in guides]
+    shared = max(float(np.sqrt(np.mean([g.var() for g in guides]))), 1e-12)
+    I = [(g-g.mean())/shared for g in guides]
+    k = len(I)
+    mI = [box(g) for g in I]
+    mp = box(p)
+    cov = np.stack([box(I[i]*p)-mI[i]*mp for i in range(k)])
+    var = np.empty((k, k)+p.shape)
+    for i in range(k):
+        for j in range(k):
+            var[i, j] = box(I[i]*I[j])-mI[i]*mI[j]+(eps if i == j else 0.)
+    a = np.linalg.solve(np.moveaxis(var, (0, 1), (-2, -1)), np.moveaxis(cov, 0, -1)[..., None])[..., 0]
+    a = np.moveaxis(a, -1, 0)
+    b = mp-sum(a[i]*mI[i] for i in range(k))
+    filtered = sum(box(a[i])*I[i] for i in range(k))+box(b)
+    explained = sum(a[i]*cov[i] for i in range(k))
+    r2 = box(np.clip(explained/np.maximum(box(p*p)-mp*mp, 1e-30), 0., 1.))
+    residual = p-filtered
+    texture = residual-gaussian_filter(residual, sigma)
+    return (r2*(filtered+texture)+(1-r2)*p).astype('float32')
+
+
+def guided_members(members, radius=8, eps=1e-2, sigma=2.):
+    """members (M, 6, h, w) -> copy with GUIDED_FIELDS sharpened by each member's wind."""
+    out = np.array(members, copy=True)
+    u, v = TARGETS.index('u10m'), TARGETS.index('v10m')
+    for m in range(len(out)):
+        for name in GUIDED_FIELDS:
+            c = TARGETS.index(name)
+            out[m, c] = guided_sharpen(members[m, c], (members[m, u], members[m, v]), radius, eps, sigma)
+    return out
+
+
+def _jump(values, edge=.15):
+    k = max(2, int(edge*len(values)))
+    return float(np.mean(values[-k:])-np.mean(values[:k]))
+
+
+def jump_check(truth, regression, flow_truth, point, normal, length, band):
+    """Per field: truth jump (physical), the part the regression/coarse baseline already
+    has, the residual share the flow must generate, and the jump in flow units
+    (1 = noise std) plus its contrast against the field's flow-space variability."""
+    result = {}
+    for name in FIELDS:
+        c = TARGETS.index(name) if name != 'precip' else 1
+        truth_jump = _jump(profile(truth[c], point, normal, length, band)[1])
+        base_jump = _jump(profile(regression[c], point, normal, length, band)[1])
+        flow_jump = _jump(profile(flow_truth[c], point, normal, length, band)[1])
+        result[name] = dict(truth_jump=truth_jump, baseline_jump=base_jump,
+                            residual_share=(1-base_jump/truth_jump) if abs(truth_jump) > 1e-12 else None,
+                            flow_jump=flow_jump, flow_std=float(np.std(flow_truth[c])),
+                            flow_contrast=abs(flow_jump)/max(float(np.std(flow_truth[c])), 1e-12))
+    return result
+
+
 def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, center=None, output=None,
         batch=32, threads=8, dpi=200, pdf=True, profile_length=60, profile_band=24, center_latlon=None,
-        anywhere=False, weights='ema', log=print):
+        anywhere=False, weights='ema', guided=True, guide_radius=8, guide_eps=1e-2, guide_sigma=2., log=print):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
@@ -238,14 +316,31 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
         variants['single@64'].append(decode_tile(sampler, core, mean, y, x))
         log(f'  member {m+1}/{members}: {time.monotonic()-t0:.0f}s')
     variants = {k: np.stack(v) for k, v in variants.items()}
+    if guided:
+        variants['guided@64'] = guided_members(variants['tiled@64'], guide_radius, guide_eps, guide_sigma)
     truth = truth_full[:, ys, xs]
     tile_area = area[ys, xs]
     coarse = sampler.coarse[:, ys, xs]
+    # Truth in the model's own (flow) space: states as normalized residuals about the
+    # frozen regression, divided by flow_scale; rain as sqrt1p z.
+    from .dataset_v3_precip import encode_rain
+    mean_crop = sampler.mean[:, ys, xs]
+    flow_truth = ((truth-coarse-sampler.rm)/sampler.rs-mean_crop)/sampler.scale
+    flow_truth[1] = encode_rain(truth[1], archive.scale)
+    jumps = jump_check(truth, sampler.regression[:, ys, xs], flow_truth, local_point, normal,
+                       profile_length, profile_band)
+    log('  jump check (truth across the front): field · physical jump · baseline has · model must add · '
+        'flow-unit jump · contrast')
+    for name, j in jumps.items():
+        share = 'n/a' if j['residual_share'] is None else f'{100*j["residual_share"]:.0f}%'
+        log(f'    {name:>6}: {j["truth_jump"]:+.4g} · {j["baseline_jump"]:+.4g} · {share} · '
+            f'{j["flow_jump"]:+.3f} · {j["flow_contrast"]:.2f}')
 
     # Scores
     metrics = dict(case=entry['id'], time=entry['time'], checkpoint=str(path), epoch=saved['epoch']+1, weights=weights,
                    front_point=list(point), normal=[float(v) for v in normal], tile_origin=list(origin),
-                   grid_km=dx_km, members=members, fields={})
+                   grid_km=dx_km, members=members, fields={}, jumps=jumps,
+                   guided=dict(on=guided, radius=guide_radius, eps=guide_eps, sigma=guide_sigma, fields=list(GUIDED_FIELDS)))
     profiles = {}
     for name in FIELDS:
         c = TARGETS.index(name) if name != 'precip' else 1
@@ -272,6 +367,8 @@ def run(cfg, checkpoint='latest', timestamp=None, split='test', members=4, cente
                 member_grad_tail_ratio=(member_tails.mean(0)/np.maximum(t_tail, 1e-30)).tolist(),
                 mean_grad_tail_ratio=(gradient_tail(f.mean(0))/np.maximum(t_tail, 1e-30)).tolist(),
                 member_rmse=float(np.mean([np.sqrt(weighted_mean((mm-t)**2, tile_area)) for mm in f])),
+                crps=float(weighted_mean(crps_ensemble(f, t), tile_area)),
+                mean_bias=float(weighted_mean(f.mean(0)-t, tile_area)),
                 mean_rmse=float(np.sqrt(weighted_mean((f.mean(0)-t)**2, tile_area))))
             prof[vname] = [profile(mm, local_point, normal, profile_length, profile_band)[1] for mm in f]
             prof[vname+' mean'] = mean_prof
@@ -371,7 +468,7 @@ def plot_fields(name, truth, coarse, variants, point, normal, length, heading, p
 
 def plot_profiles(profiles, metrics, dx_km, heading, plt):
     fig, axes = plt.subplots(2, 3, figsize=(19, 10), constrained_layout=True)
-    colors = {'tiled@32': '#74add1', 'tiled@64': '#2166ac', 'single@64': '#d6604d'}
+    colors = {k: v for k, v in VARIANT_COLORS.items() if k in profiles[FIELDS[0]][1]}
     for ax, name in zip(axes.flat, FIELDS):
         s, prof = profiles[name]
         km = s*dx_km
@@ -399,13 +496,14 @@ def plot_profiles(profiles, metrics, dx_km, heading, plt):
 
 def plot_tails(metrics, heading, plt):
     fig, axes = plt.subplots(1, len(QUANTILES), figsize=(6*len(QUANTILES), 5), constrained_layout=True)
-    variants = ('tiled@32', 'tiled@64', 'single@64')
-    colors = ('#74add1', '#2166ac', '#d6604d')
+    variants = tuple(v for v in VARIANT_COLORS if v in metrics['fields'][FIELDS[0]])
+    colors = tuple(VARIANT_COLORS[v] for v in variants)
+    bar = .8/len(variants)
     x = np.arange(len(FIELDS))
     for q, ax in enumerate(axes):
         for k, (vname, color) in enumerate(zip(variants, colors)):
             values = [metrics['fields'][n][vname]['member_grad_tail_ratio'][q] for n in FIELDS]
-            ax.bar(x+(k-1)*.27, values, .27, color=color, label=f'{vname} members')
+            ax.bar(x+(k-(len(variants)-1)/2)*bar, values, bar, color=color, label=f'{vname} members')
         ax.axhline(1, color='k', lw=1.2)
         ax.set_xticks(x, FIELDS)
         ax.set_title(f'|∇| p{QUANTILES[q]*100:g} ratio to truth (1 = truth-like edges)')
@@ -437,6 +535,27 @@ def write_report(out, metrics):
         cells += [_km(f[v]['member_slope_width_km_median']) for v in ('tiled@32', 'tiled@64', 'single@64')]
         cells += [_km(f[v]['mean_slope_width_km']) for v in ('tiled@64', 'single@64')]
         L.append(f'| {name} | ' + ' | '.join(cells) + ' |')
+    if 'guided@64' in metrics['fields'][FIELDS[0]]:
+        L += ['', f'## Wind-guided sharpening ({", ".join(GUIDED_FIELDS)}; radius {metrics["guided"]["radius"]} px, '
+              f'eps {metrics["guided"]["eps"]}, texture sigma {metrics["guided"]["sigma"]} px) vs tiled@64', '',
+              'Adopt only if widths/p99 improve WITHOUT worse tile CRPS or bias.', '',
+              '| Field | Max-slope width members (tiled → guided) | p99 ratio (tiled → guided) | Tile CRPS (tiled → guided) | Mean bias (tiled → guided) |',
+              '|---|---:|---:|---:|---:|']
+        for name in GUIDED_FIELDS:
+            f = metrics['fields'][name]
+            a, g = f['tiled@64'], f['guided@64']
+            L.append(f'| {name} | {_km(a["member_slope_width_km_median"])} → {_km(g["member_slope_width_km_median"])} | '
+                     f'{a["member_grad_tail_ratio"][1]:.2f} → {g["member_grad_tail_ratio"][1]:.2f} | '
+                     f'{a["crps"]:.4g} → {g["crps"]:.4g} | {a["mean_bias"]:+.3g} → {g["mean_bias"]:+.3g} |')
+    L += ['', '## Jump check: what the model must create across the front', '',
+          'Baseline = frozen regression (t2m, ps, u10m, v10m, rain) or coarse input (q2m). Flow units: the model\'s own '
+          'normalized space where the noise has std 1; contrast = |flow jump| / flow-space std over the tile.', '',
+          '| Field | Truth jump | Baseline jump | Share the model must add | Flow-unit jump | Contrast |',
+          '|---|---:|---:|---:|---:|---:|']
+    for name, j in metrics['jumps'].items():
+        share = 'n/a' if j['residual_share'] is None else f'{100*j["residual_share"]:.0f}%'
+        L.append(f'| {name} | {j["truth_jump"]:+.4g} | {j["baseline_jump"]:+.4g} | {share} | '
+                 f'{j["flow_jump"]:+.3f} | {j["flow_contrast"]:.2f} |')
     L += ['', 'Member widths close to truth with a wider ensemble-mean width = sharp members at slightly different '
           'positions (expected). Member widths far above truth = the members themselves are smooth.']
     (out/'report.md').write_text('\n'.join(L)+'\n')
@@ -456,6 +575,10 @@ def main():
                         help='Front point as latitude/longitude (e.g. 35.5 -90.5)')
     parser.add_argument('--anywhere', action='store_true',
                         help='Search the whole domain for the front (default: near the strongest rain feature)')
+    parser.add_argument('--no-guided', action='store_true', help='Skip the wind-guided sharpening variant')
+    parser.add_argument('--guide-radius', type=int, default=8, help='Guided filter window radius in px (default 8, ~15 km)')
+    parser.add_argument('--guide-eps', type=float, default=1e-2, help='Guided filter regularization (default 0.01)')
+    parser.add_argument('--guide-sigma', type=float, default=2., help='Own texture finer than this (px) is kept (default 2)')
     parser.add_argument('--output')
     parser.add_argument('--batch', type=int, default=32)
     parser.add_argument('--threads', type=int, default=8)
@@ -465,7 +588,8 @@ def main():
     run(load_config(args.config), args.checkpoint, args.timestamp, args.split, args.members,
         tuple(args.center) if args.center else None, args.output, args.batch, args.threads, args.dpi,
         not args.no_pdf, center_latlon=tuple(args.center_latlon) if args.center_latlon else None,
-        anywhere=args.anywhere, weights=args.weights, log=lambda message: print(message, flush=True))
+        anywhere=args.anywhere, weights=args.weights, guided=not args.no_guided, guide_radius=args.guide_radius,
+        guide_eps=args.guide_eps, guide_sigma=args.guide_sigma, log=lambda message: print(message, flush=True))
 
 
 if __name__ == '__main__':

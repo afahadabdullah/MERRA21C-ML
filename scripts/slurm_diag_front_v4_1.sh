@@ -14,6 +14,7 @@
 # Front-sharpness diagnostic on one case (one A100, ~20-30 min with 4 members):
 # full-domain tiled sampling at 32 and 64 steps vs the front's tile sampled alone
 # (no blending, 64 steps). Answers: is the front blur from the tiling or the model?
+#   GUIDED=1 (default; 0 = skip wind-guided sharpening)  GUIDE_RADIUS=8  GUIDE_EPS=0.01
 #   WEIGHTS=ema (default) | raw   (raw = optimizer weights stored in the checkpoint)
 #   CHECKPOINT=latest (default) | best | <epoch> | <path>   CONFIG=configs/discover_v4_1.yaml
 #   TIMESTAMP=20260307_1930 (default: wettest hour)  SPLIT=test|val  MEMBERS=4
@@ -35,6 +36,9 @@ unset SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 args=(--config "${CONFIG:-configs/discover_v4_1.yaml}" --checkpoint "${CHECKPOINT:-latest}"
       --split "${SPLIT:-test}" --members "${MEMBERS:-4}")
 if [[ -n "${WEIGHTS:-}" ]]; then args+=(--weights "$WEIGHTS"); fi
+if [[ "${GUIDED:-1}" == 0 ]]; then args+=(--no-guided); fi
+if [[ -n "${GUIDE_RADIUS:-}" ]]; then args+=(--guide-radius "$GUIDE_RADIUS"); fi
+if [[ -n "${GUIDE_EPS:-}" ]]; then args+=(--guide-eps "$GUIDE_EPS"); fi
 if [[ -n "${TIMESTAMP:-}" ]]; then args+=(--timestamp "$TIMESTAMP"); fi
 if [[ -n "${CENTER:-}" ]]; then read -r -a center <<< "$CENTER"; args+=(--center "${center[@]}"); fi
 if [[ -n "${CENTER_LATLON:-}" ]]; then read -r -a latlon <<< "$CENTER_LATLON"; args+=(--center-latlon "${latlon[@]}"); fi
