@@ -308,7 +308,9 @@ def test_two_process_rollout_finetune(packed_cfg, tmp_path):
     cfg['train'].update(epochs=1, workers=1, val_workers=1, output=str(tmp_path/'ddp_ro'),
                         validation_interval=1, validation_patches=3, calibration_batches=1,
                         finetune=dict(init=str(tmp_path/'source'/'last_v4_1.pt'),
-                                      rollout=dict(patches=1, members=2, steps=3, grad_steps=2)))
+                                      rollout=dict(patches=2, front_patches=1, members=3, steps=3, grad_steps=2,
+                                                   alpha=1., variogram_weight=0., increment_weight=1.,
+                                                   scale_batches=1)))
     cfg['patch']['samples_per_epoch'] = 8
     path = tmp_path/'config.yaml'
     path.write_text(yaml.safe_dump(cfg))
@@ -324,4 +326,5 @@ def test_two_process_rollout_finetune(packed_cfg, tmp_path):
     assert result.returncode == 0, result.stdout+result.stderr
     assert 'Sample-score fine-tune' in result.stdout and 'flow=' in result.stdout
     saved = torch.load(Path(cfg['train']['output'])/'last_v4_1.pt', weights_only=True)
-    assert saved['world_size'] == 2 and saved['history'][-1]['sample_scores']['variogram'] != 0
+    assert saved['world_size'] == 2 and saved['history'][-1]['sample_scores']['increment_crps'] != 0
+    assert 'Increment scales' in result.stdout and saved['rollout_scales'].shape == (6, 4)

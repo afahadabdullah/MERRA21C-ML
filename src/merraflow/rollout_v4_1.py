@@ -39,11 +39,13 @@ from torch.nn import functional as F
 
 from .v4_1 import objective
 
-SCORES = ('crps', 'multiscale_crps', 'variogram', 'bias')
+SCORES = ('crps', 'multiscale_crps', 'variogram', 'bias', 'increment_crps')
 DEFAULTS = dict(weight=1.0, patches=4, members=2, steps=16, grad_steps=3, interval=1,
                 warmup_epochs=0, ramp_epochs=1, alpha=0.95, pool_scales=[2, 4, 8, 16], lags=[1, 2, 4, 8],
                 crps_weight=1.0, multiscale_weight=1.0, variogram_weight=1.0, bias_weight=1.0,
+                increment_weight=0.0, front_patches=0, scale_batches=8,
                 channel_weights=[1., 1., 1., 1., 1., 1.])
+FRONT_CHANNELS = (0, 3, 4, 5)   # t2m, u10m, v10m, q2m in the coarse input
 KEYS = set(DEFAULTS)
 
 
@@ -60,6 +62,8 @@ def settings_from(cfg):
         raise ValueError('rollout: members >= 2, patches >= 1, interval >= 1, ramp_epochs >= 1')
     if not 1 <= s['grad_steps'] <= s['steps']:
         raise ValueError('rollout: 1 <= grad_steps <= steps')
+    if not 0 <= s['front_patches'] <= s['patches'] or s['increment_weight'] < 0 or s['scale_batches'] < 1:
+        raise ValueError('rollout: 0 <= front_patches <= patches, increment_weight >= 0, scale_batches >= 1')
     if not 0 <= s['alpha'] <= 1 or s['weight'] < 0:
         raise ValueError('rollout: 0 <= alpha <= 1 and weight >= 0')
     if len(s['channel_weights']) != 6 or min(s['channel_weights']) < 0:
@@ -148,13 +152,64 @@ def bias(members, truth, area, rain_scale=1.):
     return torch.cat([score[:, :1], score[:, 1:2]+physical, score[:, 2:]], dim=1)
 
 
-def sample_scores(members, truth, area, settings, rain_scale=1.):
+def _shifts(lags, h, w):
+    for li, lag in enumerate(lags):
+        for dy, dx in ((0, lag), (lag, 0), (lag, lag), (lag, -lag)):
+            if abs(dy) >= h or abs(dx) >= w:
+                continue
+            a = (..., slice(max(dy, 0), h+min(dy, 0)), slice(max(dx, 0), w+min(dx, 0)))
+            b = (..., slice(max(-dy, 0), h-max(dy, 0)), slice(max(-dx, 0), w-max(dx, 0)))
+            yield li, a, b
+
+
+def increment_scales(target, area, lags):
+    """(C, L) area-weighted mean |signed increment| of the target per channel and lag
+    (averaged over directions and patches): the fixed normalization of increment_crps."""
+    target, area = target.float(), area.float()
+    h, w = target.shape[-2:]
+    sums = target.new_zeros(target.shape[1], len(lags))
+    counts = target.new_zeros(len(lags))
+    for li, a, b in _shifts(lags, h, w):
+        sums[:, li] += _average((target[a]-target[b]).abs(), (area[a]+area[b])/2).mean(0)
+        counts[li] += 1
+    return sums/counts.clamp_min(1)
+
+
+def increment_crps(members, truth, area, lags, scales):
+    """Fair CRPS of signed spatial increments per (patch, channel), normalized by fixed
+    per-channel/lag scales. States live in flow space as physical = baseline + s * x with
+    the baseline shared by members and truth, so the CRPS of increments equals the
+    physical-field one up to the constant s: it scores physical gradients, including
+    their sign, and stays proper (the normalization does not depend on the forecast)."""
+    h, w = truth.shape[-2:]
+    values = []
+    for li, a, b in _shifts(lags, h, w):
+        crps = afcrps(members[a]-members[b], truth[a]-truth[b], (area[a]+area[b])/2, 1.)
+        values.append(crps/scales[:, li].clamp_min(1e-6))
+    return torch.stack(values).mean(0) if values else truth.new_zeros(truth.shape[:2])
+
+
+def front_order(coarse):
+    """Patch indices sorted by a truth-free front score: 95th percentile of the coarse
+    input's gradient magnitude in t2m/u10m/v10m/q2m, each normalized by its batch mean."""
+    x = coarse[:, list(FRONT_CHANNELS)].float()
+    gy = x[..., 1:, :-1]-x[..., :-1, :-1]
+    gx = x[..., :-1, 1:]-x[..., :-1, :-1]
+    g = torch.sqrt(gy.square()+gx.square()).flatten(2)          # (B, C, N)
+    g = g/g.mean((0, 2), keepdim=True).clamp_min(1e-12)
+    score = torch.quantile(g, .95, dim=2).mean(1)
+    return torch.argsort(score, descending=True)
+
+
+def sample_scores(members, truth, area, settings, rain_scale=1., scales=None):
     """dict of (B, C) scores; members (M, B, C, H, W) and truth (B, C, H, W) in flow space."""
     members, truth, area = members.float(), truth.float(), area.float()
     return dict(crps=afcrps(members, truth, area, settings['alpha']),
                 multiscale_crps=multiscale_crps(members, truth, area, settings['alpha'], settings['pool_scales']),
                 variogram=variogram(members, truth, area, settings['lags']),
-                bias=bias(members, truth, area, rain_scale))
+                bias=bias(members, truth, area, rain_scale),
+                increment_crps=(increment_crps(members, truth, area, settings['lags'], scales.float())
+                                if scales is not None else truth.new_zeros(truth.shape[:2])))
 
 
 def sample_members(network, batch, members, steps, grad_steps, generator=None):
@@ -181,17 +236,29 @@ def sample_members(network, batch, members, steps, grad_steps, generator=None):
     return x.reshape(members, b, *target.shape[1:])
 
 
-def rollout_loss(network, batch, settings, generator=None, rain_scale=1.):
-    count = min(settings['patches'], len(batch['target']))
-    selected = {k: v[:count] for k, v in batch.items() if torch.is_tensor(v)}
+def rollout_loss(network, batch, settings, generator=None, rain_scale=1., scales=None):
+    n = len(batch['target'])
+    count = min(settings['patches'], n)
+    fronts = min(settings['front_patches'], count)
+    if fronts:
+        # The `fronts` most frontal patches (coarse-input gradients; no truth), then the
+        # batch's own (random) order for the rest.
+        order = front_order(batch['coarse'])
+        chosen = order[:fronts]
+        rest = [i for i in range(n) if i not in set(chosen.tolist())][:count-fronts]
+        index = torch.cat([chosen, torch.as_tensor(rest, dtype=torch.long, device=chosen.device)])
+        selected = {k: v.index_select(0, index.to(v.device)) for k, v in batch.items()
+                    if torch.is_tensor(v) and v.ndim and len(v) == n}
+    else:
+        selected = {k: v[:count] for k, v in batch.items() if torch.is_tensor(v)}
     members = sample_members(network, selected, settings['members'], settings['steps'],
                              settings['grad_steps'], generator)
-    scores = sample_scores(members, selected['target'], selected['area_full'], settings, rain_scale)
+    scores = sample_scores(members, selected['target'], selected['area_full'], settings, rain_scale, scales)
     channels = torch.as_tensor(settings['channel_weights'], device=members.device, dtype=torch.float32)
     importance = selected['importance'].float()
     per_score = torch.stack([((scores[k]*channels).sum(1)/channels.sum()*importance).mean() for k in SCORES])
     weights = per_score.new_tensor([settings['crps_weight'], settings['multiscale_weight'], settings['variogram_weight'],
-                                    settings['bias_weight']])
+                                    settings['bias_weight'], settings['increment_weight']])
     return (per_score*weights).sum(), per_score.detach()
 
 
@@ -203,6 +270,9 @@ class RolloutObjective(nn.Module):
         super().__init__()
         self.network, self.settings, self.loss_options = network, settings, loss_options
         self.rain_scale = float(rain_scale)
+        # Fixed increment normalization, set once from training targets (train_v4_1) and
+        # stored in checkpoints so resumes are exact.
+        self.register_buffer('scales', torch.ones(6, len(settings['lags'])))
 
     @property
     def channel_weights(self):
@@ -213,6 +283,7 @@ class RolloutObjective(nn.Module):
         scores = flow.new_zeros(len(SCORES))
         loss = flow
         if strength:
-            value, scores = rollout_loss(self.network, batch, self.settings, rain_scale=self.rain_scale)
+            value, scores = rollout_loss(self.network, batch, self.settings, rain_scale=self.rain_scale,
+                                         scales=self.scales if self.settings['increment_weight'] else None)
             loss = flow+strength*self.settings['weight']*value
         return loss, flow.detach(), scores

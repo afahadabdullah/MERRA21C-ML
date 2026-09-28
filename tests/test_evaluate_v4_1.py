@@ -337,12 +337,12 @@ def test_rollout_loss_backpropagates_through_last_steps(trained):
     conditioner.prepare(b)
     settings = dict(DEFAULTS, patches=2, members=2, steps=3, grad_steps=1)
     value, parts = rollout_loss(model, b, settings, torch.Generator().manual_seed(1))
-    assert torch.isfinite(value) and parts.shape == (4,)
+    assert torch.isfinite(value) and parts.shape == (5,)
     value.backward()
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
     wrapper = RolloutObjective(model, settings, {})
     loss, flow, scores = wrapper(b, 0.)
-    assert torch.equal(scores, torch.zeros(4)) and torch.isclose(loss, flow)
+    assert torch.equal(scores, torch.zeros(5)) and torch.isclose(loss, flow)
 
 
 def test_rollout_finetune_trains_from_checkpoint(trained, tmp_path):
@@ -356,5 +356,45 @@ def test_rollout_finetune_trains_from_checkpoint(trained, tmp_path):
     saved = torch.load(tmp_path/'ro'/'last_v4_1.pt', map_location='cpu', weights_only=True)
     row = saved['history'][-1]
     assert saved['initialization']['path'] == str(source.resolve())
-    assert set(row['sample_scores']) == {'crps', 'multiscale_crps', 'variogram', 'bias'} and row['flow_loss'] > 0
+    assert set(row['sample_scores']) == {'crps', 'multiscale_crps', 'variogram', 'bias', 'increment_crps'} and row['flow_loss'] > 0
     assert row['training_loss'] != row['flow_loss']
+
+
+def test_increment_crps_scales_and_front_selection():
+    from merraflow.rollout_v4_1 import increment_crps, increment_scales, front_order
+    x = torch.linspace(-1, 1, 32)
+    truth = (x[None, :] > 0).float().expand(32, 32).expand(1, 6, 32, 32).clone()
+    area = torch.ones(1, 32, 32)
+    scales = increment_scales(truth, area, [1, 2, 4])
+    assert scales.shape == (6, 3) and (scales > 0).all()
+    sharp = truth.expand(4, 1, 6, 32, 32).clone()
+    smooth = torch.sigmoid(x[None, :]/.2).expand(32, 32).expand(4, 1, 6, 32, 32).clone()
+    flipped = 1-sharp  # right magnitude, wrong sign: the variogram cannot see this, signed increments do
+    assert increment_crps(sharp, truth, area, [1, 2, 4], scales).abs().max() < 1e-6
+    assert (increment_crps(smooth, truth, area, [1, 2, 4], scales) > .1).all()
+    assert (increment_crps(flipped, truth, area, [1, 2, 4], scales) > increment_crps(smooth, truth, area, [1, 2, 4], scales)).all()
+    coarse = torch.zeros(3, 6, 16, 16)
+    coarse[2, 0, :, 8:] = 5.  # a t2m front in patch 2 only
+    coarse[1, 1, :, 8:] = 50.  # a rain edge in patch 1 does not count
+    assert front_order(coarse)[0].item() == 2
+
+
+def test_rollout_round2_finetune_resumes_with_fixed_scales(trained, tmp_path):
+    source = resolve_checkpoint(trained, 'latest')
+    cfg = deepcopy(trained)
+    cfg['model']['activation_checkpointing'] = True
+    # Two epochs, but the time limit ends the first job after epoch 1 (as a 12 h job would).
+    cfg['train'].update(output=str(tmp_path/'ro2'), epochs=2, time_limit_hours=.01,
+                        finetune=dict(init=str(source), rollout=dict(
+                            patches=2, front_patches=1, members=3, steps=4, grad_steps=2, alpha=1.,
+                            variogram_weight=0., increment_weight=1., scale_batches=2)))
+    train(cfg)
+    first = torch.load(tmp_path/'ro2'/'last_v4_1.pt', map_location='cpu', weights_only=True)
+    scales = first['rollout_scales']
+    assert scales.shape == (6, 4) and (scales > 0).all() and not torch.allclose(scales, torch.ones_like(scales))
+    assert first['history'][-1]['sample_scores']['increment_crps'] > 0
+    assert first['epoch'] == 0
+    cfg['train']['time_limit_hours'] = None
+    train(cfg, resume=str(tmp_path/'ro2'/'last_v4_1.pt'))
+    second = torch.load(tmp_path/'ro2'/'last_v4_1.pt', map_location='cpu', weights_only=True)
+    assert second['epoch'] == 1 and torch.equal(second['rollout_scales'], scales)

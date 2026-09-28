@@ -1,0 +1,109 @@
+# v4.1 sample-score fine-tune, round 2: continue from round 1 (runs/merraflow_v4_1_ft_rollout,
+# epoch 30), which strengthened gradients (+0.05-0.07 p99) but did not narrow fronts.
+# Changes vs round 1:
+#   * edge score -> fair CRPS of SIGNED increments (1-8 px), fixed training-set scales:
+#     proper, and equal to the physical-field increment CRPS up to a constant
+#   * alpha 1.0 (fair CRPS; 0.95 slightly rewards under-dispersion)
+#   * backprop through the last 8 of 16 Heun steps (was 3): reach where front width is set
+#   * 4 members per patch (was 2): less noisy ensemble-score gradients
+#   * 3 of the 4 scored patches per step are the most frontal ones in the batch
+#     (coarse-input t2m/u/v/q gradients; no truth); flow loss still uses every patch
+# Kept: weight 0.5, afCRPS + multiscale CRPS + bias guard, lr 5e-5, EMA 0.9995.
+# Launch:
+#   CONFIG=configs/discover_v4_1_ft_rollout2.yaml sbatch --job-name=v4.1ro2 scripts/slurm_train_v4_1.sh
+version: v4.1
+conditioning:
+  checkpoint: runs/merraflow_annual_v2/regression_v2/best_v2.pt
+data:
+  prepared: data/paired_hourly_annual_v2
+  hourly_targets: data/hwt_hourly_mean_v3_precip
+  target_kind: hourly_mean_trapezoid
+  representation: sqrt1p
+  rain_scale_mm_h: 1.0
+  history_hours: [-1, 0]
+  humidity_targets: data/hwt_q2m_v4
+  humidity_target_variable: SPFH_2M
+  humidity_scale_kg_kg: 0.001
+packed:
+  root: data/packed_v4_1   # ~139 MB per packed hour; see `cli_v4_1 plan-packed`
+  splits: [train, val]
+  tile: 32                 # native-resolution tile edge (pixels)
+  context_tile: 32         # pooled-context tile edge (pooled pixels)
+patch:
+  size: 128
+  halo: 32
+  stride: 96
+  samples_per_epoch: 16384     # 256 optimizer steps/epoch: each step now also samples members
+  context_scale: 3
+  context_size: 96
+  sampling_stride: 24      # must be a multiple of the pooling factor 576/96 = 6
+  detail_fraction: 0.5
+  proposal: coarse
+  loss_on_halo: true
+model:
+  base_channels: 64
+  channel_mult: [1, 2, 3, 4]
+  time_dim: 256
+  activation_checkpointing: true   # memory for the differentiable rollout
+  blocks_per_level: 2
+  attention_heads: 8
+train:
+  device: auto
+  seed: 2026
+  epochs: 20
+  batch_size: 16           # v4: 8 x accumulate 2; same effective batch 64 on 4 GPUs
+  accumulate: 1
+  workers: 12              # per rank; the job gets 12 cores per GPU
+  val_workers: 4
+  persistent_workers: true
+  prefetch_factor: 6
+  fd_cache_size: 64
+  learning_rate: 0.00005     # refine, don't retrain
+  weight_decay: 0.01
+  warmup_steps: 300
+  min_lr_ratio: 0.05
+  grad_clip: 1.0
+  precision: bf16
+  ema_decay: 0.9995
+  time_limit_hours: 11.0
+  calibration_batches: 64  # 64 x 16 = the same 1024 calibration patches as v4
+  channel_weights: [1.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+  # Validation + diagnostic plots + a kept checkpoint fire together on this
+  # cadence: every validation_interval epochs, switching to the finer
+  # validation_interval_late after schedule_switch_epoch. Here: every 5 through
+  # epoch 20, then every 2. Kept checkpoints are named
+  # checkpoints/epoch_NNNN_crps<value>_v4_1.pt. Cadence is resume-safe: change
+  # it on a continuation without breaking exact resume.
+  validation_interval: 2
+  validation_patches: 256
+  validation_members: 8
+  validation_steps: 24
+  validation_plot_samples: 4   # fixed rainy validation patches, same every epoch
+  output: runs/merraflow_v4_1_ft_rollout2
+  finetune:
+    init: runs/merraflow_v4_1_ft_rollout/last_v4_1.pt   # round-1 fine-tune, epoch 30
+    rollout:
+      weight: 0.5              # kept from round 1 (worked, bias held)
+      patches: 4               # patches per GPU step scored with generated members
+      front_patches: 3         # ... of which the 3 most frontal in the batch (coarse gradients)
+      members: 4               # was 2
+      steps: 16
+      grad_steps: 8            # was 3: differentiate the second half of the trajectory
+      interval: 1
+      warmup_epochs: 0
+      ramp_epochs: 2
+      alpha: 1.0               # fair CRPS (was 0.95)
+      pool_scales: [2, 4, 8, 16]
+      lags: [1, 2, 4, 8]
+      crps_weight: 1.0
+      multiscale_weight: 1.0
+      variogram_weight: 0.0    # replaced by increment_crps
+      increment_weight: 1.0    # fair CRPS of signed increments, fixed scales
+      scale_batches: 8         # training batches/rank used once to fix the increment scales
+      bias_weight: 1.0
+      channel_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # t2m precip ps u10m v10m q2m
+inference:
+  steps: 32
+  members: 16
+  seed: 317
+  output: runs/merraflow_v4_1_ft_rollout2/predictions

@@ -155,6 +155,32 @@ def _train(cfg, resume, device, rank, world, local, group):
                       else saved.get('initialization') if saved else None)
     if rank == 0 and rollout:
         print(f'Sample-score fine-tune: {json.dumps(rollout)}', flush=True)
+    if rollout and rollout['increment_weight']:
+        if saved and saved.get('rollout_scales') is not None:
+            module.scales.copy_(saved['rollout_scales'].to(device))
+        else:
+            # Fixed increment scales from the first training batches, averaged over ranks.
+            sampler.set_epoch(0)
+            sums = torch.zeros_like(module.scales, dtype=torch.float64)
+            batches = 0
+            with torch.no_grad():
+                for batch in FirstBatches(loader, rollout['scale_batches']):
+                    b = to_device(batch, device)
+                    with autocast(device, tr['precision']):
+                        conditioner.prepare(b)
+                    sums += rollout_v4_1.increment_scales(b['target'], b['area_full'], rollout['lags']).double()
+                    batches += 1
+            total = torch.tensor([float(batches)], device=device, dtype=torch.float64)
+            if world > 1:
+                dist.all_reduce(sums)
+                dist.all_reduce(total)
+            scales = (sums/total.clamp_min(1)).float()
+            # Floor: 5% of the lag's mean over channels, so a near-constant field cannot
+            # make its normalized increment score explode.
+            module.scales.copy_(torch.maximum(scales, .05*scales.mean(0, keepdim=True)).clamp_min(1e-4))
+        if rank == 0:
+            print('Increment scales (channel x lag): '+json.dumps([[round(v, 5) for v in row] for row in module.scales.tolist()]),
+                  flush=True)
     if rank == 0 and ft:
         print(f'Fine-tune loss: flow + {loss_options["gradient_weight"]} x gradient term; '
               f'{loss_options["late_fraction"]:.0%} of flow times shifted toward data (s={loss_options["shift"]})', flush=True)
@@ -288,6 +314,7 @@ def _train(cfg, resume, device, rank, world, local, group):
                        fingerprint=archive.index['fingerprint'], stats=archive.stats,
                        hourly_fingerprint=archive.hourly_fingerprint, humidity_fingerprint=archive.humidity_fingerprint,
                        packed_fingerprint=packed.fingerprint,
+                       rollout_scales=module.scales.detach().cpu() if rollout else None,
                        flow_scale=conditioner.flow_scale.detach().cpu(),
                        model=model.state_dict(), ema=ema.state_dict(), regression_condition=bundle,
                        optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict(),
