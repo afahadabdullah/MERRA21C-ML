@@ -26,7 +26,7 @@
 #           restart,restart_shift,temp,hf_boost,autoguide,autoguide_hf,vguide,fk_steer,fk_edge,
 #           select_clim,select_sharp,prescreen,spectral,vpost   (default: all)
 #   VGUIDE_STRENGTHS="0.25 0.5 1"  VGUIDE_FIELDS="t2m q2m"  SDE_STRENGTHS="0.5 1 2"
-#   FK_PARTICLES=4  FK_LAMBDA=2 (in units of the reward spread between particles)  LANGEVIN=0.3  CHURN=0.2  RESTART=2  RESTART_T=0.7  TEMP=1.1
+#   LANGEVIN_RANGE="0.5 0.97" (t range of the langevin recipe)  FK_PARTICLES=4  FK_LAMBDA=2 (in units of the reward spread between particles)  LANGEVIN=0.3  CHURN=0.2  RESTART=2  RESTART_T=0.7  TEMP=1.1
 #   GUIDE_CHECKPOINT=auto  GUIDE_WEIGHT=1.5   CLIM_COUNT=24  CLIM_DAYS=45
 #   COMBINE="autoguide_hf+spectral,autoguide_hf+fk_steer+spectral"  (recipes joined by +; comma list)
 #   Strength suffixes: fk_steer@4 / fk_edge@10 (FK lambda), vguide_0.5, sde_1, vpost_0.25
@@ -55,7 +55,7 @@ opt RESTART --restart; opt RESTART_T --restart-t; opt TEMP --temp
 opt GUIDE_CHECKPOINT --guide-checkpoint; opt GUIDE_WEIGHT --guide-weight
 opt CRPS_TOL --crps-tol; opt CRPS_TOL_MAX --crps-tol-max; opt BIAS_TOL --bias-tol
 opt DPI --dpi; opt OUTPUT --output; opt COMBINE --combine; opt SPECTRAL_MAX_GAIN --spectral-max-gain
-multi CENTER --center; multi CENTER_LATLON --center-latlon
+multi CENTER --center; multi CENTER_LATLON --center-latlon; multi LANGEVIN_RANGE --langevin-range
 multi VGUIDE_STRENGTHS --vguide-strengths; multi VGUIDE_FIELDS --vguide-fields; multi SDE_STRENGTHS --sde-strengths
 if [[ "${ANYWHERE:-0}" == 1 ]]; then args+=(--anywhere); fi
 if [[ "${PHASE2:-1}" == 0 ]]; then args+=(--no-phase2); fi

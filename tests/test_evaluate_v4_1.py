@@ -623,3 +623,47 @@ def test_compare_checkpoints(trained, tmp_path):
     row = next(iter(summary['rows'].values()))
     assert {'crps', 'rmse', 'mae', 'bias', 'spread_skill'} <= set(row['fields']['t2m'])
     assert (out/'report.md').exists() and (out/'checkpoints.png').exists() and (out/'a_best'/'report.md').exists()
+
+
+def test_storm_animation(trained, tmp_path):
+    from merraflow.storm_animation_v4_1 import run
+    from merraflow.compare_checkpoints_v4_1 import parse_runs
+    out = run(parse_runs(['latest=cfg.yaml:latest', 'best=cfg.yaml:best']), split='test', hours=3, members=2, steps=2,
+              region=24, margin=4, output=tmp_path/'storm', batch=4, threads=2, dpi=40, fps=2, frames=True,
+              post='none', track=False, log=lambda *a: None, configs={'cfg.yaml': trained})
+    info = json.loads((out/'storm.json').read_text())
+    assert len(info['hours']) >= 1 and info['members'] == 2 and not info['tracked']
+    tracked = run(parse_runs(['latest=cfg.yaml:latest']), split='test', hours=2, members=1, steps=2, zoom=20,
+                  margin=4, output=tmp_path/'tracked', batch=4, threads=2, dpi=40, post='spectral',
+                  log=lambda *a: None, configs={'cfg.yaml': trained})
+    t_info = json.loads((tracked/'storm.json').read_text())
+    assert t_info['tracked'] and len(t_info['track']) == len(t_info['hours']) and (tracked/'track.png').exists()
+    assert all(r[1]-r[0] == 20 for r in t_info['regions']) and (tracked/'storm_slp.gif').exists()
+    for var in ('precip', 't2m', 'wind', 'slp'):
+        gif = out/f'storm_{var}.gif'
+        assert gif.exists() and gif.stat().st_size > 1000 and (out/f'peak_{var}.png').exists()
+        from PIL import Image
+        with Image.open(gif) as image:
+            assert getattr(image, 'n_frames', 1) == len(info['hours'])
+
+
+def test_sea_level_pressure_reduction():
+    from merraflow.storm_animation_v4_1 import sea_level_pressure
+    assert abs(sea_level_pressure(np.array(101000.), np.array(288.), np.array(0.))-101000.) < 1e-3
+    slp = float(sea_level_pressure(np.array(89875.), np.array(281.5), np.array(1000.)))
+    assert 101000 < slp < 101600   # standard atmosphere: ~898.7 hPa at 1 km reduces to ~1013 hPa
+
+
+def test_storm_hours_are_consecutive_around_the_peak():
+    from merraflow.storm_animation_v4_1 import storm_hours
+    times = [f'2026-01-15T{h:02d}:30:00' for h in (0, 1, 2, 3, 4, 6, 7, 8, 9)]   # gap at 05:30
+
+    class Fake:
+        def eligible(self, split):
+            return [dict(id=t[:13], time=t) for t in times]
+    window, peak = storm_hours(Fake(), 'test', '2026-01-15T03', hours=4, log=lambda *a: None)
+    got = [e['time'][11:13] for e in window]
+    assert peak['time'].startswith('2026-01-15T03') and len(got) == 4 and '03' in got
+    assert got == sorted(got) and all(int(b)-int(a) == 1 for a, b in zip(got, got[1:]))
+    window, _ = storm_hours(Fake(), 'test', '2026-01-15T07', hours=8, log=lambda *a: None)
+    assert [e['time'][11:13] for e in window] == ['06', '07', '08', '09']   # cannot cross the gap
