@@ -551,3 +551,48 @@ def test_hf_autoguidance_is_fine_scale_and_orthogonal():
     extra = RegionEngine._hf_guidance(value, weak, 4.)
     assert torch.allclose((extra*value).sum((-2, -1)), torch.zeros(2, 6), atol=1e-3)   # APG: no parallel part
     assert float(extra.mean((-2, -1)).abs().max()) < .2                            # offset removed by high-pass
+
+
+def test_combined_recipes(trained, tmp_path):
+    from merraflow.explore_inference_v4_1 import combine_methods, OPTION_DEFAULTS, run
+    o = dict(OPTION_DEFAULTS, fk_lambda=4.)
+    specs = combine_methods(('autoguide_hf+fk_steer+spectral', 'shift4_hard+sde_1'), o)
+    a = specs['autoguide_hf+fk_steer+spectral']
+    assert a['kind'] == 'fk' and a['ag_hf'] and a['guide_weight'] == o['guide_weight'] and a['langevin'] > 0
+    assert [t['post'] for t in a['then']] == ['spectral']
+    b = specs['shift4_hard+sde_1']
+    assert b['blend'] == 'hard' and b['grids'] == 'ACBD' and b['sde'] == 1. and not b['then']
+    with pytest.raises(ValueError):
+        combine_methods(('select_clim+spectral',), o)
+    lines = []
+    out = run(trained, 'best', split='test', methods=('baseline', 'spectral', 'fk_edge@4'),
+              combine=('sde_1+spectral', 'fk_steer+spectral', 'autoguide_hf+spectral', 'fk_edge@4+spectral'),
+              phase2=False,
+              members=2, pool=2, steps=3, region=20, margin=4, clim_count=2, fk_particles=2, fk_times=(.5,),
+              profile_length=6, profile_band=2, output=tmp_path/'combo', batch=4, threads=2, dpi=40, pdf=False,
+              log=lines.append)
+    metrics = json.loads((out/'metrics.json').read_text())
+    assert {'baseline', 'spectral', 'sde_1+spectral', 'fk_steer+spectral', 'fk_edge@4',
+            'fk_edge@4+spectral'} <= set(metrics['results'])
+    assert metrics['methods']['fk_edge@4']['fk_lambda'] == 4. and metrics['methods']['fk_edge@4']['fk_reward'] == 'edge'
+    assert any('fk_edge@4+spectral: reuses the members of fk_edge@4' in str(x) for x in lines)
+    assert (out/'edge_zoom.png').exists() and (out/'edge_profiles.png').exists()
+    assert 'autoguide_hf+spectral' not in metrics['results']   # no earlier checkpoint in the test run
+    assert metrics['phase2_winner'] is None
+
+
+def test_edge_step_scores_the_sharp_line_not_the_ramp():
+    from merraflow.explore_inference_v4_1 import truth_edges, edge_scores
+    n = 120
+    yy, xx = np.mgrid[:n, :n].astype(float)
+    d = xx-70+.2*(yy-n/2)
+    ramp = .3*np.clip((d+60)/60, 0, 1)                     # broad ramp west of the edge
+    truth = ramp+np.where(d > 0, 1., 0.)                    # plus a sharp step (the dark line)
+    edges = truth_edges(truth, count=10)
+    assert len(edges) >= 5
+    assert all(abs(x-(70-.2*(y-n/2))) <= 2 for (y, x), _ in edges)   # on the step, not in the ramp
+    same, _ = edge_scores(np.stack([truth, truth]), truth, edges)
+    shifted, _ = edge_scores(np.stack([np.roll(truth, 5, axis=1)]), truth, edges)
+    smooth, prof = edge_scores(np.stack([ramp+.5*(1+np.tanh(d/8))]), truth, edges)
+    assert abs(same-1) < 1e-6 and shifted > .95 and smooth < .5
+    assert len(prof['truth']) == len(prof['members'])

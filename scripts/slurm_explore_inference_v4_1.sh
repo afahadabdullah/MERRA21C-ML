@@ -23,11 +23,14 @@
 #   CENTER="ROW COL" or CENTER_LATLON="LAT LON"   ANYWHERE=1   REGION=384  MARGIN=96
 #   MEMBERS=8  POOL=16  STEPS=64
 #   METHODS=baseline,hann2,hann3,hard,shift_hard,shift_hann2,shift4_hard,time_warp,churn,langevin,sde,
-#           restart,restart_shift,temp,hf_boost,autoguide,autoguide_hf,vguide,fk_steer,
+#           restart,restart_shift,temp,hf_boost,autoguide,autoguide_hf,vguide,fk_steer,fk_edge,
 #           select_clim,select_sharp,prescreen,spectral,vpost   (default: all)
-#   VGUIDE_STRENGTHS="0.25 0.5 1"  VGUIDE_FIELDS="t2m q2m ps"  SDE_STRENGTHS="0.5 1 2"
+#   VGUIDE_STRENGTHS="0.25 0.5 1"  VGUIDE_FIELDS="t2m q2m"  SDE_STRENGTHS="0.5 1 2"
 #   FK_PARTICLES=4  FK_LAMBDA=10  LANGEVIN=0.3  CHURN=0.2  RESTART=2  RESTART_T=0.7  TEMP=1.1
 #   GUIDE_CHECKPOINT=auto  GUIDE_WEIGHT=1.5   CLIM_COUNT=24  CLIM_DAYS=45
+#   COMBINE="autoguide_hf+spectral,autoguide_hf+fk_steer+spectral"  (recipes joined by +; comma list)
+#   Strength suffixes: fk_steer@4 / fk_edge@10 (FK lambda), vguide_0.5, sde_1, vpost_0.25
+#   PHASE2=0 (skip the automatic best-sampler + selection/spectral combinations)  SPECTRAL_MAX_GAIN=1.5
 #   CRPS_TOL=1  CRPS_TOL_MAX=3  BIAS_TOL=0.02   SAVE_MEMBERS=1  DPI=200  NO_PDF=1  OUTPUT=<dir>
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
@@ -51,10 +54,11 @@ opt FK_PARTICLES --fk-particles; opt FK_LAMBDA --fk-lambda; opt LANGEVIN --lange
 opt RESTART --restart; opt RESTART_T --restart-t; opt TEMP --temp
 opt GUIDE_CHECKPOINT --guide-checkpoint; opt GUIDE_WEIGHT --guide-weight
 opt CRPS_TOL --crps-tol; opt CRPS_TOL_MAX --crps-tol-max; opt BIAS_TOL --bias-tol
-opt DPI --dpi; opt OUTPUT --output
+opt DPI --dpi; opt OUTPUT --output; opt COMBINE --combine; opt SPECTRAL_MAX_GAIN --spectral-max-gain
 multi CENTER --center; multi CENTER_LATLON --center-latlon
 multi VGUIDE_STRENGTHS --vguide-strengths; multi VGUIDE_FIELDS --vguide-fields; multi SDE_STRENGTHS --sde-strengths
 if [[ "${ANYWHERE:-0}" == 1 ]]; then args+=(--anywhere); fi
+if [[ "${PHASE2:-1}" == 0 ]]; then args+=(--no-phase2); fi
 if [[ "${SAVE_MEMBERS:-0}" == 1 ]]; then args+=(--save-members); fi
 if [[ "${NO_PDF:-0}" == 1 ]]; then args+=(--no-pdf); fi
 srun --cpu-bind=none python -m merraflow.explore_inference_v4_1 "${args[@]}"

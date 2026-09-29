@@ -48,6 +48,9 @@ Stochastic / denoising during inference:
                 the stride) cycled every step (SpotDiffusion-style moving seams)
   restart_shift DemoFusion/SDEdit-style: solve, re-noise to t=0.5, re-solve with
                 shift4_hard tiling so every tile inherits one coherent large-scale state
+  fk_edge       FK steering whose reward is the climatological p99.9 |grad| of the edge fields
+                (the sharpest lines only) instead of p99 of all fields
+  <fk>@<lam>    any FK recipe with strength lambda, e.g. fk_steer@4, fk_edge@10
   fk_steer      Feynman-Kac steering (Singhal et al. 2025): --fk-particles particles per
                 member with Langevin noise; at t in --fk-times each particle's clean
                 estimate is scored by the truth-free climatological sharpness match and
@@ -55,9 +58,10 @@ Stochastic / denoising during inference:
                 prunes blurry trajectories early instead of paying for full solves
   vguide_<s>    v10m-edge guidance INSIDE the sampler, strength s (--vguide-strengths):
                 for t in --vguide-range, each member's clean estimate
-                x1 = x + (1-t) v is converted to physical units; t2m, q2m and ps
+                x1 = x + (1-t) v is converted to physical units; t2m and q2m
                 (--vguide-fields) are guided-filtered with the member's own v10m
-                as the edge guide, and the state is nudged by s * t * (change).
+                as the edge guide, and the state is nudged toward it; the total
+                strength s is spread over the guided steps (not applied per step).
                 The model sees the sharpened state on the remaining steps and can
                 repair it; the post-hoc filter (below) cannot.
 Post-processing / selection (reuse baseline members; no extra solves):
@@ -78,8 +82,10 @@ Automatic phase 2: the best feasible sampler recipe is also combined with
 select_clim and spectral.
 
 Ranking: sharpness gap G = mean of |log p99|grad| ratio|, |log fine-scale PSD
-ratio| and |log front max-slope width ratio| (members vs truth; 0 = truth-like,
-over-sharpening is penalized too). A recipe is FEASIBLE if, vs baseline, the
+ratio| and |log edge step ratio| (members vs truth; 0 = truth-like, over-sharpening
+is penalized too). Edge step: at the truth's ~24 sharpest edge points per field
+(q2m, t2m, v10m, u10m, ps), the largest change across ~7.5 km within +-15 km of the
+truth edge, member / truth (the dark-to-light line itself, not the broad ramp). A recipe is FEASIBLE if, vs baseline, the
 mean CRPS change is <= --crps-tol % (and no field worse than --crps-tol-max %),
 no field's |bias|/std grows by more than --bias-tol, and the seam index (edge
 strength on tile boundaries vs everywhere) does not rise by more than 0.05.
@@ -89,6 +95,8 @@ slurm_test_best_model_v4_1.sh / compare_sharpness.
 Outputs (default <train.output>/evaluation/explore_<ckpt>_<case>_<job>/):
   report.md, metrics.json
   members_<var>.{png,pdf}   truth, coarse, member 1 of every recipe (region)
+  edge_zoom.{png,pdf}       zoom on the truth's strongest q2m/t2m edges, local colour range
+  edge_profiles.{png,pdf}   composite profiles across the truth's sharpest edges
   scorecard.{png,pdf}       sharpness gap, CRPS change, bias change, seams
   spectra.{png,pdf}         member PSD / truth PSD vs wavelength per field
   profiles.{png,pdf}        cross-front profiles (member 1 of each recipe)
@@ -104,6 +112,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import gaussian_filter
 
 from .config import write_json
 from .dataset_v2 import crop_v2
@@ -118,16 +127,21 @@ from .diag_front_v4_1 import find_front, profile, slope_width
 
 RAIN = TARGETS.index('precip')
 FRONT_FIELDS = ('q2m', 't2m', 'v10m', 'ps')
+EDGE_FIELDS = ('q2m', 't2m', 'v10m', 'u10m', 'ps')
+EDGE_HALF_SPAN = 2   # px: local change across 2*2 px (~7.5 km at 1.9 km)
+EDGE_SEARCH = 8      # px: a member's edge may sit up to ~15 km from truth's
+EDGE_LENGTH = 16     # px: half-length of the edge profiles
 FINE_BAND_KM = (4., 30.)
 SEAM_TOL = .05
 
 DEFAULTS = dict(kind='trajectory', steps=None, gamma=1., blend='hann', grids='A', churn=0., churn_range=(.1, .8),
                 langevin=0., langevin_range=(.5, .97), restart=0, restart_t=.7, temp=1., hf=0., hf_sigma=2.,
                 hf_start=.7, guide_weight=1., vguide=0., vguide_range=(.6, .97), sde=0., sde_range=(.2, .9),
-                ag_hf=False, ag_sigma=8., ag_range=(.35, .85), restart_blend=None, restart_grids=None)
+                ag_hf=False, ag_sigma=8., ag_range=(.35, .85), restart_blend=None, restart_grids=None, then=(),
+                fk_lambda=None, fk_reward='p99')
 TRAJECTORY_IDS = ('baseline', 'hann2', 'hann3', 'hard', 'shift_hard', 'shift_hann2', 'shift4_hard', 'time_warp',
                   'churn', 'langevin', 'sde', 'restart', 'restart_shift', 'temp', 'hf_boost', 'autoguide',
-                  'autoguide_hf', 'vguide', 'fk_steer')
+                  'autoguide_hf', 'vguide', 'fk_steer', 'fk_edge')
 GUIDED_IDS = ('autoguide', 'autoguide_hf')
 GRID_OFFSETS = {'A': (0., 0.), 'B': (.5, .5), 'C': (.25, .75), 'D': (.75, .25)}   # fractions of the stride
 POST_IDS = ('select_clim', 'select_sharp', 'prescreen', 'spectral', 'vpost')
@@ -137,6 +151,50 @@ METHOD_IDS = TRAJECTORY_IDS+POST_IDS
 # ----------------------------------------------------------------------------
 # Recipes
 # ----------------------------------------------------------------------------
+
+EXPANDED = ('sde', 'vguide', 'vpost')   # ids that expand to <id>_<strength>
+
+
+def single_spec(part, o):
+    """Spec of one recipe id, including expanded ids such as sde_1 or vguide_0.25."""
+    if '@' in part:
+        return build_methods((part,), o)[part]
+    base, _, value = part.partition('_')
+    if base in EXPANDED and value:
+        key = {'sde': 'sde_strengths', 'vguide': 'vguide_strengths', 'vpost': 'vguide_strengths'}[base]
+        return build_methods((base,), dict(o, **{key: (float(value),)}))[f'{base}_{float(value):g}']
+    return build_methods((part,), o)[part]
+
+
+def combine_methods(names, o):
+    """Combined recipes, e.g. 'autoguide_hf+fk_steer+spectral': the sampling knobs of every
+    sampler part together (FK steering if any part steers), then the post-processing parts
+    applied in order to the combined members. Selection recipes cannot be combined."""
+    o = dict(vars(o)) if not isinstance(o, dict) else o
+    out = {}
+    for name in names:
+        parts = [q for q in name.split('+') if q]
+        if len(parts) < 2:
+            raise ValueError(f'A combination needs two or more recipes joined by "+": {name!r}')
+        spec = dict(DEFAULTS, id=name, then=[], steps=o['steps'], source='baseline')
+        labels = []
+        for part in parts:
+            s = single_spec(part, o)
+            labels.append(s['label'])
+            if s['kind'] == 'select':
+                raise ValueError(f'{part} (member selection) cannot be combined; it has its own phase 2')
+            if s['kind'] == 'post':
+                spec['then'].append(s)
+                continue
+            if s['kind'] == 'fk':
+                spec['kind'] = 'fk'
+            for k, v in s.items():
+                if k in DEFAULTS and k not in ('kind', 'then', 'steps') and v != DEFAULTS[k]:
+                    spec[k] = v
+        spec.update(label=' + '.join(labels), desc='combination: '+' + '.join(labels))
+        out[name] = spec
+    return out
+
 
 def build_methods(ids, o):
     """Ordered {id: spec}. ``o``: options namespace/dict (CLI values)."""
@@ -157,6 +215,9 @@ def build_methods(ids, o):
         'autoguide_hf': dict(label=f'HF autoguide w={o["guide_weight"]:g}',
                              desc='fine-scale, mid-t, projected autoguidance', guide_weight=o['guide_weight'],
                              ag_hf=True, ag_sigma=o['ag_sigma'], ag_range=tuple(o['ag_range'])),
+        'fk_edge': dict(kind='fk', label=f'FK edge steering ×{o["fk_particles"]}',
+                        desc='particles resampled toward climatological sharpness of the sharpest lines (p99.9 |∇|)',
+                        fk_reward='edge', langevin=o['langevin'], langevin_range=(.2, .97)),
         'fk_steer': dict(kind='fk', label=f'FK steering ×{o["fk_particles"]}',
                          desc='particles resampled toward climatological sharpness',
                          langevin=o['langevin'], langevin_range=(.2, .97)),
@@ -182,6 +243,20 @@ def build_methods(ids, o):
     }
     methods = {}
     for name in ids:
+        base, at, value = name.partition('@')
+        if at:   # e.g. fk_steer@4: the recipe with FK strength lambda = 4
+            spec = dict(build_methods((base,), o)[base], id=name)
+            if spec['kind'] != 'fk':
+                raise ValueError(f'"@lambda" applies to FK steering recipes only: {name!r}')
+            spec.update(fk_lambda=float(value), label=f'{spec["label"]} λ={float(value):g}')
+            methods[name] = spec
+            continue
+        stem, _, strength = name.partition('_')
+        if stem in EXPANDED and strength and name not in table:   # e.g. vguide_0.5, sde_1, vpost_0.25
+            key = {'sde': 'sde_strengths', 'vguide': 'vguide_strengths', 'vpost': 'vguide_strengths'}[stem]
+            spec = build_methods((stem,), dict(o, **{key: (float(strength),)}))[f'{stem}_{float(strength):g}']
+            methods[name] = dict(spec, id=name)
+            continue
         if name == 'vguide':
             for s in o['vguide_strengths']:
                 methods[f'vguide_{s:g}'] = dict(DEFAULTS, id=f'vguide_{s:g}', label=f'v10m guidance {s:g}',
@@ -422,7 +497,7 @@ class RegionEngine:
         along = (high*value).sum((-2, -1), keepdim=True)/(value*value).sum((-2, -1), keepdim=True).clamp_min(1e-12)
         return high-along*value
 
-    def vguide_step(self, x, v, t, spec, fields, radius, eps, sigma):
+    def vguide_step(self, x, v, t, weight, fields, radius, eps, sigma):
         """Nudge the state toward the member's v10m-edge-sharpened clean estimate."""
         x1 = (x+(1-t)*v)[:, self.dy, self.dx]
         phys = (x1*self.t_scale+self.t_mean_dom)*self.t_rs+self.t_rm+self.t_coarse_dom
@@ -430,7 +505,7 @@ class RegionEngine:
         for name in fields:
             c = TARGETS.index(name)
             delta = guided_torch(phys[c], guide, radius, eps, sigma)-phys[c]
-            x[c, self.dy, self.dx] += spec['vguide']*t*delta/(self.t_rs[c]*self.t_scale[c])
+            x[c, self.dy, self.dx] += weight*t*delta/(self.t_rs[c]*self.t_scale[c])
         return x
 
     @torch.no_grad()
@@ -465,7 +540,9 @@ class RegionEngine:
                 x = x+delta*score+float(np.sqrt(2*delta))*fresh
             lo, hi = spec['vguide_range']
             if spec['vguide'] > 0 and lo <= t_next <= hi and t_next < 1:
-                x = self.vguide_step(x, second, t_next, spec, opts['vguide_fields'], opts['vguide_radius'],
+                # Strength spread over the guided interval: the steps' weights sum to spec['vguide'].
+                weight = spec['vguide']*(t_next-t_cur)/max(hi-lo, 1e-6)
+                x = self.vguide_step(x, second, t_next, weight, opts['vguide_fields'], opts['vguide_radius'],
                                      opts['vguide_eps'], opts['vguide_sigma'])
             if not bool(torch.isfinite(x).all()):
                 raise FloatingPointError(f'Nonfinite trajectory ({spec["id"]})')
@@ -559,13 +636,13 @@ def sharp_view(c, field):
     return np.sqrt(np.maximum(field, 0)) if c == RAIN else np.asarray(field, dtype='float64')
 
 
-def p99_grad(field):
+def p99_grad(field, q=.99):
     gy, gx = np.gradient(np.asarray(field, dtype='float64'))
-    return float(np.quantile(np.hypot(gy, gx), .99))
+    return float(np.quantile(np.hypot(gy, gx), q))
 
 
-def member_p99(member):
-    return np.array([p99_grad(sharp_view(c, member[c])) for c in range(len(TARGETS))])
+def member_p99(member, q=.99):
+    return np.array([p99_grad(sharp_view(c, member[c]), q) for c in range(len(TARGETS))])
 
 
 def _doy_distance(a, b):
@@ -589,7 +666,7 @@ def climatology(archive, entry, region, count=24, days=45, seed=11, log=print):
         near = sorted(pool, key=lambda e: _doy_distance(datetime.fromisoformat(e['time'][:19]), when))[:4*count]
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(near))
-    ratios, spectra, used = [], [], []
+    ratios, ratios999, spectra, used = [], [], [], []
     for j in order:
         e = near[j]
         try:
@@ -600,6 +677,7 @@ def climatology(archive, entry, region, count=24, days=45, seed=11, log=print):
         t = member_p99(truth)
         c = member_p99(coarse)
         ratios.append(t/np.maximum(c, 1e-30))
+        ratios999.append(member_p99(truth, .999)/np.maximum(member_p99(coarse, .999), 1e-30))
         spectra.append([radial_psd(sharp_view(k, truth[k]))[1] for k in range(len(TARGETS))])
         used.append(e['time'])
         if len(used) == count:
@@ -608,7 +686,7 @@ def climatology(archive, entry, region, count=24, days=45, seed=11, log=print):
         raise ValueError('No climatology hours available')
     freq = radial_psd(np.zeros((r1-r0, c1-c0)))[0]
     log(f'Climatology: {len(used)} hours within ~{days} days of {when:%m-%d} ({used[0][:10]} ...)')
-    return dict(ratio=np.median(np.array(ratios), 0), psd=np.median(np.array(spectra), 0), freq=freq, times=used)
+    return dict(ratio=np.median(np.array(ratios), 0), ratio999=np.median(np.array(ratios999), 0), psd=np.median(np.array(spectra), 0), freq=freq, times=used)
 
 
 def selection_scores(members, coarse, clim):
@@ -703,7 +781,62 @@ def method_grids(spec, specs):
     return ''.join(sorted(set(spec['grids']+(spec.get('restart_grids') or ''))))
 
 
-def score_ensemble(ens, truth, area, dx_km, front, boundaries):
+def truth_edges(field, count=24, quantile=.995, sigma=1., spacing=10, margin=EDGE_LENGTH+EDGE_SEARCH+2):
+    """The truth's sharpest edge points (top ``quantile`` of the lightly smoothed gradient),
+    at least ``spacing`` px apart, with the unit normal pointing toward higher values."""
+    f = np.asarray(field, dtype='float64')
+    f = gaussian_filter(f, sigma) if sigma > 0 else f
+    gy, gx = np.gradient(f)
+    g = np.hypot(gy, gx)
+    h, w = g.shape
+    inner = np.zeros_like(g)
+    if h > 2*margin and w > 2*margin:
+        inner[margin:h-margin, margin:w-margin] = g[margin:h-margin, margin:w-margin]
+    if not (inner > 0).any():
+        return []
+    threshold = np.quantile(inner[inner > 0], quantile)
+    points = []
+    for i in np.argsort(inner, axis=None)[::-1]:
+        if inner.flat[i] < threshold or len(points) == count:
+            break
+        y, x = divmod(int(i), w)
+        if all((y-py)**2+(x-px)**2 >= spacing**2 for (py, px), _ in points):
+            n = float(g[y, x]) or 1.
+            points.append(((y, x), (float(gy[y, x])/n, float(gx[y, x])/n)))
+    return points
+
+
+def local_step(values, half=EDGE_HALF_SPAN, search=EDGE_SEARCH):
+    """Largest change across 2*half px (in the truth's uphill direction) within +-search px of
+    the profile centre: how much of the jump happens in a few km, allowing a small displacement."""
+    c = len(values)//2
+    return max(values[i+half]-values[i-half] for i in range(c-search, c+search+1))
+
+
+def edge_scores(members, truth, edges, length=EDGE_LENGTH):
+    """Edge contrast ratio (member local step / truth local step, median over the truth's edge
+    points, mean over members; 1 = as sharp as truth) and composite profiles normalized by each
+    point's truth jump (for plots)."""
+    if not edges:
+        return None, None
+    ratios, composite, truth_composite = [], [], []
+    for point, normal in edges:
+        _, tp = profile(truth, point, normal, length, 2)
+        step = local_step(tp)
+        jump = float(np.mean(tp[-3:])-np.mean(tp[:3]))
+        if step <= 0 or jump <= 0:
+            continue
+        rows = [profile(m, point, normal, length, 2)[1] for m in members]
+        ratios.append([local_step(r)/step for r in rows])
+        truth_composite.append((tp-tp.mean())/jump)
+        composite.append((np.mean(rows, 0)-tp.mean())/jump)
+    if not ratios:
+        return None, None
+    ratio = float(np.mean(np.median(np.array(ratios), axis=0)))
+    return ratio, dict(truth=np.mean(truth_composite, 0).tolist(), members=np.mean(composite, 0).tolist())
+
+
+def score_ensemble(ens, truth, area, dx_km, front, boundaries, edges=None):
     """Per-field scores of an ensemble (M, 6, R, C) against truth (6, R, C)."""
     out = {}
     m = len(ens)
@@ -725,6 +858,8 @@ def score_ensemble(ens, truth, area, dx_km, front, boundaries):
             p99_ratio=None if flat or tp99 <= 0 else float(np.mean([p99_grad(x) for x in sv])/tp99),
             fine_psd_ratio=None if flat else fine_psd_ratio(sv, tv, dx_km),
             seam=float(np.mean([seam_index(x, boundaries) for x in sv])), truth_seam=seam_index(tv, boundaries))
+        if edges and name in edges:
+            out[name]['edge_ratio'], out[name]['edge_profile'] = edge_scores(e, t, edges[name])
         if front is not None and name in FRONT_FIELDS:
             point, normal, length, band = front
             s, tp = profile(t, point, normal, length, band)
@@ -739,10 +874,9 @@ def sharpness_gap(scores):
     """Mean |log| distance of member sharpness from truth: 0 = truth-like."""
     p99 = [abs(np.log(max(f['p99_ratio'], 1e-9))) for f in scores.values() if f['p99_ratio'] is not None]
     psd = [abs(np.log(f['fine_psd_ratio'])) for f in scores.values() if f['fine_psd_ratio']]
-    front = [abs(np.log(f['member_width_km']/f['truth_width_km'])) for f in scores.values()
-             if f.get('member_width_km') and f.get('truth_width_km')]
+    edge = [abs(np.log(max(f['edge_ratio'], 1e-3))) for f in scores.values() if f.get('edge_ratio')]
     parts = dict(p99=float(np.mean(p99)) if p99 else None, psd=float(np.mean(psd)) if psd else None,
-                 front=float(np.mean(front)) if front else None)
+                 edge=float(np.mean(edge)) if edge else None)
     used = [v for v in parts.values() if v is not None]
     return float(np.mean(used)), parts
 
@@ -776,10 +910,10 @@ def judge(scores, base, crps_tol, crps_tol_max, bias_tol):
 OPTION_DEFAULTS = dict(members=8, pool=16, steps=64, region=384, margin=96, clim_count=24, clim_days=45,
                        warp_gamma=2., churn=.2, langevin=.3, langevin_range=(.5, .97), restart=2, restart_t=.7,
                        temp=1.1, hf_boost=.3, hf_sigma=2., hf_start=.7, guide_checkpoint='auto', guide_weight=1.5,
-                       vguide_strengths=(.25, .5, 1.), vguide_range=(.6, .97), vguide_fields=('t2m', 'q2m', 'ps'),
+                       vguide_strengths=(.25, .5, 1.), vguide_range=(.6, .97), vguide_fields=('t2m', 'q2m'),
                        vguide_radius=8, vguide_eps=1e-2, vguide_sigma=2., spectral_max_gain=1.5,
                        spectral_cutoff_km=40., prescreen_steps=8, sde_strengths=(.5, 1., 2.), sde_range=(.2, .9),
-                       ag_sigma=8., ag_range=(.35, .85), fk_particles=4, fk_lambda=10., fk_times=(.3, .5, .7, .85), crps_tol=1., crps_tol_max=3., bias_tol=.02,
+                       ag_sigma=8., ag_range=(.35, .85), combine=(), phase2=True, fk_particles=4, fk_lambda=10., fk_times=(.3, .5, .7, .85), crps_tol=1., crps_tol_max=3., bias_tol=.02,
                        profile_length=60, profile_band=24)
 
 
@@ -829,12 +963,14 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
 
     spec_methods = build_methods(methods, o)
     guide = None
-    if any(k in spec_methods for k in GUIDED_IDS):
+    spec_methods.update(combine_methods(o['combine'], o))
+    guided_ids = [k for k, m in spec_methods.items() if m['guide_weight'] != 1.]
+    if guided_ids:
         guide = load_guide(cfg, o['guide_checkpoint'], archive, saved, device, log)
         if guide is None:
-            log('autoguidance recipes skipped: no earlier kept checkpoint in this run')
-            for k in GUIDED_IDS:
-                spec_methods.pop(k, None)
+            log(f'autoguidance recipes skipped (no earlier kept checkpoint in this run): {", ".join(guided_ids)}')
+            for k in guided_ids:
+                spec_methods.pop(k)
     engine = RegionEngine(model, conditioner, archive, entry, cfg, device, region, o['margin'], batch, threads,
                           guide['model'] if guide else None)
     log(f'Case {entry["id"]} ({cases[0]["reason"]}); {path.name} (epoch {saved["epoch"]+1}, {weights}); '
@@ -849,9 +985,17 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
 
     target = clim['ratio']*member_p99(coarse)
 
+    target999 = clim['ratio999']*member_p99(coarse, .999)
+    edge_idx = [TARGETS.index(n) for n in EDGE_FIELDS]
+
     def reward(fields):
         """Truth-free: minus the mean |log| distance of p99|grad| from the climatological target."""
         return -float(np.mean(np.abs(np.log(member_p99(fields)/np.maximum(target, 1e-30)))))
+
+    def reward_edge(fields):
+        """Truth-free, sharp lines only: p99.9 |grad| of the edge fields vs the climatological target."""
+        value = np.array([p99_grad(fields[c], .999) for c in edge_idx])
+        return -float(np.mean(np.abs(np.log(value/np.maximum(target999[edge_idx], 1e-30)))))
     fk_ess = []
 
     def solve(spec, count):
@@ -859,7 +1003,8 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
         members = []
         for k in range(count):
             if spec['kind'] == 'fk':
-                member, ess = engine.fk_sample(seeds[k], spec, o, reward, o['fk_particles'], o['fk_lambda'],
+                member, ess = engine.fk_sample(seeds[k], spec, o, reward_edge if spec['fk_reward'] == 'edge' else reward,
+                                               o['fk_particles'], spec['fk_lambda'] or o['fk_lambda'],
                                                tuple(o['fk_times']))
                 fk_ess.append(ess)
                 members.append(member)
@@ -869,8 +1014,17 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
         return np.stack(members)
 
     trajectory = [m for m in spec_methods.values() if m['kind'] in ('trajectory', 'fk')]
+    solved = {}   # identical sampling knobs (e.g. a combination = recipe + post-processing) reuse members
     for spec in trajectory:
         count = o['pool'] if spec['id'] == 'baseline' else o['members']
+        key = repr([(k, spec[k]) for k in sorted(DEFAULTS) if k != 'then'])
+        if key in solved and len(ensembles[solved[key]]) >= min(count, o['members']) and spec['id'] != 'baseline':
+            ens = ensembles[solved[key]][:count].copy()
+            seconds[spec['id']] = seconds[solved[key]]
+            ensembles[spec['id']] = ens
+            log(f'  {spec["id"]:>14}: reuses the members of {solved[key]}')
+            continue
+        solved.setdefault(key, spec['id'])
         ens = solve(spec, count)
         if spec['id'] == 'baseline':
             extras['baseline_pool'] = ens
@@ -908,12 +1062,19 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
             chosen[spec['id']] = pick.tolist()
             seconds.setdefault(spec['id'], seconds[source]*o['pool']/o['members'])
             return pool_[pick]
-        base = ensembles[source]
         seconds.setdefault(spec['id'], seconds[source])
+        return apply_post(spec, ensembles[source])
+
+    def apply_post(spec, members):
         if spec['post'] == 'spectral':
-            return np.stack([spectral_fix(mm, clim, dx_km, o['spectral_max_gain'], o['spectral_cutoff_km']) for mm in base])
+            return np.stack([spectral_fix(mm, clim, dx_km, o['spectral_max_gain'], o['spectral_cutoff_km'])
+                             for mm in members])
         return np.stack([vpost(mm, spec['strength'], o['vguide_fields'], o['vguide_radius'], o['vguide_eps'],
-                               o['vguide_sigma']) for mm in base])
+                               o['vguide_sigma']) for mm in members])
+
+    for spec in trajectory:   # combinations: post-processing parts on their own members
+        for step in spec.get('then', ()):
+            ensembles[spec['id']] = apply_post(step, ensembles[spec['id']])
 
     for spec in spec_methods.values():
         if spec['kind'] not in ('trajectory', 'fk'):
@@ -924,9 +1085,12 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
         log('  FK steering mean effective sample size per resampling: '
             + ', '.join(f'{v:.2f}' for v in selection['fk_mean_ess']) + f' of {o["fk_particles"]}')
 
+    edges = {name: truth_edges(truth[TARGETS.index(name)]) for name in EDGE_FIELDS}
+    log('Truth edge points per field: ' + ', '.join(f'{k} {len(v)}' for k, v in edges.items()))
+
     def evaluate_all():
         scores = {k: score_ensemble(v, truth, area, dx_km, front,
-                                    tile_boundaries(engine, method_grids(spec_methods[k], spec_methods)))
+                                    tile_boundaries(engine, method_grids(spec_methods[k], spec_methods)), edges)
                   for k, v in ensembles.items()}
         base = scores['baseline']
         table = {}
@@ -942,7 +1106,7 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
     base_gap = table['baseline']['gap']
     candidates = [k for k, v in table.items() if v['feasible'] and k != 'baseline' and
                   spec_methods.get(k, {}).get('kind') in ('trajectory', 'fk') and v['gap'] < base_gap]
-    winner = min(candidates, key=lambda k: table[k]['gap']) if candidates else None
+    winner = min(candidates, key=lambda k: table[k]['gap']) if candidates and o['phase2'] else None
     if winner:
         log(f'Phase 2: best sampler recipe {winner}; drawing its pool of {o["pool"]}')
         spec = spec_methods[winner]
@@ -965,7 +1129,8 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
                    tiles=engine.tile_count, options={k: (list(v) if isinstance(v, tuple) else v) for k, v in o.items()},
                    methods={k: {kk: vv for kk, vv in spec_methods[k].items() if not callable(vv)} for k in table},
                    results=table, ranking=order, best=best, phase2_winner=winner, selection=selection,
-                   selected=chosen, climatology=dict(ratio=clim['ratio'].tolist(), times=clim['times']),
+                   selected=chosen, edges={k: [[list(p), list(n)] for p, n in v] for k, v in edges.items()},
+                   climatology=dict(ratio=clim['ratio'].tolist(), times=clim['times']),
                    seconds=time.monotonic()-started)
     write_json(out/'metrics.json', json.loads(json.dumps(metrics, default=_jsonable)))
     if save_members:
@@ -981,7 +1146,10 @@ def run(cfg, checkpoint='latest', timestamp=None, split='val', methods=METHOD_ID
             fig.savefig(out/f'{stem}.pdf', dpi=dpi)
         plt.close(fig)
     for name in ('t2m', 'q2m', 'v10m', 'u10m', 'ps', 'precip'):
-        save(plot_members(name, truth, coarse, ensembles, order, table, front, heading, plt), f'members_{name}')
+        save(plot_members(name, truth, coarse, ensembles, order, table, front, heading, plt, edges.get(name)),
+             f'members_{name}')
+    save(plot_edges(table, order, dx_km, heading, plt), 'edge_profiles')
+    save(plot_edge_zoom(truth, ensembles, order, table, edges, dx_km, heading, plt), 'edge_zoom')
     save(plot_scorecard(table, order, heading, plt), 'scorecard')
     save(plot_spectra(ensembles, truth, order, dx_km, heading, plt), 'spectra')
     save(plot_profiles(ensembles, truth, order, front, dx_km, heading, plt), 'profiles')
@@ -1016,7 +1184,7 @@ def _norm_for(name, pool):
     return DISPLAY[name][4], Normalize(float(lo), float(max(hi, lo+1e-9)))
 
 
-def plot_members(name, truth, coarse, ensembles, order, table, front, heading, plt):
+def plot_members(name, truth, coarse, ensembles, order, table, front, heading, plt, edges=None):
     c = TARGETS.index(name)
     conv = _conv(name)
     panels = [('Truth', truth[c]), ('Coarse', coarse[c])]
@@ -1029,9 +1197,14 @@ def plot_members(name, truth, coarse, ensembles, order, table, front, heading, p
     cmap, norm = _norm_for(name, np.concatenate([conv(truth[c]).ravel(), conv(coarse[c]).ravel()]))
     (cy, cx), (ny, nx), length, _ = front
     image = None
-    for ax, (label, field) in zip(axes.flat, panels):
+    for k, (ax, (label, field)) in enumerate(zip(axes.flat, panels)):
         image = ax.imshow(conv(field), origin='lower', cmap=cmap, norm=norm, interpolation='nearest')
-        ax.plot([cx-length*nx, cx+length*nx], [cy-length*ny, cy+length*ny], color='k', lw=.7, ls='--')
+        if edges and k == 0:   # truth: the edge points the edge score is measured at
+            for (py, px), (ey, ex) in edges:
+                ax.plot([px-EDGE_LENGTH*ex, px+EDGE_LENGTH*ex], [py-EDGE_LENGTH*ey, py+EDGE_LENGTH*ey],
+                        color='m', lw=.9)
+        elif not edges:
+            ax.plot([cx-length*nx, cx+length*nx], [cy-length*ny, cy+length*ny], color='k', lw=.7, ls='--')
         ax.set_title(label, fontsize=8)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -1039,7 +1212,76 @@ def plot_members(name, truth, coarse, ensembles, order, table, front, heading, p
         ax.set_visible(False)
     fig.colorbar(image, ax=list(axes.flat), shrink=.7, label=f'{DISPLAY[name][0]} ({DISPLAY[name][1]})')
     fig.suptitle(f'{heading}\n{DISPLAY[name][0]}: member 1 of each recipe, ranked (✓ feasible: CRPS/bias/seams '
-                 f'within limits); gap 0 = truth-like sharpness', fontsize=10)
+                 f'within limits); gap 0 = truth-like sharpness'
+                 + ('; magenta = truth edge segments scored' if edges else ''), fontsize=10)
+    return fig
+
+
+def plot_edges(table, order, dx_km, heading, plt):
+    """Composite cross-edge profiles at the truth's sharpest edge points (normalized by the truth
+    jump at each point): a truth-like member mean rises as steeply as truth."""
+    fig, axes = plt.subplots(1, len(EDGE_FIELDS), figsize=(5.2*len(EDGE_FIELDS), 5), constrained_layout=True)
+    cmap = plt.get_cmap('tab20')
+    for ax, name in zip(axes, EDGE_FIELDS):
+        base = table['baseline']['fields'][name].get('edge_profile')
+        if not base:
+            ax.set_visible(False)
+            continue
+        km = (np.arange(len(base['truth']))-len(base['truth'])//2)*dx_km
+        ax.plot(km, base['truth'], color='k', lw=3, label='Truth', zorder=5)
+        for i, k in enumerate(order):
+            f = table[k]['fields'][name]
+            if f.get('edge_profile'):
+                ax.plot(km, f['edge_profile']['members'], lw=2 if k == 'baseline' else 1.1,
+                        ls='--' if k == 'baseline' else '-', color='#2166ac' if k == 'baseline' else cmap(i % 20),
+                        label=f'{k} ({f["edge_ratio"]:.2f})')
+        ax.set_title(f'{name}: edge step ratio in legend (1 = truth)', fontsize=9)
+        ax.set_xlabel('Distance across the truth edge (km)')
+        ax.grid(True, ls='--', alpha=.4)
+        ax.legend(fontsize=5.5)
+    fig.suptitle(f'{heading}\nComposite profiles across the truth\'s sharpest edges (member mean, normalized by '
+                 'truth jump)', fontsize=11)
+    return fig
+
+
+def plot_edge_zoom(truth, ensembles, order, table, edges, dx_km, heading, plt, fields=('q2m', 't2m'),
+                   per_field=2, half=48, recipes=11):
+    """Zoom on the truth's strongest edges, colours from truth's local 2-98 % range there (no
+    saturation by the regional range): truth and member 1 of the best-ranked recipes."""
+    names = [k for k in order[:recipes]]
+    if 'baseline' not in names:
+        names = names[:-1]+['baseline']
+    rows = [(n, e) for n in fields for e in (edges.get(n) or [])[:per_field]]
+    if not rows:
+        fig = plt.figure(figsize=(4, 2))
+        fig.text(.5, .5, 'no truth edges found', ha='center')
+        return fig
+    cols = 1+len(names)
+    fig, axes = plt.subplots(len(rows), cols, figsize=(2.3*cols, 2.5*len(rows)+.8), constrained_layout=True,
+                             squeeze=False)
+    for r, (name, ((py, px), (ey, ex))) in enumerate(rows):
+        c = TARGETS.index(name)
+        conv = _conv(name)
+        h, w = truth.shape[-2:]
+        ys, xs = slice(max(0, py-half), min(h, py+half)), slice(max(0, px-half), min(w, px+half))
+        window = conv(truth[c][ys, xs])
+        lo, hi = np.quantile(window, [.02, .98])
+        cmap = DISPLAY[name][4]
+        panels = [('Truth', truth[c])]+[(f'{k}\nedge {table[k]["fields"][name].get("edge_ratio") or 0:.2f}',
+                                         ensembles[k][0, c]) for k in names]
+        for j, (label, field) in enumerate(panels):
+            ax = axes[r, j]
+            image = ax.imshow(conv(field[ys, xs]), origin='lower', cmap=cmap, vmin=lo, vmax=hi, interpolation='nearest')
+            ly, lx = py-ys.start, px-xs.start
+            ax.plot([lx-EDGE_LENGTH*ex, lx+EDGE_LENGTH*ex], [ly-EDGE_LENGTH*ey, ly+EDGE_LENGTH*ey], color='m', lw=.8)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title(label if r == 0 or j == 0 else '', fontsize=7)
+            if j == 0:
+                ax.set_ylabel(f'{name} edge {r % per_field+1}', fontsize=8)
+        fig.colorbar(image, ax=axes[r, :].tolist(), shrink=.8, pad=.01, label=DISPLAY[name][1])
+    fig.suptitle(f'{heading}\nZoom ({2*half*dx_km:.0f} km) on the truth\'s strongest edges, local colour range; '
+                 'member 1 of each recipe; "edge" = step ratio (1 = truth)', fontsize=10)
     return fig
 
 
@@ -1159,11 +1401,12 @@ def write_report(out, metrics, specs):
          f'**Best feasible recipe: `{metrics["best"]}`** (sharpness gap {t[metrics["best"]]["gap"]:.3f} vs baseline '
          f'{base["gap"]:.3f}; lower = closer to truth).', '',
          '## Ranking', '',
-         'Gap = mean |log| distance of member sharpness from truth (p99 |∇|, 4–30 km power, front max-slope width). '
+         'Gap = mean |log| distance of member sharpness from truth (p99 |∇|, 4–30 km power, and the edge step: '
+         'change across ~7.5 km at the truth\'s sharpest edge points, members allowed ±15 km displacement). '
          f'Feasible: mean CRPS change ≤ {metrics["options"]["crps_tol"]}%, no field > '
          f'{metrics["options"]["crps_tol_max"]}%, |bias|/std growth ≤ {metrics["options"]["bias_tol"]}, '
          f'seam index growth ≤ {SEAM_TOL}. Cost = time per member / baseline.', '',
-         '| Rank | Recipe | What | Feasible | Gap | p99 part | PSD part | Front part | Mean ΔCRPS % | Worst ΔCRPS % | '
+         '| Rank | Recipe | What | Feasible | Gap | p99 part | PSD part | Edge part | Mean ΔCRPS % | Worst ΔCRPS % | '
          'Seams | Cost | Why not |',
          '|---:|---|---|:-:|---:|---:|---:|---:|---:|---:|---:|---:|---|']
     for i, k in enumerate(metrics['ranking'], 1):
@@ -1172,7 +1415,7 @@ def write_report(out, metrics, specs):
         worst = max(r['crps_change'], key=r['crps_change'].get)
         L.append(f'| {i} | `{k}` | {specs[k]["desc"]} | {"✓" if r["feasible"] else "✗"} | {r["gap"]:.3f} | '
                  f'{_f(r["gap_parts"]["p99"], "{:.3f}")} | {_f(r["gap_parts"]["psd"], "{:.3f}")} | '
-                 f'{_f(r["gap_parts"]["front"], "{:.3f}")} | {np.mean(change):+.2f} | {worst} {r["crps_change"][worst]:+.1f} | '
+                 f'{_f(r["gap_parts"]["edge"], "{:.3f}")} | {np.mean(change):+.2f} | {worst} {r["crps_change"][worst]:+.1f} | '
                  f'{np.mean([f["seam"] for f in r["fields"].values()]):.3f} | {r["cost"]:.1f}× | '
                  f'{"; ".join(r["reasons"])} |')
     fields = list(base['fields'])
@@ -1183,7 +1426,11 @@ def write_report(out, metrics, specs):
         L += ['', f'## {title}', '', '| Recipe | ' + ' | '.join(fields) + ' |', '|---|' + '---:|'*len(fields)]
         for k in metrics['ranking']:
             L.append(f'| `{k}` | ' + ' | '.join(_f(t[k]['fields'][f][key], fmt) for f in fields) + ' |')
-    L += ['', '## Front max-slope width, member median (km)', '',
+    L += ['', '## Edge step ratio at the truth\'s sharpest edges (1 = as sharp as truth; see edge_profiles.png)', '',
+          '| Recipe | ' + ' | '.join(EDGE_FIELDS) + ' |', '|---|' + '---:|'*len(EDGE_FIELDS)]
+    for k in metrics['ranking']:
+        L.append(f'| `{k}` | ' + ' | '.join(_f(t[k]['fields'][f].get('edge_ratio')) for f in EDGE_FIELDS) + ' |')
+    L += ['', '## Single-profile front max-slope width, member median (km) (legacy; one line, ramp-dominated)', '',
           '| Recipe | ' + ' | '.join(FRONT_FIELDS) + ' |', '|---|' + '---:|'*len(FRONT_FIELDS),
           '| truth | ' + ' | '.join(_f(base['fields'][f].get('truth_width_km'), '{:.1f}') for f in FRONT_FIELDS) + ' |']
     for k in metrics['ranking']:
@@ -1199,7 +1446,7 @@ def write_report(out, metrics, specs):
     if metrics['phase2_winner']:
         L.append(f'Phase 2 combined the best sampler recipe `{metrics["phase2_winner"]}` with selection and spectral fix.')
     else:
-        L.append('Phase 2 skipped: no sampler recipe was both feasible and sharper than baseline.')
+        L.append('Phase 2 not run (switched off, or no sampler recipe was both feasible and sharper than baseline).')
     L += ['', 'Next: run the best recipe on the test set (several cases, 8 members) before adopting it.']
     (out/'report.md').write_text('\n'.join(L)+'\n')
 
@@ -1248,6 +1495,10 @@ def main():
     parser.add_argument('--fk-particles', type=int, default=d['fk_particles'])
     parser.add_argument('--fk-lambda', type=float, default=d['fk_lambda'])
     parser.add_argument('--fk-times', type=float, nargs='+', default=list(d['fk_times']))
+    parser.add_argument('--combine', default='',
+                        help='Comma list of combined recipes, each joined by "+", e.g. '
+                             '"autoguide_hf+spectral,autoguide_hf+fk_steer+spectral"')
+    parser.add_argument('--no-phase2', action='store_true', help='Skip the automatic phase-2 combinations')
     parser.add_argument('--spectral-max-gain', type=float, default=d['spectral_max_gain'])
     parser.add_argument('--spectral-cutoff-km', type=float, default=d['spectral_cutoff_km'])
     parser.add_argument('--crps-tol', type=float, default=d['crps_tol'])
@@ -1260,7 +1511,9 @@ def main():
     parser.add_argument('--dpi', type=int, default=200)
     parser.add_argument('--no-pdf', action='store_true')
     a = parser.parse_args()
-    options = {k: getattr(a, k) for k in OPTION_DEFAULTS if hasattr(a, k)}
+    options = {k: getattr(a, k) for k in OPTION_DEFAULTS if hasattr(a, k) and k not in ('combine', 'phase2')}
+    options['combine'] = tuple(c.strip() for c in a.combine.split(',') if c.strip())
+    options['phase2'] = not a.no_phase2
     for k in ('langevin_range', 'vguide_range', 'vguide_strengths', 'vguide_fields', 'sde_strengths', 'sde_range',
               'ag_range', 'fk_times'):
         options[k] = tuple(options[k])
