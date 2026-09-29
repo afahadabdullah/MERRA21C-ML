@@ -26,7 +26,7 @@
 #           restart,restart_shift,temp,hf_boost,autoguide,autoguide_hf,vguide,fk_steer,fk_edge,
 #           select_clim,select_sharp,prescreen,spectral,vpost   (default: all)
 #   VGUIDE_STRENGTHS="0.25 0.5 1"  VGUIDE_FIELDS="t2m q2m"  SDE_STRENGTHS="0.5 1 2"
-#   FK_PARTICLES=4  FK_LAMBDA=10  LANGEVIN=0.3  CHURN=0.2  RESTART=2  RESTART_T=0.7  TEMP=1.1
+#   FK_PARTICLES=4  FK_LAMBDA=2 (in units of the reward spread between particles)  LANGEVIN=0.3  CHURN=0.2  RESTART=2  RESTART_T=0.7  TEMP=1.1
 #   GUIDE_CHECKPOINT=auto  GUIDE_WEIGHT=1.5   CLIM_COUNT=24  CLIM_DAYS=45
 #   COMBINE="autoguide_hf+spectral,autoguide_hf+fk_steer+spectral"  (recipes joined by +; comma list)
 #   Strength suffixes: fk_steer@4 / fk_edge@10 (FK lambda), vguide_0.5, sde_1, vpost_0.25

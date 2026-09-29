@@ -50,7 +50,8 @@ Stochastic / denoising during inference:
                 shift4_hard tiling so every tile inherits one coherent large-scale state
   fk_edge       FK steering whose reward is the climatological p99.9 |grad| of the edge fields
                 (the sharpest lines only) instead of p99 of all fields
-  <fk>@<lam>    any FK recipe with strength lambda, e.g. fk_steer@4, fk_edge@10
+  <fk>@<lam>    any FK recipe with strength lambda (in units of the reward spread between
+                particles; default 2), e.g. fk_edge@1, fk_edge@3
   fk_steer      Feynman-Kac steering (Singhal et al. 2025): --fk-particles particles per
                 member with Langevin noise; at t in --fk-times each particle's clean
                 estimate is scored by the truth-free climatological sharpness match and
@@ -593,7 +594,7 @@ class RegionEngine:
                 while pending and t >= pending[0]:
                     pending.pop(0)
                 r = rewards(t)
-                logw = lam*(r-previous)
+                logw = self._fk_logw(r-previous, lam)
                 w = np.exp(logw-logw.max())
                 w /= w.sum()
                 ess.append(float(1/np.sum(w**2)))
@@ -605,10 +606,20 @@ class RegionEngine:
                 rngs = [np.random.default_rng(np.random.SeedSequence([seed, 7, i, j])) for j in range(particles)]
         final = [self.decode(x) for x in states]
         r = np.array([reward(f) for f in final])
-        logw = lam*(r-previous)
+        logw = self._fk_logw(r-previous, lam)
         w = np.exp(logw-logw.max())
         w /= w.sum()
         return final[int(choose.choice(particles, p=w))], ess
+
+    @staticmethod
+    def _fk_logw(increment, lam):
+        """Log-weights from reward increments standardized across the particles: lambda is in
+        units of the between-particle spread, so it gives real selection pressure whatever the
+        reward's scale (raw increments of a region-mean reward are ~1e-2 and left the weights
+        uniform). lambda=1: the best of 4 particles is typically ~2-3x as likely as the worst
+        pair average; lambda=3: strongly favours the best."""
+        spread = float(np.std(increment))
+        return np.zeros_like(increment) if spread < 1e-12 else lam*(increment-np.mean(increment))/spread
 
     def decode(self, x):
         """Box state -> physical fields (6, R, C) on the evaluation region."""
@@ -832,8 +843,9 @@ def edge_scores(members, truth, edges, length=EDGE_LENGTH):
         composite.append((np.mean(rows, 0)-tp.mean())/jump)
     if not ratios:
         return None, None
-    ratio = float(np.mean(np.median(np.array(ratios), axis=0)))
-    return ratio, dict(truth=np.mean(truth_composite, 0).tolist(), members=np.mean(composite, 0).tolist())
+    per_member = np.median(np.array(ratios), axis=0)
+    return float(np.mean(per_member)), dict(truth=np.mean(truth_composite, 0).tolist(),
+                                            members=np.mean(composite, 0).tolist(), per_member=per_member.tolist())
 
 
 def score_ensemble(ens, truth, area, dx_km, front, boundaries, edges=None):
@@ -913,7 +925,7 @@ OPTION_DEFAULTS = dict(members=8, pool=16, steps=64, region=384, margin=96, clim
                        vguide_strengths=(.25, .5, 1.), vguide_range=(.6, .97), vguide_fields=('t2m', 'q2m'),
                        vguide_radius=8, vguide_eps=1e-2, vguide_sigma=2., spectral_max_gain=1.5,
                        spectral_cutoff_km=40., prescreen_steps=8, sde_strengths=(.5, 1., 2.), sde_range=(.2, .9),
-                       ag_sigma=8., ag_range=(.35, .85), combine=(), phase2=True, fk_particles=4, fk_lambda=10., fk_times=(.3, .5, .7, .85), crps_tol=1., crps_tol_max=3., bias_tol=.02,
+                       ag_sigma=8., ag_range=(.35, .85), combine=(), phase2=True, fk_particles=4, fk_lambda=2., fk_times=(.3, .5, .7, .85), crps_tol=1., crps_tol_max=3., bias_tol=.02,
                        profile_length=60, profile_band=24)
 
 
@@ -1430,6 +1442,15 @@ def write_report(out, metrics, specs):
           '| Recipe | ' + ' | '.join(EDGE_FIELDS) + ' |', '|---|' + '---:|'*len(EDGE_FIELDS)]
     for k in metrics['ranking']:
         L.append(f'| `{k}` | ' + ' | '.join(_f(t[k]['fields'][f].get('edge_ratio')) for f in EDGE_FIELDS) + ' |')
+    L += ['', 'Per member (min–max over members): the best member is the ceiling any selection or steering can reach.',
+          '', '| Recipe | ' + ' | '.join(EDGE_FIELDS) + ' |', '|---|' + '---:|'*len(EDGE_FIELDS)]
+
+    def span(k, f):
+        prof = t[k]['fields'][f].get('edge_profile') or {}
+        v = prof.get('per_member')
+        return 'n/a' if not v else f'{min(v):.2f}–{max(v):.2f}'
+    for k in metrics['ranking']:
+        L.append(f'| `{k}` | ' + ' | '.join(span(k, f) for f in EDGE_FIELDS) + ' |')
     L += ['', '## Single-profile front max-slope width, member median (km) (legacy; one line, ramp-dominated)', '',
           '| Recipe | ' + ' | '.join(FRONT_FIELDS) + ' |', '|---|' + '---:|'*len(FRONT_FIELDS),
           '| truth | ' + ' | '.join(_f(base['fields'][f].get('truth_width_km'), '{:.1f}') for f in FRONT_FIELDS) + ' |']
@@ -1440,6 +1461,9 @@ def write_report(out, metrics, specs):
     L += ['', '## Member selection diagnostics (baseline pool)', '',
           f'Climatology from {len(metrics["climatology"]["times"])} training hours near the date. Selected pool members: '
           + ', '.join(f'{k}: {[i+1 for i in v]}' for k, v in metrics['selected'].items()) + '.']
+    if 'fk_mean_ess' in sel:
+        L.append(f'FK steering effective sample size per resampling (of {metrics["options"]["fk_particles"]} particles; '
+                 f'near the particle count = no selection): ' + ', '.join(f'{v:.2f}' for v in sel['fk_mean_ess']) + '.')
     if 'prescreen_rank_correlation' in sel:
         L.append(f'8-step vs {metrics["options"]["steps"]}-step truth-free score rank correlation: '
                  f'{sel["prescreen_rank_correlation"]:.2f} (near 1 = cheap solves predict sharp seeds).')

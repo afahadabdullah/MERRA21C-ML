@@ -596,3 +596,16 @@ def test_edge_step_scores_the_sharp_line_not_the_ramp():
     smooth, prof = edge_scores(np.stack([ramp+.5*(1+np.tanh(d/8))]), truth, edges)
     assert abs(same-1) < 1e-6 and shifted > .95 and smooth < .5
     assert len(prof['truth']) == len(prof['members'])
+
+
+def test_fk_weights_are_scale_free():
+    from merraflow.explore_inference_v4_1 import RegionEngine
+    tiny = np.array([-.3001, -.3004, -.2998, -.3010])          # region-mean rewards differ by ~1e-3
+    for lam, low in ((1., .1), (3., .001)):
+        w = np.exp(RegionEngine._fk_logw(tiny-(-.3), lam))
+        w /= w.sum()
+        assert w.argmax() == 2 and w.min() < 1-low*0 and 1/np.sum(w**2) < 3.9   # real selection, not uniform
+    assert np.allclose(RegionEngine._fk_logw(np.zeros(4), 3.), 0)             # identical particles: uniform
+    big = np.exp(RegionEngine._fk_logw(100*(tiny+.3), 2.))
+    small = np.exp(RegionEngine._fk_logw(tiny+.3, 2.))
+    assert np.allclose(big/big.sum(), small/small.sum())                       # independent of reward scale
