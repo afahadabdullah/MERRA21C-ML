@@ -633,13 +633,17 @@ def test_storm_animation(trained, tmp_path):
               post='none', track=False, log=lambda *a: None, configs={'cfg.yaml': trained})
     info = json.loads((out/'storm.json').read_text())
     assert len(info['hours']) >= 1 and info['members'] == 2 and not info['tracked']
-    tracked = run(parse_runs(['latest=cfg.yaml:latest']), split='test', hours=2, members=1, steps=2, zoom=20,
+    tracked = run(parse_runs(['latest=cfg.yaml:latest']), split='test', hours=2, steps=2, zoom=20, shift_north=.25,
                   margin=4, output=tmp_path/'tracked', batch=4, threads=2, dpi=40, post='spectral',
                   log=lambda *a: None, configs={'cfg.yaml': trained})
     t_info = json.loads((tracked/'storm.json').read_text())
     assert t_info['tracked'] and len(t_info['track']) == len(t_info['hours']) and (tracked/'track.png').exists()
-    assert all(r[1]-r[0] == 20 for r in t_info['regions']) and (tracked/'storm_slp.gif').exists()
-    for var in ('precip', 't2m', 'wind', 'slp'):
+    assert all(r[1]-r[0] == 20 for r in t_info['regions']) and (tracked/'storm_ps.gif').exists()
+    import xarray as xr
+    with xr.open_dataset(tracked/'storm_fields.nc', engine='h5netcdf') as ds:
+        assert ds['member_t2m'].shape == (len(t_info['hours']), 1, 2, 20, 20)   # time, run, member (default 2), y, x
+        assert ds['truth_ps'].attrs['units'] == 'Pa' and 'geosfp_precip' in ds and 'low_lat' in ds
+    for var in ('precip', 't2m', 'wind', 'ps'):
         gif = out/f'storm_{var}.gif'
         assert gif.exists() and gif.stat().st_size > 1000 and (out/f'peak_{var}.png').exists()
         from PIL import Image
