@@ -671,3 +671,27 @@ def test_storm_hours_are_consecutive_around_the_peak():
     assert got == sorted(got) and all(int(b)-int(a) == 1 for a, b in zip(got, got[1:]))
     window, _ = storm_hours(Fake(), 'test', '2026-01-15T07', hours=8, log=lambda *a: None)
     assert [e['time'][11:13] for e in window] == ['06', '07', '08', '09']   # cannot cross the gap
+
+
+@pytest.mark.parametrize('cartopy_maps', [False, True])
+def test_presentation_figures(trained, tmp_path, cartopy_maps):
+    from merraflow.present_v4_1 import run, FIELDS
+    out = run(trained, 'best', output=tmp_path/'present', split='test', samples=0, wettest=1, members=2, steps=2,
+              zooms=2, zoom_size=16, post='spectral', batch=4, threads=2, dpi=40, pdf=cartopy_maps,
+              use_cartopy=cartopy_maps, map_features=False, log=lambda *a: None)
+    case = next((out/'cases').iterdir())
+    for name in FIELDS:
+        assert (case/f'conus_{name}.png').exists() and (case/f'zoomA_{name}.png').exists()
+        assert (case/f'zoomB_{name}.png').exists() and (case/f'uncertainty_{name}.png').exists()
+        assert (case/f'diversity_{name}.png').exists()
+    assert (case/'scorecard.csv').exists()
+    from PIL import Image
+    for name in ('precip', 't2m', 'wind_speed'):
+        assert (case/f'reveal_{name}.png').exists()
+        with Image.open(case/f'members_{name}.gif') as gif:
+            assert gif.n_frames == 2   # one frame per member
+    for stem in ('skill_crps', 'skill_rmse', 'spread_skill', 'scorecard', 'spectra', 'spectra_ratio',
+                 'rank_histograms', 'precip_diagnostics', 'overview'):
+        assert (out/f'{stem}.png').exists(), stem
+    metrics = json.loads((out/'metrics.json').read_text())
+    assert len(metrics['scorecard']) == len(FIELDS) and (out/'scorecard.csv').exists()
