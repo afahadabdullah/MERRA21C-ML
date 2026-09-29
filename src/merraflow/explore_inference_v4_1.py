@@ -864,7 +864,8 @@ def score_ensemble(ens, truth, area, dx_km, front, boundaries, edges=None):
         flat = float(t.std()) <= 1e-6*(abs(float(t.mean()))+1e-12)
         tp99 = p99_grad(tv)
         out[name] = dict(
-            crps=float(weighted_mean(crps_ensemble(e, t), area)), bias=bias,
+            crps=float(weighted_mean(crps_ensemble(e, t), area)), bias=bias, rmse=rmse,
+            mae=float(weighted_mean(np.abs(mean-t), area)),
             bias_norm=None if flat else abs(bias)/float(t.std()),
             spread_skill=spread*np.sqrt((m+1)/m)/max(rmse, 1e-30) if m > 1 else None,
             p99_ratio=None if flat or tp99 <= 0 else float(np.mean([p99_grad(x) for x in sv])/tp99),

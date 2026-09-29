@@ -609,3 +609,17 @@ def test_fk_weights_are_scale_free():
     big = np.exp(RegionEngine._fk_logw(100*(tiny+.3), 2.))
     small = np.exp(RegionEngine._fk_logw(tiny+.3, 2.))
     assert np.allclose(big/big.sum(), small/small.sum())                       # independent of reward scale
+
+
+def test_compare_checkpoints(trained, tmp_path):
+    from merraflow.compare_checkpoints_v4_1 import run, parse_runs
+    runs = parse_runs(['a_best=cfg.yaml:best', 'a_latest=cfg.yaml:latest'])
+    assert runs[0] == ('a_best', 'cfg.yaml', 'best')
+    out = run(runs, split='test', output=tmp_path/'ckpt', batch=4, threads=2, dpi=40, pdf=False,
+              log=lambda *a: None, configs={'cfg.yaml': trained}, members=2, pool=2, steps=3, region=20, margin=4,
+              clim_count=2, profile_length=6, profile_band=2)
+    summary = json.loads((out/'summary.json').read_text())
+    assert len(summary['rows']) == 4 and min(r['mean_relative_crps'] for r in summary['rows'].values()) >= 1
+    row = next(iter(summary['rows'].values()))
+    assert {'crps', 'rmse', 'mae', 'bias', 'spread_skill'} <= set(row['fields']['t2m'])
+    assert (out/'report.md').exists() and (out/'checkpoints.png').exists() and (out/'a_best'/'report.md').exists()
