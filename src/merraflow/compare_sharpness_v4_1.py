@@ -25,6 +25,9 @@ Methods (ids for ``--methods``; knob values come from the CLI):
   wet_cutoff      set rain below --dry-cutoff mm/h to 0 (drizzle cleanup: changes
                   wet area, not sharpness)
   tukey_window    flat-top Tukey tile blending (ablation; see make_window)
+  hann2_window    Hann² tile blending: centre-weighted, the tile that sees a pixel
+                  with the most context dominates the overlap (less averaging)
+  hann3_window    Hann³ tile blending: even more centre-weighted
   combined        knobs of the methods listed in --combine, applied together
 
 What counts as "better": sharper is not automatically better. A method helps if
@@ -71,7 +74,7 @@ from .evaluate_v4_1 import (resolve_checkpoint, load_model, load_guide, DomainSa
 KNOBS = dict(steps_factor=1, time_warp_gamma=1.0, churn=0.0, guide_weight=1.0,
              residual_scale=1.0, dry_cutoff=0.0, window_type='hann')
 METHOD_IDS = ('baseline', 'more_steps', 'time_warp', 'churn', 'autoguide', 'residual_scale',
-              'wet_cutoff', 'tukey_window', 'combined')
+              'wet_cutoff', 'tukey_window', 'hann2_window', 'hann3_window', 'combined')
 TRAJECTORY_KNOBS = ('steps_factor', 'time_warp_gamma', 'churn', 'guide_weight', 'window_type')
 COLORS = ['#2166ac', '#8c8c8c', '#74add1', '#1a9850', '#7b3294', '#f46d43', '#fdae61', '#abd9e9',
           '#d73027', '#01665e', '#c51b7d']
@@ -102,6 +105,8 @@ def build_methods(names, combine, steps, warp_gamma, churn, guide_weight, residu
         'wet_cutoff': dict(label=f'Cutoff <{dry_cutoff:g} mm/h', desc='drizzle set to 0', dry_cutoff=dry_cutoff),
         'tukey_window': dict(label=f'Tukey window α={tukey_alpha:g}', desc='flat-top tile blending',
                              window_type='tukey'),
+        'hann2_window': dict(label='Hann² window', desc='centre-weighted tile blending', window_type='hann2'),
+        'hann3_window': dict(label='Hann³ window', desc='strongly centre-weighted tile blending', window_type='hann3'),
     }
     methods = []
     for name in names:

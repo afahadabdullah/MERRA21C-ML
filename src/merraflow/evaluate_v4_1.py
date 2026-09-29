@@ -148,6 +148,10 @@ def select_cases(archive, split, timestamps=None, samples=3, wettest=1, seed=317
 # Inference-time sharpening controls (no retraining)
 # ----------------------------------------------------------------------------
 
+WINDOW_POWERS = {'hann2': 2, 'hann3': 3}
+WINDOW_TYPES = ('hann', 'hann2', 'hann3', 'tukey')
+
+
 def make_window(size, window_type='hann', tukey_alpha=0.3):
     """Tile blending weights. ``hann`` is v4 inference's window.
 
@@ -156,7 +160,16 @@ def make_window(size, window_type='hann', tukey_alpha=0.3):
     that taper is narrower than the halo, so the least-informed halo pixels get
     full weight and neighbouring tiles are averaged 50/50 over most of their
     overlap. It is kept as an ablation, not as a sharpening default.
+
+    ``hann2`` / ``hann3`` raise the Hann window to the power 2 / 3. They are
+    centre-weighted: in an overlap, the tile whose centre is nearer dominates
+    much more strongly, so each pixel is effectively predicted by the tile that
+    sees it with the most context and fewer predictions are averaged together.
+    Averaging several members' worth of slightly different fine structure is a
+    blurring operation, which matters most for convective detail.
     """
+    if window_type in WINDOW_POWERS:
+        return np.maximum(blend_window(size)**WINDOW_POWERS[window_type], 1e-4).astype('float32')
     if window_type == 'tukey':
         w = np.ones(size, dtype='float32')
         edge = int(np.floor(tukey_alpha * (size - 1) / 2))
@@ -1312,8 +1325,9 @@ def main():
                         help='Scale departures from the frozen regression (rain: in sqrt space); default 1.0')
     parser.add_argument('--dry-cutoff', type=float, default=0.0,
                         help='Physical rain threshold cutoff in mm/h (e.g. 0.1); default 0.0')
-    parser.add_argument('--window-type', choices=('hann', 'tukey'), default='hann',
-                        help='Tile blending window: hann (default, v4 inference) or tukey (ablation)')
+    parser.add_argument('--window-type', choices=WINDOW_TYPES, default='hann',
+                        help='Tile blending window: hann (default, v4 inference), hann2/hann3 '
+                             '(centre-weighted Hann powers) or tukey (ablation)')
     parser.add_argument('--tukey-alpha', type=float, default=0.3,
                         help='Tukey window cosine edge fraction; default 0.3')
     parser.add_argument('--churn', type=float, default=0.0,

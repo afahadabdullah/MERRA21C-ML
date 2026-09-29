@@ -21,6 +21,7 @@
 #   residual_scale  amplify departures from the frozen regression (rain in sqrt space)
 #   wet_cutoff    drizzle below DRY_CUTOFF mm/h set to 0
 #   tukey_window  flat-top tile blending (ablation)
+#   hann2_window / hann3_window  centre-weighted (Hann², Hann³) tile blending
 #   combined      the COMBINE methods together
 # Cost per member ≈ 10 baseline solves with all methods (post-processing variants
 # reuse the baseline solve; more_steps and autoguide cost 2x). ~1 wettest case x
@@ -30,7 +31,7 @@
 #   WEIGHTS=ema (default) | raw   (raw = optimizer weights stored in the checkpoint)
 #   CHECKPOINT=best (default) | latest | <epoch number> | <path>
 #   SPLIT=test|val  SAMPLES=0  WETTEST=1  MEMBERS=4  STEPS=<inference.steps>
-#   METHODS=baseline,more_steps,time_warp,churn,autoguide,residual_scale,wet_cutoff,tukey_window,combined
+#   METHODS=baseline,more_steps,time_warp,churn,autoguide,residual_scale,wet_cutoff,tukey_window,hann2_window,hann3_window,combined
 #   COMBINE=churn,autoguide,residual_scale
 #   WARP_GAMMA=1.5  CHURN=0.1  CHURN_RANGE="0.1 0.8"
 #   GUIDE_CHECKPOINT=auto (kept epoch nearest 1/3 of the main one) | <epoch> | <path>  GUIDE_WEIGHT=1.5

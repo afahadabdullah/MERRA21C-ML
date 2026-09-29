@@ -443,3 +443,111 @@ def test_guided_sharpening_transfers_wind_edges_only_where_correlated():
     base = np.zeros((6, n, n)); base[0] = 290+2*(1+np.tanh(d/30))
     j = jump_check(truth, base, truth.copy(), (n//2, n//2), normal, 40, 6)['t2m']
     assert abs(j['truth_jump']-4) < .1 and 0 < j['residual_share'] < 1
+
+
+def test_hann_power_windows():
+    from merraflow.evaluate_v4_1 import make_window
+    hann, h2, h3 = (make_window(32, k) for k in ('hann', 'hann2', 'hann3'))
+    assert h2.min() >= 1e-4 and np.isclose(h2.max(), hann.max()**2, rtol=1e-6)
+    # Centre-weighted: relative weight at a quarter of the tile falls with the power.
+    assert h3[8, 16]/h3[16, 16] < h2[8, 16]/h2[16, 16] < hann[8, 16]/hann[16, 16]
+
+
+def test_region_engine_matches_domain_sampler_and_hard_blending(trained):
+    from merraflow.explore_inference_v4_1 import RegionEngine, DEFAULTS
+    device = torch.device('cpu')
+    archive, model, conditioner, _ = load_model(trained, resolve_checkpoint(trained), device)
+    entry = archive.eligible('test')[0]
+    h, w = archive.shape
+    seed = member_seed(trained, entry, 0)
+    engine = RegionEngine(model, conditioner, archive, entry, trained, device, (0, h, 0, w), margin=10**4, batch=3,
+                          threads=2)
+    spec = dict(DEFAULTS, id='baseline', steps=3)
+    reference = DomainSampler(model, conditioner, archive, entry, trained, device, batch=3, threads=2).sample(seed, 3)
+    np.testing.assert_allclose(engine.sample(seed, spec), reference, rtol=1e-5, atol=1e-5)
+    # Hard blending: each covered pixel gets exactly one tile's velocity.
+    for name in ('A', 'B', 'C', 'D'):
+        tiles, norm = engine.weights(name, 'hard')
+        assert torch.all((norm == 0) | (norm == 1)) and float(norm.max()) == 1
+    for extra in (dict(blend='hard', grids='AB'), dict(blend='hard', grids='ACBD'), dict(blend='hann3'),
+                  dict(langevin=.3), dict(restart=1), dict(sde=1., sde_range=(0., 1.)),
+                  dict(restart=1, restart_t=.5, restart_blend='hard', restart_grids='ACBD'),
+                  dict(vguide=1.), dict(hf=.3, hf_start=0.), dict(churn=.2), dict(temp=1.1)):
+        out = engine.sample(seed, dict(spec, id='x', **extra), dict(vguide_fields=('t2m', 'q2m', 'ps'),
+                                                                    vguide_radius=2, vguide_eps=1e-2, vguide_sigma=1.))
+        assert out.shape == reference.shape and np.isfinite(out).all()
+        assert np.abs(out-reference).max() > 0, extra
+    # A small region samples only the tiles around it.
+    small = RegionEngine(model, conditioner, archive, entry, trained, device, (0, h//3, 0, w//3), margin=0, batch=3,
+                         threads=2)
+    assert small.tile_count['A'] < engine.tile_count['A']
+    assert small.sample(seed, spec).shape == (6, h//3, w//3)
+
+
+def test_torch_guided_filter_and_spectral_fix():
+    from merraflow.explore_inference_v4_1 import guided_torch, spectral_fix, climatology  # noqa: F401
+    from merraflow.diag_front_v4_1 import slope_width, profile
+    from merraflow.metrics import radial_psd
+    n = 96
+    yy, xx = np.mgrid[:n, :n].astype(float)
+    d = xx-n/2+.3*(yy-n/2)
+    v10m = torch.from_numpy(np.where(d > 0, 8., -4.))
+    t2m = 290+2*np.tanh(d/12)
+    out = guided_torch(torch.from_numpy(t2m), v10m, 8, 1e-2, 2.).numpy()
+    normal = (.3/np.hypot(1, .3), 1/np.hypot(1, .3))
+    s, before = profile(t2m, (n//2, n//2), normal, 30, 6)
+    _, after = profile(out, (n//2, n//2), normal, 30, 6)
+    assert slope_width(s, after, 1.) < .8*slope_width(s, before, 1.) and abs(out.mean()-t2m.mean()) < .05
+    rng = np.random.default_rng(0)
+    member = np.stack([gaussian_smooth(rng.standard_normal((n, n)), 1) for _ in range(6)]).astype('float32')
+    member[1] = np.abs(member[1])
+    member[5] = np.clip(member[5]*.01+.01, 0, 1)
+    target = [radial_psd(np.sqrt(member[c]) if c == 1 else member[c])[1]*4 for c in range(6)]
+    clim = dict(psd=np.array(target))
+    fixed = spectral_fix(member, clim, 2., max_gain=1.5, cutoff_km=20.)
+    for c in (0, 2, 3):
+        assert abs(fixed[c].mean()-member[c].mean()) < 1e-4
+        f0, p0 = radial_psd(member[c])
+        _, p1 = radial_psd(fixed[c])
+        fine = 2./np.maximum(f0, 1e-12) < 8
+        assert (p1[fine] >= p0[fine]*.99).all() and p1[fine].sum() > 1.5*p0[fine].sum()
+
+
+def gaussian_smooth(x, sigma):
+    from scipy.ndimage import gaussian_filter
+    return gaussian_filter(x, sigma)
+
+
+def test_inference_exploration_end_to_end(trained, tmp_path):
+    from merraflow.explore_inference_v4_1 import run
+    out = run(trained, 'best', split='test', methods=('baseline', 'hann2', 'shift_hard', 'shift4_hard', 'langevin',
+                                                      'sde', 'restart', 'restart_shift', 'autoguide_hf', 'fk_steer',
+                                                      'vguide', 'select_clim', 'select_sharp', 'prescreen',
+                                                      'spectral', 'vpost'),
+              sde_strengths=(1.,), fk_particles=3, fk_times=(.3, .6),
+              members=2, pool=3, steps=3, region=20, margin=4, clim_count=2, vguide_strengths=(.5, 1.),
+              vguide_radius=2, prescreen_steps=1, profile_length=6, profile_band=2, output=tmp_path/'explore',
+              batch=4, threads=2, dpi=40, pdf=True, save_members=True, log=lambda *a: None)
+    metrics = json.loads((out/'metrics.json').read_text())
+    expected = {'baseline', 'hann2', 'shift_hard', 'shift4_hard', 'langevin', 'sde_1', 'restart', 'restart_shift',
+                'fk_steer', 'vguide_0.5', 'vguide_1', 'select_clim', 'select_sharp', 'prescreen', 'spectral',
+                'vpost_0.5', 'vpost_1'}
+    assert expected <= set(metrics['results'])
+    assert metrics['results']['baseline']['feasible'] and metrics['best'] in metrics['results']
+    assert len(metrics['selected']['select_clim']) == 2 and 'prescreen_rank_correlation' in metrics['selection']
+    assert len(metrics['selection']['fk_mean_ess']) == 2   # FK steering resampled twice
+    for name in ('scorecard', 'spectra', 'profiles', 'selection', 'members_t2m', 'members_precip'):
+        assert (out/f'{name}.png').exists() and (out/f'{name}.pdf').exists()
+    text = (out/'report.md').read_text()
+    assert 'Best feasible recipe' in text and 'Ranking' in text
+    assert (out/'members.npz').exists()
+
+
+def test_hf_autoguidance_is_fine_scale_and_orthogonal():
+    from merraflow.explore_inference_v4_1 import RegionEngine
+    g = torch.Generator().manual_seed(0)
+    value = torch.randn(2, 6, 32, 32, generator=g)
+    weak = value+torch.randn(2, 6, 32, 32, generator=g)+3.   # includes a large-scale offset
+    extra = RegionEngine._hf_guidance(value, weak, 4.)
+    assert torch.allclose((extra*value).sum((-2, -1)), torch.zeros(2, 6), atol=1e-3)   # APG: no parallel part
+    assert float(extra.mean((-2, -1)).abs().max()) < .2                            # offset removed by high-pass

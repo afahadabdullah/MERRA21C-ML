@@ -20,6 +20,7 @@
 #   Sharpening winners from slurm_compare_sharpness_v4_1.sh (all default off):
 #   CHURN=0.1  CHURN_RANGE="0.1 0.8"  GUIDE_WEIGHT=1.5  GUIDE_CHECKPOINT=auto|<epoch>|<path>
 #   RESIDUAL_SCALE=1.10  TIME_WARP_GAMMA=1.5  DRY_CUTOFF=0.1
+#   WINDOW_TYPE=hann (default) | hann2 | hann3 | tukey   (tile blending window)
 set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling}"
 ENV_DIR="${ENV_DIR:-/gpfsm/dnb10/projects/p311/ML_downscaling/env}"
@@ -47,6 +48,7 @@ if [[ -n "${GUIDE_CHECKPOINT:-}" ]]; then args+=(--guide-checkpoint "$GUIDE_CHEC
 if [[ -n "${RESIDUAL_SCALE:-}" ]]; then args+=(--residual-scale "$RESIDUAL_SCALE"); fi
 if [[ -n "${TIME_WARP_GAMMA:-}" ]]; then args+=(--time-warp-gamma "$TIME_WARP_GAMMA"); fi
 if [[ -n "${DRY_CUTOFF:-}" ]]; then args+=(--dry-cutoff "$DRY_CUTOFF"); fi
+if [[ -n "${WINDOW_TYPE:-}" ]]; then args+=(--window-type "$WINDOW_TYPE"); fi
 if [[ -n "${TIMESTAMPS:-}" ]]; then
   read -r -a timestamp_args <<< "$TIMESTAMPS"
   args+=(--timestamps "${timestamp_args[@]}")
