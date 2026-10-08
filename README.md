@@ -16,7 +16,19 @@ Patch-based conditional flow matching for **native GEOS-FP (~25 km) → HWT ~3 k
 
 Targets: **2 m temperature, precipitation rate, surface pressure, and 10 m wind speed**, sampled hourly at matched :30 timestamps. Conditions include coarse weather, topography, latitude/longitude, cell area, annual phase, UTC hour, and local solar hour. Training and inference operate on patches in GPU memory; full fields are processed one timestamp at a time in host memory.
 
-This is an implemented and CPU smoke-tested starting configuration, **not a trained model or an empirically established best configuration**. NASA archive validation, A100 peak memory, distributed execution, and real-data skill must be measured on Discover. See [design and scientific assumptions](docs/method.md) and [validation record](docs/validation.md).
+This repository provides an implemented and CPU smoke-tested starting configuration. The example animations below are qualitative outputs from `main_latest` (epoch 243); they do not establish overall forecast skill or a best configuration. NASA archive validation, A100 peak memory, distributed execution, and quantitative real-data skill must be measured on Discover. See [design and scientific assumptions](docs/method.md) and [validation record](docs/validation.md).
+
+## Example results
+
+Qualitative 24-hour storm forecast initialized at 2026-02-23 05:30 UTC. Each animation compares GEOS-FP 0.25° input, 2 km truth, and four `main_latest` ensemble members (epoch 243, spectral); the × marks the truth storm center (979 hPa). These examples show one case and do not establish overall forecast skill.
+
+**10 m wind speed**
+
+![Animated 10 m wind-speed comparison of GEOS-FP, truth, and four model ensemble members](docs/assets/storm_wind.gif)
+
+**2 m temperature**
+
+![Animated 2 m temperature comparison of GEOS-FP, truth, and four model ensemble members](docs/assets/storm_t2m.gif)
 
 ## Workflow overview
 
