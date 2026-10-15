@@ -1,4 +1,4 @@
-# MERRA21C-ML
+# MERRA-Flow
 
 For the latest six-variable **v4.1 complete-test evaluation and paper figures**, see the [evaluation and plotting runbook](docs/evaluation_all_v4_1.md). It provides resumable Discover jobs, saved numeric diagnostics and lossless example ensembles, plus PDF/SVG/600-dpi PNG figures that can be regenerated without model inference.
 

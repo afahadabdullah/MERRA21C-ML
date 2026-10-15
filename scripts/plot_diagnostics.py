@@ -2,7 +2,7 @@
 """
 scripts/plot_diagnostics.py
 ===========================
-Diagnostic comparison tool for MERRA21C-ML downscaling project.
+Diagnostic comparison tool for MERRA-Flow downscaling project.
 
 Generates:
   1. Full CONUS Static Topography & Grid Metrics Map (3 km LCC Elevation, Slope, Area)
@@ -222,7 +222,7 @@ def plot_static_topography(lats, lons, elev, area, out_dir):
     lats_sub = lats[::step, ::step]
 
     fig = plt.figure(figsize=(24, 14), constrained_layout=True)
-    fig.suptitle("MERRA21C-ML: High-Resolution 3 km LCC Static Grid & Topography Diagnostics", fontsize=18, fontweight="bold")
+    fig.suptitle("MERRA-Flow: High-Resolution 3 km LCC Static Grid & Topography Diagnostics", fontsize=18, fontweight="bold")
 
     # 1. CONUS Elevation Map
     ax1 = fig.add_subplot(2, 2, 1, projection=proj)
@@ -392,7 +392,7 @@ def plot_comparison_panel(item, lats, lons, elev, out_dir):
         constrained_layout=True
     )
     fig.suptitle(
-        f"MERRA21C-ML Multi-Variable Downscaling Diagnostics (25 km -> 3 km LCC)\nTimestamp: {dt.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"MERRA-Flow Multi-Variable Downscaling Diagnostics (25 km -> 3 km LCC)\nTimestamp: {dt.strftime('%Y-%m-%d %H:%M UTC')}",
         fontsize=20, fontweight="bold", y=0.99
     )
 

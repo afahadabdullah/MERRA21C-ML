@@ -140,7 +140,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
         placements.append((source,'colorbar',bounds,clip))
         x,y,w,h=bounds
         for fraction,label in ticks:text(x+fraction*w,y-.009,label,14,ha='center',va='top')
-    text(.5,.952,'MERRA21C-ML: GENERATIVE CONUS DOWNSCALING',26,NAVY,ha='center',weight='bold')
+    text(.5,.952,'MERRA-Flow: GENERATIVE CONUS DOWNSCALING',26,NAVY,ha='center',weight='bold')
     text(.5,.903,'GEOS-FP (~25 km)  →  Conditional flow matching  →  GEOS grid (~3 km)',18,MUTED,ha='center')
     lefts=[.018,.263,.508,.753];width=.229
     L=lefts[0];frame(L,'A','COARSE INPUTS','GEOS-FP · ~25 km')
@@ -214,7 +214,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     for extension in ('pdf','png','svg'):
         shutil.copyfile(out/f'fig01_workflow.{extension}',out/f'fig01_workflow_paper.{extension}')
     base.unlink()
-    atomic_json(out/'workflow_provenance.json',dict(time=entry['time'],case=case_id,case_selection=entry['reason'],focus_variable='t2m',
+    atomic_json(out/'workflow_provenance.json',dict(model_name='MERRA-Flow',time=entry['time'],case=case_id,case_selection=entry['reason'],focus_variable='t2m',
         layout='three panels; expanded flow matching with compact generated-field stack; identical paper and README figure',
         checkpoint=metadata['checkpoint'],epoch=metadata['epoch'],weights=metadata['weights'],members=metadata['members'],
         steps=metadata['steps'],post=metadata['post'],metrics_sha256=digest(root/'metrics.json'),

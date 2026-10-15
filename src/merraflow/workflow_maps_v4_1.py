@@ -114,7 +114,7 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     projection=ccrs.LambertConformal(central_longitude=-97.5,central_latitude=38.5,standard_parallels=(33,45))
     full=(-125,-66.5,24,50.5);zoom=zoom_limits(case,zoom)
     fig=plt.figure(figsize=(22,11),facecolor='#f7fafc')
-    fig.text(.5,.961,'MERRA21C-ML: GENERATIVE CONUS DOWNSCALING',ha='center',fontsize=23,weight='bold',color=NAVY)
+    fig.text(.5,.961,'MERRA-Flow: GENERATIVE CONUS DOWNSCALING',ha='center',fontsize=23,weight='bold',color=NAVY)
     fig.text(.5,.928,'Native GEOS-FP (~25 km)  →  variable-specific conditional flow matching  →  six fields on the HWT (~3 km) grid',
              ha='center',fontsize=11,color=MUTED)
     lefts=[.018,.263,.508,.753];width=.229

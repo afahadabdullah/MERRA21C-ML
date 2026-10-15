@@ -1,4 +1,5 @@
 {
+  "model_name": "MERRA-Flow",
   "time": "2026-03-07T19:30:00",
   "case": "20260307_1930",
   "case_selection": "wettest (domain-mean \u2248 0.225 mm/h)",
@@ -11,7 +12,7 @@
   "steps": 64,
   "post": "spectral",
   "metrics_sha256": "e22668e96da615a7844a6daa7e40722cfe825556ed3684373ef6f2208bcfc819",
-  "renderer_sha256": "64ccf8d3af30507bc8f800ab99e50cfcd97f12d82a5911f03bd0f895dddd4a03",
+  "renderer_sha256": "f38ddeb53cad8c3be1beafdaf75bc3e770ea6a5f0d8328b977ced04d3aebd266",
   "panels": [
     {
       "source": "present_last_v4_1/cases/20260307_1930/conus_precip.pdf",

@@ -321,7 +321,7 @@ def plot_maps(output, entry, archive, raw, ensemble, checkpoint, scores, region=
                           transform=axes[row, 4].transAxes, fontsize=8,
                           bbox={'facecolor': 'white', 'alpha': .78, 'edgecolor': 'none'})
     diagnostic_kind = 'held-out test diagnostic' if entry['split'] == 'test' else 'qualitative in-sample diagnostic'
-    fig.suptitle(f'MERRA21C-ML {diagnostic_kind} · {entry["time"]} UTC\n'
+    fig.suptitle(f'MERRA-Flow {diagnostic_kind} · {entry["time"]} UTC\n'
                  f'{checkpoint.name} · {len(ensemble)} members · {label}'
                  f'{" · qualitative in-sample case" if entry["split"] != "test" else ""}'
                  f'{" · documented 14 Dec 2025 coastal-low case" if historical_storm else ""}'

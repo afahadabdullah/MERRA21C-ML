@@ -1,4 +1,4 @@
-# MERRA21C-ML v4.1 manuscript
+# MERRA-Flow v4.1 manuscript
 
 `MERRA21C_ML_arxiv.tex` is a standalone arXiv-style manuscript with embedded references. It follows the supplied SURMA-Flow example's colored title rule, full-width abstract, Palatino body type, two-column article layout, numbered citations, and running header. It does not reuse that paper's scientific claims, authorship, or results.
 
