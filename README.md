@@ -4,7 +4,7 @@ For the latest six-variable **v4.1 complete-test evaluation and paper figures**,
 
 ![v4.1 hybrid-target conditional flow-matching workflow](docs/assets/merraflow-v4-1-workflow.png)
 
-The workflow now shows actual native GEOS-FP inputs, the dynamically downscaled high-resolution HWT GEOS replay reference, and v4.1 model predictions, including precipitation. All six generated fields are visible, with 2 m temperature as the focused reference/member/ensemble-mean comparison. The compact journal version is included as Figure 1 in the [paper source](manuscript/MERRA21C_ML_arxiv.tex).
+The workflow now shows actual native GEOS-FP inputs, the dynamically downscaled high-resolution HWT GEOS replay reference, and v4.1 model predictions, including precipitation. All six generated fields are visible, with 2 m temperature as the focused coarse/reference comparison. This exact four-panel figure is included as Figure 1 in the [paper source](manuscript/MERRA21C_ML_arxiv.tex).
 
 For the six-variable experiment, see the [v4 task list and runbook](docs/v4.md):
 direct square-root hourly rainfall, residual states including 2 m humidity,
@@ -40,9 +40,9 @@ Qualitative 24-hour storm forecast initialized at 2026-02-23 05:30 UTC. Each ani
 
 Figure 1 uses the actual **7 March 2026, 19:30 UTC** v4.1 diagnostic: epoch-243 EMA weights, eight members, 64 Heun steps, and spectral post-processing. It shows native GEOS-FP (~25 km), the high-resolution **GEOS replay** dynamical reference on the nominal 2–3 km HWT grid, and **generated model predictions**. No HRRR fields are used. Original storm-map extents, color scales, and map detail are preserved.
 
-The broad README layout shows coarse temperature/precipitation, the coarse-versus-GEOS-replay temperature zoom, all six generated fields, and generated temperature/member averaging. The compact paper layout shows four large 2 m temperature panels and the conditioning/flow/ensemble workflow at readable journal dimensions. This selected event illustrates the method; it does not establish complete-test skill.
+The supplied four-panel design is preserved: **A**, coarse temperature and wind inputs; **B**, matched coarse/high-resolution T2m zooms; **C**, six generated output fields; **D**, regression-to-generation, the U-Net diagram, halo-supervised loss and tiled ensemble sampling. The paper and README use the same full figure, with no separate compact redesign. The archived input wind map shows the zonal component, which is one of the actual model channels. This selected event illustrates the method; it does not establish complete-test skill.
 
-Regenerate both layouts from the original saved vector map PDFs, without inference, source weather archives, or verification:
+Regenerate the figure from the original saved vector map PDFs, without inference, source weather archives, or verification:
 
 ```bash
 python -m pip install -e '.[paper]'
@@ -51,7 +51,7 @@ python scripts/make_workflow_figure.py \
   --output output/figures/workflow_geos_v4_1 --dpi 300
 ```
 
-Outputs are `fig01_workflow.{pdf,png,svg}`, `fig01_workflow_paper.{pdf,png,svg}`, and `workflow_provenance.json` with source hashes and exact vector clip rectangles. The source PDFs and their numerical summary are retained in the presentation archive. No meteorological values are recovered or estimated from images.
+Outputs are `fig01_workflow.{pdf,png,svg}`, identical backward-compatible `fig01_workflow_paper.*` aliases, and `workflow_provenance.json` with source hashes and exact vector clip rectangles. The source PDFs and their numerical summary are retained in the presentation archive. No meteorological values are recovered or estimated from images.
 
 For future complete-test figures, use saved numerical fields directly:
 

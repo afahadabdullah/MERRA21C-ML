@@ -1,12 +1,13 @@
 """Actual GEOS-FP → GEOS replay → v4.1 predictions, from archived vector maps.
 
 Reuses original, identically scaled PDF map panels without recovering or inventing
-meteorological values. Produces a map-rich README figure and a legible compact
+meteorological values. Preserves the supplied four-panel layout for both the README and
 paper figure. Saved numerical evaluation bundles remain the preferred input for
 future complete-test figures.
 """
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import matplotlib
@@ -72,93 +73,94 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     when=entry['time'].replace('T',' ')+' UTC'
     placements=[]
     fig=plt.figure(figsize=(22,11),facecolor='#f7fafc')
-    def text(x,y,s,fs=8,color=INK,**kw):fig.text(x,y,s,fontsize=fs,color=color,**kw)
+    def text(x,y,s,fs=8,color=INK,**kw):return fig.text(x,y,s,fontsize=fs,color=color,**kw)
     def arrow(x1,y1,x2,y2):
         fig.patches.append(FancyArrowPatch((x1,y1),(x2,y2),transform=fig.transFigure,
             arrowstyle='-|>',mutation_scale=13,lw=1.3,color=NAVY))
-    def panel(left,label,title,sub):
-        fig.patches.append(Rectangle((left,.09),.229,.785,transform=fig.transFigure,
+    def frame(left,label,title,sub):
+        fig.patches.append(Rectangle((left,.090),.229,.785,transform=fig.transFigure,
             facecolor='white',edgecolor=LINE,lw=.85,zorder=-10))
-        text(left+.012,.848,label,12,BLUE,weight='bold');text(left+.035,.848,title,10.4,weight='bold')
+        text(left+.012,.848,label,12,BLUE,weight='bold');text(left+.035,.848,title,10.5,weight='bold')
         fig.lines.append(plt.Line2D([left+.012,left+.217],[.830,.830],transform=fig.transFigure,color=BLUE,lw=1.3))
-        text(left+.012,.807,sub,7.3,MUTED)
+        text(left+.012,.807,sub,7.5,MUTED)
     def image(source,col,bounds,title=None):
         placements.append((source,col,bounds))
-        if title:text(bounds[0],bounds[1]+bounds[3]+.008,title,8.4,weight='semibold')
-    text(.5,.961,'MERRA21C-ML: GEOS-FP TO HIGH-RESOLUTION WEATHER',23,NAVY,ha='center',weight='bold')
-    text(.5,.928,'Coarse GEOS-FP inputs (~25 km)  ·  dynamical GEOS replay training reference (~3 km)  ·  learned high-resolution ensemble predictions',10.5,MUTED,ha='center')
-    text(.5,.900,f'Actual v4.1 maps | {when} | epoch {metadata["epoch"]}, EMA, {metadata["members"]} members, {metadata["steps"]} Heun steps, {metadata["post"]}',8.5,TEAL,ha='center')
-    lefts=[.018,.263,.508,.753]
-    L=lefts[0];panel(L,'A','NATIVE GEOS-FP INPUTS','Current and previous-hour conditions; maps show current hour')
-    image(sources['t2m'],0,(L+.014,.525,.201,.222),'2 m temperature: coarse native cells')
-    image(sources['t2m'],'bar',(L+.014,.473,.201,.050))
-    image(sources['precip'],0,(L+.014,.235,.201,.222),'Precipitation: coarse native cells')
-    image(sources['precip'],'bar',(L+.014,.183,.201,.050))
-    text(L+.015,.145,'Six weather fields at t − 1 h and t',8.5,weight='bold')
-    text(L+.015,.116,'Terrain, location, time and broad context\n~25 km information remains coarse after interpolation',7.6,linespacing=1.6)
-    L=lefts[1];panel(L,'B','DYNAMICAL GEOS REFERENCE','Matched temperature zoom; common extent and color scale')
-    image(zoom,0,(L+.024,.514,.181,.246),'GEOS-FP native (~25 km)')
-    image(zoom,1,(L+.024,.227,.181,.246),'High-resolution GEOS replay (HWT)')
-    image(zoom,'bar',(L+.012,.171,.205,.049))
-    text(L+.015,.145,'GEOS replay supplies the dynamical reference',8.3,weight='bold')
-    text(L+.015,.112,'States: midpoint | Rain: ¼ P₋₃₀ + ½ P₀ + ¼ P₊₃₀\nNominal 2–3 km archive; no HRRR substitution',7.5,linespacing=1.6)
-    L=lefts[2];panel(L,'C','GENERATED ~3 km FIELDS','Actual first ensemble member, after spectral post-processing')
-    labels=('2 m temperature (°C)','Precipitation (mm h⁻¹)','Surface pressure (hPa)',
-            '10 m zonal wind (m s⁻¹)','10 m meridional wind (m s⁻¹)','2 m humidity (g kg⁻¹)')
+        if title:text(bounds[0],bounds[1]+bounds[3]+.008,title,8.2,weight='semibold')
+    def bar(source,bounds):placements.append((source,'bar',bounds))
+    text(.5,.961,'MERRA21C-ML: GENERATIVE CONUS DOWNSCALING',23,NAVY,ha='center',weight='bold')
+    text(.5,.928,'Native GEOS-FP (~25 km)  →  variable-specific conditional flow matching  →  six fields on the HWT (~3 km) grid',11,MUTED,ha='center')
+    text(.5,.900,f'GEOS-FP + high-resolution GEOS replay + v4.1 predictions | {when} | epoch {metadata["epoch"]}, EMA, {metadata["members"]} members, {metadata["post"]}',8.5,TEAL,ha='center')
+    lefts=[.018,.263,.508,.753];width=.229
+    L=lefts[0];frame(L,'A','COARSE WEATHER INPUTS','Current + previous hour; static and time features')
+    text(L+.016,.773,'Native 0.25° × 0.3125° cells',8,BLUE,weight='bold')
+    image(sources['t2m'],0,(L+.015,.515,width-.030,.235),'2 m temperature')
+    bar(sources['t2m'],(L+.015,.470,width-.030,.045))
+    # The original project archive stores wind components, not full-domain speed.
+    image(sources['u10m'],0,(L+.015,.224,width-.030,.224),'10 m wind: zonal component')
+    bar(sources['u10m'],(L+.015,.179,width-.030,.045))
+    text(L+.016,.165,'Six weather fields at t − 1 h and t',9,weight='bold')
+    text(L+.016,.135,'Local 192² patches + broad 576² context\nTerrain, land/sea, coordinates, cell area, time',8,linespacing=1.6)
+    L=lefts[1];frame(L,'B','SAME REGION, TWO GRIDS','Identical extent and color scale; no display interpolation')
+    image(zoom,0,(L+.018,.525,width-.036,.233),'~25 km: native cells')
+    bar(zoom,(L+.018,.480,width-.036,.045))
+    image(zoom,1,(L+.018,.231,width-.036,.233),'~3 km: GEOS replay reference (HWT)')
+    bar(zoom,(L+.018,.186,width-.036,.045))
+    text(L+.018,.165,'Temporal pairing and training-only statistics',8.7,weight='bold')
+    text(L+.018,.132,'States: midpoint | Rain: ¼ P₋₃₀ + ½ P₀ + ¼ P₊₃₀\nChronological splits with gaps; packed training data',7.5,linespacing=1.7)
+    L=lefts[2];frame(L,'C','SIX JOINT OUTPUT FIELDS','Actual v4.1 model member on the high-resolution GEOS grid')
+    labels=('2 m temperature','Hourly mean rain rate','Surface pressure','10 m zonal wind','10 m meridional wind','2 m specific humidity')
+    mw=(width-.044)/2
     for c,f in enumerate(FIELDS):
-        x=L+.012+(c%2)*.113;y=.635-(c//2)*.207
-        image(sources[f],2,(x,y,.099,.125),labels[c])
-        image(sources[f],'bar',(x-.002,y-.047,.103,.045))
-    text(L+.014,.145,'Joint variable-specific generation',8.7,weight='bold')
-    text(L+.014,.126,'Rain: direct √(1 + P/P₀) − 1; P₀ = 1 mm h⁻¹\nT, pressure, winds: regression residuals\nHumidity: coarse-field residual',7.6,linespacing=1.55,va='top')
-    L=lefts[3];panel(L,'D','FLOW-MATCHING ENSEMBLES','Frozen regression conditioner + conditional velocity U-Net')
-    text(L+.015,.769,'GAUSSIAN → CONDITIONAL FLOW → WEATHER',8.8,BLUE,weight='bold')
-    for x,label,col in zip([L+.038,L+.114,L+.191],['$z_0$','$z_t$','$v_\\theta$'],[BLUE,TEAL,NAVY]):
-        fig.patches.append(Ellipse((x,.716),.055,.052,transform=fig.transFigure,facecolor='white',edgecolor=col,lw=1.5))
-        text(x,.716,label,13,col,ha='center',va='center')
-    arrow(L+.066,.716,L+.086,.716);arrow(L+.142,.716,L+.163,.716)
-    text(L+.114,.661,'$z_t=(1-t)z_0+t z_1$; velocity target $z_1-z_0$',8.4,ha='center')
-    text(L+.015,.617,'TRAINING AND FULL-DOMAIN SAMPLING',8.5,weight='bold')
-    text(L+.015,.588,'192² patches: 128² core + 32-pixel halo\nArea/channel-weighted loss includes halo\nBlend overlapping velocities at every Heun stage\nOne coarse input + independent noise → members',8.0,linespacing=1.8,va='top')
-    text(L+.015,.452,'Actual generated 2 m temperature',9,BLUE,weight='bold')
-    image(zoom,2,(L+.012,.246,.099,.183),'Member 1')
-    image(zoom,3,(L+.124,.246,.099,.183),'Mean of 8 members')
-    image(zoom,'bar',(L+.012,.184,.211,.052))
-    text(L+.015,.145,'Filtering sharpens details without retraining',8.0,TEAL,weight='bold')
-    text(L+.015,.111,'Shown: saved spectral ensemble, not a raw/filter test\nEnsemble spread describes conditional uncertainty',7.5,linespacing=1.6)
-    for i in range(3):arrow(lefts[i]+.230,.49,lefts[i+1]-.001,.49)
-    text(.5,.053,'Maps: actual GEOS-FP inputs, HWT GEOS replay reference, and v4.1 predictions; one selected held-out case illustrates the workflow.',8,MUTED,ha='center')
-    text(.5,.029,'Original map/color scales are preserved. GEOS replay is the dynamical reference; flow matching performs learned generative downscaling.',7.8,MUTED,ha='center')
+        x=L+.012+(c%2)*(mw+.020);y=.633-(c//2)*.206
+        image(sources[f],2,(x,y,mw,.128),labels[c])
+        bar(sources[f],(x-.002,y-.045,mw+.004,.043))
+    text(L+.013,.165,'Variable-specific generative coordinates',8.8,weight='bold')
+    text(L+.013,.141,'Rain: direct √(1 + P/P₀) − 1; P₀ = 1 mm h⁻¹\nT, pressure, winds: regression residuals\nHumidity: coarse-field residual',7.4,linespacing=1.6,va='top')
+    L=lefts[3];frame(L,'D','REGRESSION → GENERATION','Frozen conditioner + local and broad-context U-Net')
+    text(L+.014,.770,'CONDITIONAL FLOW MATCHING',9,BLUE,weight='bold')
+    xs=[L+.034,L+.113,L+.192]
+    for x,symbol,col in zip(xs,['$z_0$','$z_t$','$v_\\theta$'],[BLUE,TEAL,NAVY]):
+        fig.patches.append(Ellipse((x,.717),.056,.052,transform=fig.transFigure,facecolor='white',edgecolor=col,lw=1.5))
+        text(x,.717,symbol,13,col,ha='center',va='center')
+    arrow(xs[0]+.028,.717,xs[1]-.028,.717);arrow(xs[1]+.028,.717,xs[2]-.028,.717)
+    text(xs[0],.675,'Gaussian noise',7,MUTED,ha='center');text(xs[1],.675,'Conditional path',7,MUTED,ha='center')
+    text(xs[2],.675,'U-Net velocity',7,MUTED,ha='center')
+    text(L+width/2,.640,'$z_t=(1-t)z_0+t z_1$   |   target: $z_1-z_0$',9,ha='center')
+    for i,y in enumerate([.587,.554,.521]):
+        w=.048-i*.009
+        for x,col in [(L+.035,BLUE),(L+.155,TEAL)]:
+            fig.patches.append(Rectangle((x,y),w,.021,transform=fig.transFigure,color=col,alpha=1-i*.18))
+        fig.lines.append(plt.Line2D([L+.083,L+.155],[y+.01,y+.01],transform=fig.transFigure,color=LINE,lw=.7))
+    fig.patches.append(Rectangle((L+.098,.484),.036,.022,transform=fig.transFigure,color=NAVY))
+    text(L+width/2,.459,'Residual blocks + broad-context conditioning',7.2,MUTED,ha='center')
+    text(L+.014,.423,'AREA- AND CHANNEL-WEIGHTED VELOCITY LOSS',8,weight='bold')
+    fig.patches.append(Rectangle((L+.018,.331),.067,.067,transform=fig.transFigure,color='#e5eff5',ec=BLUE,lw=1))
+    fig.patches.append(Rectangle((L+.029,.342),.045,.045,transform=fig.transFigure,color='#76b9d6',ec=NAVY,lw=.7))
+    text(L+.0515,.362,'128²',7,'white',ha='center',weight='bold')
+    text(L+.100,.376,'192² input = 128² core + 32-pixel halo',7.4)
+    text(L+.100,.349,'Loss supervises core and halo',7.4,TEAL,weight='bold')
+    text(L+.014,.296,'SYNCHRONIZED TILED ENSEMBLE SAMPLING',8.3,BLUE,weight='bold')
+    text(L+.014,.279,'Blend tile velocities → shared-state Heun update\nIndependent seeds → multiple conditional members',7.8,linespacing=1.7,va='top')
+    for i in range(3):
+        fig.patches.append(Rectangle((L+.028+i*.057,.159+i*.008),.058,.055,transform=fig.transFigure,
+            facecolor='#e5f2f4',edgecolor=TEAL,lw=1))
+    text(L+.020,.135,f'One coarse input → {metadata["members"]} generated high-resolution members',7,MUTED)
+    text(L+.014,.104,'Raw / spectral: paired members, no retraining',7.8,TEAL,weight='bold')
+    for i in range(3):arrow(lefts[i]+width+.001,.49,lefts[i+1]-.001,.49)
+    text(.5,.054,f'Maps: native GEOS-FP, HWT dynamical GEOS replay reference and actual v4.1 predictions | {when} | {metadata["steps"]} Heun steps, {metadata["post"]}.',8,MUTED,ha='center')
+    text(.5,.030,'Temperature zooms share extent and scale. Original map panels are preserved; flow matching performs learned downscaling to the GEOS reference grid.',7.7,MUTED,ha='center')
     base=out/'layout_readme.pdf';fig.savefig(base,facecolor=fig.get_facecolor());plt.close(fig)
     records=compose(base,out/'fig01_workflow.pdf',placements,dpi)
-    # Compact journal version: four large temperature maps plus readable method blocks.
-    fig=plt.figure(figsize=(7.2,5.65),facecolor='white');paper=[]
-    titles=('(a) GEOS-FP native','(b) GEOS replay reference','(c) Generated member 1','(d) Ensemble mean (8)')
-    for i,title in enumerate(titles):
-        x=.018+i*.247
-        fig.text(x,.947,title,fontsize=7.3,weight='bold',color=INK)
-        paper.append((zoom,i,(x,.591,.229,.329)))
-    paper.append((zoom,'bar',(.12,.487,.76,.090)))
-    fig.text(.5,.425,f'2 m temperature (°C) | {when} | epoch {metadata["epoch"]}, EMA, {metadata["steps"]} Heun steps, {metadata["post"]}',fontsize=7.1,ha='center',color=MUTED)
-    boxes=[(.025,'1. CONDITIONS','Current + previous-hour GEOS-FP\nLocal and broad spatial context\nStatic surface and time features'),
-           (.352,'2. HYBRID FLOW MATCHING','Direct square-root precipitation\nResidual temperature, pressure, winds\nCoarse-residual humidity'),
-           (.679,'3. ENSEMBLE SAMPLING','Shared-state tiled Heun solver\nIndependent member noise draws\nOptional paired spectral adjustment')]
-    for x,title,body in boxes:
-        fig.patches.append(Rectangle((x,.145),.296,.210,transform=fig.transFigure,facecolor='#eff6fa',edgecolor=LINE,lw=.7))
-        fig.text(x+.013,.318,title,fontsize=8,color=BLUE,weight='bold')
-        fig.text(x+.013,.279,body,fontsize=7.1,color=INK,linespacing=1.65,va='top')
-    for x in (.321,.648):
-        fig.patches.append(FancyArrowPatch((x,.25),(x+.029,.25),transform=fig.transFigure,arrowstyle='-|>',mutation_scale=9,color=NAVY,lw=.9))
-    fig.text(.5,.071,'Area/channel-weighted velocity loss; 192² patches include halo supervision.',fontsize=7.2,ha='center',color=INK)
-    fig.text(.5,.036,'GEOS replay: dynamical reference on the nominal 2–3 km grid. Predictions: learned downscaling.',fontsize=7.0,ha='center',color=MUTED)
-    base_paper=out/'layout_paper.pdf';fig.savefig(base_paper);plt.close(fig)
-    paper_records=compose(base_paper,out/'fig01_workflow_paper.pdf',paper,dpi)
-    base.unlink();base_paper.unlink()
+    # Keep previous download names as aliases of the SAME supplied layout.
+    for extension in ('pdf','png','svg'):
+        shutil.copyfile(out/f'fig01_workflow.{extension}',out/f'fig01_workflow_paper.{extension}')
+    base.unlink()
     atomic_json(out/'workflow_provenance.json',dict(time=entry['time'],case=case_id,case_selection=entry['reason'],focus_variable='t2m',
+        layout='four-panel reference layout; identical paper and README figure',
         checkpoint=metadata['checkpoint'],epoch=metadata['epoch'],weights=metadata['weights'],members=metadata['members'],
         steps=metadata['steps'],post=metadata['post'],metrics_sha256=digest(root/'metrics.json'),
-        renderer_sha256=digest(__file__),readme_panels=records,paper_panels=paper_records,
-        note='Recomposed original vector PDF plots; no field values were inferred from images and no evaluation was rerun. High-resolution reference is GEOS replay, not HRRR.'))
+        renderer_sha256=digest(__file__),panels=records,
+        note='Original GEOS/v4.1 vector maps in the supplied four-stage layout; no HRRR fields and no meteorological values inferred from images.'))
     return out
 
 

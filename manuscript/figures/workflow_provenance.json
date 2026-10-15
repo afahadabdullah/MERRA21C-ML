@@ -3,6 +3,7 @@
   "case": "20260307_1930",
   "case_selection": "wettest (domain-mean \u2248 0.225 mm/h)",
   "focus_variable": "t2m",
+  "layout": "four-panel reference layout; identical paper and README figure",
   "checkpoint": "runs/merraflow_v4_1/last_v4_1.pt",
   "epoch": 243,
   "weights": "ema",
@@ -10,8 +11,8 @@
   "steps": 64,
   "post": "spectral",
   "metrics_sha256": "e22668e96da615a7844a6daa7e40722cfe825556ed3684373ef6f2208bcfc819",
-  "renderer_sha256": "afaa0b67ef64079046c753ae062695e8c2118430e76581e9f20173c710550619",
-  "readme_panels": [
+  "renderer_sha256": "6eaae5f3d3a8c8ad54462363f3bc4c2d1828c2529d3c12982919d0fd3a71da4a",
+  "panels": [
     {
       "source": "present_last_v4_1/cases/20260307_1930/conus_t2m.pdf",
       "source_sha256": "7cff17475fe8812a074d8f262ba978346999a8f5125e8fd6cd47a3a2f7a891e1",
@@ -23,95 +24,78 @@
         265.05474853515625
       ],
       "destination_fraction": [
-        0.032,
+        0.033,
+        0.515,
+        0.199,
+        0.235
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/conus_t2m.pdf",
+      "source_sha256": "7cff17475fe8812a074d8f262ba978346999a8f5125e8fd6cd47a3a2f7a891e1",
+      "column": "bar",
+      "clip_points": [
+        403.20001220703125,
+        297.671142578125,
+        1257.9840380859375,
+        365.671142578125
+      ],
+      "destination_fraction": [
+        0.033,
+        0.47,
+        0.199,
+        0.045
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/conus_u10m.pdf",
+      "source_sha256": "5d1f4607e9c067bff02b48d9896f2c5d73ee81503f83dd4ed3a1156315396076",
+      "column": 0,
+      "clip_points": [
+        25.552045822143555,
+        65.61474609375,
+        413.63203620910645,
+        265.05474853515625
+      ],
+      "destination_fraction": [
+        0.033,
+        0.224,
+        0.199,
+        0.224
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/conus_u10m.pdf",
+      "source_sha256": "5d1f4607e9c067bff02b48d9896f2c5d73ee81503f83dd4ed3a1156315396076",
+      "column": "bar",
+      "clip_points": [
+        403.20001220703125,
+        297.671142578125,
+        1257.9840380859375,
+        365.671142578125
+      ],
+      "destination_fraction": [
+        0.033,
+        0.179,
+        0.199,
+        0.045
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
+      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
+      "column": 0,
+      "clip_points": [
+        32.22993278503418,
+        49.489990234375,
+        418.6299304962158,
+        432.7699890136719
+      ],
+      "destination_fraction": [
+        0.281,
         0.525,
-        0.201,
-        0.222
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_t2m.pdf",
-      "source_sha256": "7cff17475fe8812a074d8f262ba978346999a8f5125e8fd6cd47a3a2f7a891e1",
-      "column": "bar",
-      "clip_points": [
-        403.20001220703125,
-        297.671142578125,
-        1257.9840380859375,
-        365.671142578125
-      ],
-      "destination_fraction": [
-        0.032,
-        0.473,
-        0.201,
-        0.05
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_precip.pdf",
-      "source_sha256": "8211cc45c36ab3e31f57ebff7799428df66e93a1f9b73bea884610ef9ab6b8a7",
-      "column": 0,
-      "clip_points": [
-        25.552045822143555,
-        65.61474609375,
-        413.63203620910645,
-        265.05474853515625
-      ],
-      "destination_fraction": [
-        0.032,
-        0.235,
-        0.201,
-        0.222
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_precip.pdf",
-      "source_sha256": "8211cc45c36ab3e31f57ebff7799428df66e93a1f9b73bea884610ef9ab6b8a7",
-      "column": "bar",
-      "clip_points": [
-        403.20001220703125,
-        297.671142578125,
-        1257.9840380859375,
-        365.671142578125
-      ],
-      "destination_fraction": [
-        0.032,
-        0.183,
-        0.201,
-        0.05
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 0,
-      "clip_points": [
-        32.22993278503418,
-        49.489990234375,
-        418.6299304962158,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.28700000000000003,
-        0.514,
-        0.181,
-        0.246
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 1,
-      "clip_points": [
-        426.6166820526123,
-        49.489990234375,
-        813.016679763794,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.28700000000000003,
-        0.227,
-        0.181,
-        0.246
+        0.193,
+        0.233
       ]
     },
     {
@@ -125,10 +109,44 @@
         525.5999755859375
       ],
       "destination_fraction": [
-        0.275,
-        0.171,
-        0.205,
-        0.049
+        0.281,
+        0.48,
+        0.193,
+        0.045
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
+      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
+      "column": 1,
+      "clip_points": [
+        426.6166820526123,
+        49.489990234375,
+        813.016679763794,
+        432.7699890136719
+      ],
+      "destination_fraction": [
+        0.281,
+        0.231,
+        0.193,
+        0.233
+      ]
+    },
+    {
+      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
+      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
+      "column": "bar",
+      "clip_points": [
+        403.20001220703125,
+        457.5999755859375,
+        1257.9840380859375,
+        525.5999755859375
+      ],
+      "destination_fraction": [
+        0.281,
+        0.186,
+        0.193,
+        0.045
       ]
     },
     {
@@ -143,9 +161,9 @@
       ],
       "destination_fraction": [
         0.52,
-        0.635,
-        0.099,
-        0.125
+        0.633,
+        0.0925,
+        0.128
       ]
     },
     {
@@ -161,8 +179,8 @@
       "destination_fraction": [
         0.518,
         0.588,
-        0.103,
-        0.045
+        0.0965,
+        0.043
       ]
     },
     {
@@ -176,10 +194,10 @@
         265.05474853515625
       ],
       "destination_fraction": [
+        0.6325000000000001,
         0.633,
-        0.635,
-        0.099,
-        0.125
+        0.0925,
+        0.128
       ]
     },
     {
@@ -193,10 +211,10 @@
         365.671142578125
       ],
       "destination_fraction": [
-        0.631,
+        0.6305000000000001,
         0.588,
-        0.103,
-        0.045
+        0.0965,
+        0.043
       ]
     },
     {
@@ -211,9 +229,9 @@
       ],
       "destination_fraction": [
         0.52,
-        0.42800000000000005,
-        0.099,
-        0.125
+        0.42700000000000005,
+        0.0925,
+        0.128
       ]
     },
     {
@@ -228,9 +246,9 @@
       ],
       "destination_fraction": [
         0.518,
-        0.38100000000000006,
-        0.103,
-        0.045
+        0.38200000000000006,
+        0.0965,
+        0.043
       ]
     },
     {
@@ -244,10 +262,10 @@
         265.05474853515625
       ],
       "destination_fraction": [
-        0.633,
-        0.42800000000000005,
-        0.099,
-        0.125
+        0.6325000000000001,
+        0.42700000000000005,
+        0.0925,
+        0.128
       ]
     },
     {
@@ -261,10 +279,10 @@
         365.671142578125
       ],
       "destination_fraction": [
-        0.631,
-        0.38100000000000006,
-        0.103,
-        0.045
+        0.6305000000000001,
+        0.38200000000000006,
+        0.0965,
+        0.043
       ]
     },
     {
@@ -280,8 +298,8 @@
       "destination_fraction": [
         0.52,
         0.22100000000000003,
-        0.099,
-        0.125
+        0.0925,
+        0.128
       ]
     },
     {
@@ -296,9 +314,9 @@
       ],
       "destination_fraction": [
         0.518,
-        0.17400000000000004,
-        0.103,
-        0.045
+        0.17600000000000005,
+        0.0965,
+        0.043
       ]
     },
     {
@@ -312,10 +330,10 @@
         265.05474853515625
       ],
       "destination_fraction": [
-        0.633,
+        0.6325000000000001,
         0.22100000000000003,
-        0.099,
-        0.125
+        0.0925,
+        0.128
       ]
     },
     {
@@ -329,150 +347,12 @@
         365.671142578125
       ],
       "destination_fraction": [
-        0.631,
-        0.17400000000000004,
-        0.103,
-        0.045
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 2,
-      "clip_points": [
-        829.048261642456,
-        49.489990234375,
-        1215.4482593536377,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.765,
-        0.246,
-        0.099,
-        0.183
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 3,
-      "clip_points": [
-        1223.4118175506592,
-        49.489990234375,
-        1609.8118152618408,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.877,
-        0.246,
-        0.099,
-        0.183
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": "bar",
-      "clip_points": [
-        403.20001220703125,
-        457.5999755859375,
-        1257.9840380859375,
-        525.5999755859375
-      ],
-      "destination_fraction": [
-        0.765,
-        0.184,
-        0.211,
-        0.052
+        0.6305000000000001,
+        0.17600000000000005,
+        0.0965,
+        0.043
       ]
     }
   ],
-  "paper_panels": [
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 0,
-      "clip_points": [
-        32.22993278503418,
-        49.489990234375,
-        418.6299304962158,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.018,
-        0.591,
-        0.229,
-        0.329
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 1,
-      "clip_points": [
-        426.6166820526123,
-        49.489990234375,
-        813.016679763794,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.265,
-        0.591,
-        0.229,
-        0.329
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 2,
-      "clip_points": [
-        829.048261642456,
-        49.489990234375,
-        1215.4482593536377,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.512,
-        0.591,
-        0.229,
-        0.329
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": 3,
-      "clip_points": [
-        1223.4118175506592,
-        49.489990234375,
-        1609.8118152618408,
-        432.7699890136719
-      ],
-      "destination_fraction": [
-        0.759,
-        0.591,
-        0.229,
-        0.329
-      ]
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/zoomA_t2m.pdf",
-      "source_sha256": "7aa3d940d9d9db9f2c2462a9f0533648f4d948d54dd4ec4106881b87882d3654",
-      "column": "bar",
-      "clip_points": [
-        403.20001220703125,
-        457.5999755859375,
-        1257.9840380859375,
-        525.5999755859375
-      ],
-      "destination_fraction": [
-        0.12,
-        0.487,
-        0.76,
-        0.09
-      ]
-    }
-  ],
-  "note": "Recomposed original vector PDF plots; no field values were inferred from images and no evaluation was rerun. High-resolution reference is GEOS replay, not HRRR."
+  "note": "Original GEOS/v4.1 vector maps in the supplied four-stage layout; no HRRR fields and no meteorological values inferred from images."
 }

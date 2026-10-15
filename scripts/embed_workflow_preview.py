@@ -54,10 +54,14 @@ def embed(tex,png):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--tex',required=True)
     source=p.add_mutually_exclusive_group(required=True);source.add_argument('--png');source.add_argument('--pdf')
-    p.add_argument('--dpi',type=int,default=144)
+    p.add_argument('--dpi',type=int,default=216)
+    p.add_argument('--display-width-points',type=float,default=518.4,
+                   help='Scale the editor preview to the displayed paper width, independent of PDF canvas size')
     a=p.parse_args()
     if a.pdf:
         import pymupdf
         path=Path(a.pdf);a.png=path.with_name(path.stem+'_preview.png')
-        with pymupdf.open(path) as doc:doc[0].get_pixmap(dpi=a.dpi,alpha=False).save(a.png)
+        with pymupdf.open(path) as doc:
+            scale=a.dpi/72*a.display_width_points/doc[0].rect.width
+            doc[0].get_pixmap(matrix=pymupdf.Matrix(scale,scale),alpha=False).save(a.png)
     embed(a.tex,a.png)
