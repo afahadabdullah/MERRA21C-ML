@@ -19,6 +19,34 @@ The launcher queues a CPU initialization job to snapshot the checkpoint and save
 
 Initialization executes on a CPU compute node, not the login node. Do not initialize two processes into the same output directory. `best` is recommended for a final test; use `CHECKPOINT=latest` or an explicit epoch/path for a clearly labeled development comparison. The snapshot ensures later training updates to best/latest cannot change the evaluated weights. `POST=none` disables filtering; `POST=both` evaluates raw flow and the spectral variant using exactly the same generated members, with no second inference pass.
 
+## Check progress without rerunning evaluation
+
+The standalone standard-library checker reads the frozen manifest and saved per-hour JSON. It requires no GPU, model, NumPy, or original weather data, and writes nothing into the evaluation directory:
+
+```bash
+python scripts/check_evaluation_v4_1.py \
+  --output runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 \
+  --shards 64
+```
+
+It reports completed/expected hours and percentage, remaining and invalid hours, unexpected files, excluded hours, lock owners (`--details`), per-shard totals (`--shards ... --details`), recent completions, and aggregation status. A completed hour must match the manifest's run ID and timestamp and contain every required method, all six variables plus derived wind speed, and the expected member counts. Saved example arrays must exist. `--verify-files` additionally hashes those arrays and the saved grid; this may read several GB and is unnecessary for routine progress checks. The authoritative final aggregation still performs its complete validation. A cached `completion.json` never overrides the observed case records.
+
+For a running checkout, fetch and extract **only the checker** so the evaluator's frozen source files stay unchanged:
+
+```bash
+git fetch origin main
+git show origin/main:scripts/check_evaluation_v4_1.py > /tmp/check_merraflow_evaluation.py
+python /tmp/check_merraflow_evaluation.py \
+  --output runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 \
+  --shards 64
+```
+
+Add `--watch 60` to refresh every minute, `--json` for machine-readable snapshots, or `--details` for missing IDs, invalid records, locks, and each shard. To check queued/running/failed array tasks as well, add `--job-id YOUR_NUMERIC_ARRAY_ID`; this runs read-only `squeue` and `sacct` queries and reports states such as `PENDING`, `RUNNING`, `TIMEOUT`, and `FAILED`. File progress alone cannot distinguish a queued job from a stopped job. Lock directories may belong to active workers or interrupted jobs; the checker never removes them or labels them stale based only on age.
+
+`hours_saved` means every expected case record passed the selected checks; `aggregated` also requires a complete `summary.json` for the same run. Neither status proves the scheduler job is currently running. Missing `manifest.json` reports initialization pending/wrong path, with an unknown total rather than a misleading 0% claim. One-shot exit codes are 0 for a readable snapshot (including partial progress), 1 for invalid/unexpected records or a bad saved grid hash, and 2 for a read/manifest error. Ctrl-C stops watch mode.
+
+## Resume evaluation
+
 Resume after interrupted/failed array tasks:
 
 ```bash
