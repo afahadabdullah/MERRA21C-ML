@@ -1,8 +1,8 @@
 """Actual GEOS-FP → GEOS replay → v4.1 predictions, from archived vector maps.
 
 Reuses original, identically scaled PDF map panels without recovering or inventing
-meteorological values. Preserves the supplied four-panel layout for both the README and
-paper figure. Saved numerical evaluation bundles remain the preferred input for
+meteorological values. Uses the same map-based layout with a merged flow/output
+panel for both the README and paper figure. Saved numerical evaluation bundles remain the preferred input for
 future complete-test figures.
 """
 import argparse
@@ -124,12 +124,12 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     def arrow(x1,y1,x2,y2):
         fig.patches.append(FancyArrowPatch((x1,y1),(x2,y2),transform=fig.transFigure,
             arrowstyle='-|>',mutation_scale=16,lw=1.6,color=NAVY))
-    def frame(left,label,title,sub):
-        fig.patches.append(Rectangle((left,.080),.229,.785,transform=fig.transFigure,
+    def frame(left,label,title,sub,panel_width=.229):
+        fig.patches.append(Rectangle((left,.080),panel_width,.785,transform=fig.transFigure,
             facecolor='white',edgecolor=LINE,lw=.85,zorder=-10))
         text(left+.012,.831,label,17,BLUE,weight='bold')
         text(left+.036,.831,title,16,weight='bold')
-        fig.lines.append(plt.Line2D([left+.012,left+.217],[.814,.814],transform=fig.transFigure,color=BLUE,lw=1.3))
+        fig.lines.append(plt.Line2D([left+.012,left+panel_width-.012],[.814,.814],transform=fig.transFigure,color=BLUE,lw=1.3))
         text(left+.012,.778,sub,14,MUTED)
     def image(source,col,bounds,title,window=None,fs=16):
         placements.append((source,col,bounds,window))
@@ -167,38 +167,47 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     image(zoom,1,(L+.018,.188,width-.036,.223),'GEOS replay · ~3 km',window=ZOOM_WINDOW)
     bar(zoom,'t2m',(L+.018,.165,width-.036,.011))
     text(L+.018,.103,'Temperature (°C) · 3× zoom',14,weight='bold')
-    L=lefts[2];frame(L,'C','GENERATED FIELDS','One ensemble member · ~3 km')
-    labels=('T₂m (°C)','Rain (mm h⁻¹)','pₛ (hPa)','u₁₀ (m s⁻¹)','v₁₀ (m s⁻¹)','q₂m (g kg⁻¹)')
-    mw=(width-.044)/2
-    for c,f in enumerate(FIELDS):
-        x=L+.012+(c%2)*(mw+.020);y=.617-(c//2)*.220
-        image(sources[f],2,(x,y,mw,.128),labels[c],fs=14)
-        bar(sources[f],f,(x,y-.020,mw,.011))
-    L=lefts[3];frame(L,'D','FLOW MATCHING','Frozen regression conditioner')
-    xs=[L+.034,L+.113,L+.192]
+    # Merge the former generated-field panel into an expanded model panel.
+    L=lefts[2]
+    frame(L,'C','FLOW MATCHING + ENSEMBLE GENERATION',
+          'Frozen regression · local patches + broad context',panel_width=.474)
+    xs=[.558,.666,.774]
     for x,symbol,col in zip(xs,['$z_0$','$z_t$','$v_\\theta$'],[BLUE,TEAL,NAVY]):
-        fig.patches.append(Ellipse((x,.714),.056,.060,transform=fig.transFigure,facecolor='white',edgecolor=col,lw=1.5))
-        text(x,.714,symbol,20,col,ha='center',va='center')
-    arrow(xs[0]+.028,.714,xs[1]-.028,.714);arrow(xs[1]+.028,.714,xs[2]-.028,.714)
-    for x,label in zip(xs,['Noise','Flow','Velocity']):text(x,.664,label,14,ha='center')
-    text(L+width/2,.609,'Conditional U-Net',16,ha='center',weight='bold')
-    for i,y in enumerate([.556,.519,.482]):
-        w=.048-i*.009
-        for x,col in [(L+.035,BLUE),(L+.155,TEAL)]:
-            fig.patches.append(Rectangle((x,y),w,.025,transform=fig.transFigure,color=col,alpha=1-i*.18))
-        fig.lines.append(plt.Line2D([L+.083,L+.155],[y+.012,y+.012],transform=fig.transFigure,color=LINE,lw=.7))
-    fig.patches.append(Rectangle((L+.098,.439),.036,.027,transform=fig.transFigure,color=NAVY))
-    text(L+.014,.395,'Weighted velocity loss',16,weight='bold')
-    fig.patches.append(Rectangle((L+.018,.292),.067,.067,transform=fig.transFigure,color='#e5eff5',ec=BLUE,lw=1))
-    fig.patches.append(Rectangle((L+.029,.303),.045,.045,transform=fig.transFigure,color='#76b9d6',ec=NAVY,lw=.7))
-    text(L+.100,.337,'Core + halo',14)
-    text(L+.100,.305,'Area + channels',14)
-    text(L+.014,.252,'Ensemble sampling',16,BLUE,weight='bold')
-    for i in range(3):
-        fig.patches.append(Rectangle((L+.028+i*.057,.160+i*.010),.058,.045,transform=fig.transFigure,
-            facecolor='#e5f2f4',edgecolor=TEAL,lw=1))
-    text(L+.014,.121,'Independent noise seeds',14)
-    for i in range(3):arrow(lefts[i]+width+.001,.49,lefts[i+1]-.001,.49)
+        fig.patches.append(Ellipse((x,.699),.074,.068,transform=fig.transFigure,
+            facecolor='white',edgecolor=col,lw=1.7))
+        text(x,.699,symbol,23,col,ha='center',va='center')
+    arrow(xs[0]+.037,.699,xs[1]-.037,.699)
+    arrow(xs[1]+.037,.699,xs[2]-.037,.699)
+    for x,label in zip(xs,['Noise','Flow state','Velocity']):
+        text(x,.641,label,16,ha='center')
+    text(.666,.593,'$z_t=(1-t)z_0+t z_1$',18,ha='center')
+    text(.666,.540,'Conditional U-Net',19,ha='center',weight='bold')
+    for i,y in enumerate([.481,.435,.389]):
+        w=.067-i*.012
+        for x,col in [(.548,BLUE),(.724,TEAL)]:
+            fig.patches.append(Rectangle((x,y),w,.031,transform=fig.transFigure,color=col,alpha=1-i*.18))
+        fig.lines.append(plt.Line2D([.615,.724],[y+.015,y+.015],transform=fig.transFigure,color=LINE,lw=1))
+    fig.patches.append(Rectangle((.642,.341),.052,.032,transform=fig.transFigure,color=NAVY))
+    text(.526,.290,'Weighted velocity loss',17,weight='bold')
+    fig.patches.append(Rectangle((.530,.191),.065,.067,transform=fig.transFigure,color='#e5eff5',ec=BLUE,lw=1.2))
+    fig.patches.append(Rectangle((.541,.202),.043,.045,transform=fig.transFigure,color='#76b9d6',ec=NAVY,lw=.9))
+    text(.612,.239,'Core + halo',16)
+    text(.612,.203,'Area + channels',16)
+    text(.840,.739,'Six output fields',16,weight='bold')
+    # All six original member maps, with T2m at the front of the variable stack.
+    for i,f in enumerate(('precip','q2m','ps','u10m','v10m','t2m')):
+        placements.append((sources[f],2,(.825+i*.006,.594-i*.022,.115,.107),None))
+    text(.841,.441,'~3 km / member',16,weight='bold')
+    text(.841,.400,'T₂m · rain · pₛ',16)
+    text(.841,.365,'u₁₀ · v₁₀ · q₂m',16)
+    text(.841,.306,f'{metadata["members"]} members',16,TEAL,weight='bold')
+    text(.841,.272,'Independent seeds',14)
+    # The shared state is advanced only after the overlapping tile velocities
+    # have been assembled; this is not independent tile-by-tile sampling.
+    text(.526,.139,'Tiled Heun  →  decode  →  ensemble',18,BLUE,weight='bold')
+    text(.526,.101,'Blend tile velocities; advance one shared domain state',14)
+    arrow(lefts[0]+width+.001,.49,lefts[1]-.001,.49)
+    arrow(lefts[1]+width+.001,.49,lefts[2]-.001,.49)
     base=out/'layout_readme.pdf';fig.savefig(base,facecolor=fig.get_facecolor());plt.close(fig)
     records=compose(base,out/'fig01_workflow.pdf',placements,dpi)
     # Keep previous download names as aliases of the SAME supplied layout.
@@ -206,14 +215,14 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
         shutil.copyfile(out/f'fig01_workflow.{extension}',out/f'fig01_workflow_paper.{extension}')
     base.unlink()
     atomic_json(out/'workflow_provenance.json',dict(time=entry['time'],case=case_id,case_selection=entry['reason'],focus_variable='t2m',
-        layout='four-panel reference layout; simplified labels; identical paper and README figure',
+        layout='three panels; expanded flow matching with compact generated-field stack; identical paper and README figure',
         checkpoint=metadata['checkpoint'],epoch=metadata['epoch'],weights=metadata['weights'],members=metadata['members'],
         steps=metadata['steps'],post=metadata['post'],metrics_sha256=digest(root/'metrics.json'),
         renderer_sha256=digest(__file__),panels=records,input_variables=INPUT_VARIABLES,
         input_definition_sources={str(p):digest(p) for p in map(Path,(
             'configs/discover_annual_v2.yaml','configs/discover_v4_1.yaml',
             'src/merraflow/prepare_v2.py','src/merraflow/static_v2.py','src/merraflow/v4_1.py'))},
-        note='Original GEOS/v4.1 vector maps in the supplied four-stage layout; no HRRR fields and no meteorological values inferred from images.'))
+        note='Original GEOS/v4.1 vector maps with merged architecture/output panel; no HRRR fields and no meteorological values inferred from images.'))
     return out
 
 
