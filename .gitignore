@@ -7,3 +7,12 @@ data/
 runs/
 plots/
 *.pt
+
+# Presentation figures (present_*/) are tracked on purpose; skip Jupyter autosave copies
+.ipynb_checkpoints/
+
+# Manuscript sources, figures, exports and editor build products stay local.
+/manuscript/
+/output/
+/tmp/
+.DS_Store

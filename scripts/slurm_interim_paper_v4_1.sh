@@ -23,5 +23,8 @@ args=(--evaluation "$OUTPUT" --output "$snapshot"
       --manuscript "${MANUSCRIPT:-$PROJECT_DIR/manuscript/MERRA21C_ML_arxiv.tex}"
       --dpi "${FIGURE_DPI:-300}" --compile)
 if [[ "${SKIP_MAPS:-0}" == 1 ]]; then args+=(--skip-maps); fi
+if [[ -n "${STORM:-}" ]]; then args+=(--storm "$STORM"); fi
+if [[ "${NO_INLINE:-0}" == 1 ]]; then args+=(--no-inline); fi
+if [[ "${PLOTS_ONLY:-0}" == 1 ]]; then args+=(--plots-only); fi
 "$ENV_DIR/bin/python" "${INTERIM_BUILDER:-$PROJECT_DIR/scripts/build_interim_paper_v4_1.py}" "${args[@]}"
-printf 'Interim paper bundle: %s/MERRAFlow_interim_paper.zip\n' "$snapshot"
+printf 'Completed plotting output: %s\n' "$snapshot"

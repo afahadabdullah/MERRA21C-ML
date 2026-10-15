@@ -16,6 +16,15 @@ from merraflow.evaluate_all_v4_1 import canonical,atomic_json,read_case,aggregat
 BUILDER=runpy.run_path('scripts/build_interim_paper_v4_1.py')
 
 
+def paper_template():
+    """Minimal public QA fixture; never requires the ignored author manuscript."""
+    blocks=('FIGURES','ABSTRACT','KEYPOINTS','SCOPE','TABLE_SETTINGS','TABLE_SCORES',
+            'RESULTS','CONCLUSIONS','APPENDIX','STORM_METHOD')
+    return (r'\documentclass{article}'+'\n'+r'\begin{document}'+'\n'
+            +'\n'.join(f'% BEGIN AUTO {key}\n% placeholder\n% END AUTO {key}' for key in blocks)
+            +'\n'+r'\end{document}'+'\n')
+
+
 @pytest.fixture
 def parent(tmp_path):
     root=tmp_path/'parent';(root/'cases').mkdir(parents=True)
@@ -73,22 +82,25 @@ def test_invalid_or_changed_data_cannot_be_silently_published(parent,tmp_path):
 def test_render_and_populate_paper_from_saved_snapshot(parent,tmp_path):
     root,m,records=parent
     out=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
-    BUILDER['render'](out,72)
+    figs=BUILDER['render'](out,72)
     paper=tmp_path/'manuscript'/'paper.tex';paper.parent.mkdir()
-    shutil.copyfile('manuscript/MERRA21C_ML_arxiv.tex',paper)
-    BUILDER['update_paper'](out,paper)
-    BUILDER['update_paper'](out,paper)  # Safe repeat; no duplicate blocks or stale fields.
+    paper.write_text(paper_template())
+    BUILDER['update_paper'](out,paper,figs)
+    BUILDER['update_paper'](out,paper)  # Safe repeat from figures.json; no duplicate blocks or stale fields.
     source=paper.read_text()
-    assert 'Interim snapshot: 2 of 3 eligible test hours' in source
-    assert r'\section{Interim results}' in source
-    assert '20.4\\%' not in source and 'three-case processed ensemble' not in source
+    assert '2 of 3 eligible held-out hours' in source and 'interim, completion-ordered' in source
+    assert r'\section{Results}' in source and source.count(r'\section{Results}')==1
     assert not any(line.startswith(('\\figslot{','\\tableslot{')) for line in source.splitlines())
-    assert source.count('\\label{tab:scores}')==1 and source.count('\\label{fig:skill}')==1
+    for label in ('tab:scores','tab:settings','fig:scorecard','fig:temporal','fig:spectra','fig:precip','fig:calibration'):
+        assert source.count('\\label{'+label+'}')==1, label
+    assert 'fig:overview' not in source  # no saved maps in this snapshot
     assert (out/'paper_figures'/'table01_all_variables.csv').exists()
+    assert (out/'paper_figures'/'figures.json').exists()
+    assert (tmp_path/'manuscript'/'figures'/'auto'/'fig_scorecard.pdf').is_file()
     import pymupdf
-    with pymupdf.open(out/'paper_figures'/'fig02_skill.pdf') as doc:
-        assert 'INTERIM: 2/3' in doc[0].get_text()
-    preview=BUILDER['inline_pdf'](out/'paper_figures'/'fig02_skill.pdf')
+    with pymupdf.open(out/'paper_figures'/'fig_scorecard.pdf') as doc:
+        assert '2/3' in doc.metadata['subject'] and 'interim' in doc.metadata['subject']
+    preview=BUILDER['inline_pdf'](out/'paper_figures'/'fig_scorecard.pdf')
     with pymupdf.open(stream=preview.encode('ascii'),filetype='pdf') as doc:
         assert len(doc)==1 and doc[0].get_images()
         assert len(set(doc[0].get_pixmap().samples))>100
@@ -97,8 +109,17 @@ def test_render_and_populate_paper_from_saved_snapshot(parent,tmp_path):
     with zipfile.ZipFile(archive) as z:
         assert 'manuscript/paper.tex' in z.namelist()
         assert 'analysis/summary.json' in z.namelist()
+        assert 'manuscript/figures/auto/fig_scorecard.pdf' in z.namelist()
     from merraflow.paper_figures_v4_1 import load_results
     with pytest.raises(ValueError,match='complete'):load_results(out)
+
+
+def test_manuscript_without_auto_markers_is_rejected(parent,tmp_path):
+    root,m,records=parent
+    out=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
+    figs=BUILDER['render'](out,72)
+    paper=tmp_path/'old.tex';paper.write_text('\\documentclass{article}\\begin{document}x\\end{document}\n')
+    with pytest.raises(ValueError,match='AUTO'):BUILDER['update_paper'](out,paper,figs)
 
 
 def test_only_completed_predeclared_example_fields_are_copied_and_plotted(parent,tmp_path):
@@ -112,6 +133,9 @@ def test_only_completed_predeclared_example_fields_are_copied_and_plotted(parent
     np.savez(root/'fields'/'grid.npz',lat=lat,lon=lon,area=area)
     m['saved_grid']=dict(path='fields/grid.npz',sha256=digest(root/'fields'/'grid.npz'))
     m['run_id']=hashlib.sha256(canonical(m).encode()).hexdigest();atomic_json(root/'manifest.json',m)
+    nlat,nlon=np.arange(29.,42.,2.5),np.arange(-111.,-98.,3.125)
+    native={f'native_{n}_{k}':v for n in ('t2m','u10m','v10m') for k,v in
+            (('values',np.random.default_rng(1).uniform(270,280,(len(nlat),len(nlon))).astype('float32')),('lat',nlat),('lon',nlon))}
     for i,record in enumerate(records):
         record.update(run_id=m['run_id'],seeds=[11,12,13])
         record['sources']['spectral']=score_source(ensemble*.95+i,truth,area)
@@ -121,7 +145,7 @@ def test_only_completed_predeclared_example_fields_are_copied_and_plotted(parent
                 relative=f'fields/{record["id"]}_{method}.npz'
                 arrays=dict(ensemble=ensemble if method=='raw' else ensemble*.95,
                             run_id=np.asarray(m['run_id']),seeds=np.array(record['seeds']))
-                if method=='raw':arrays.update(truth=truth,coarse=truth+2,regression=truth+1)
+                if method=='raw':arrays.update(truth=truth,coarse=truth+2,regression=truth+1,**native)
                 np.savez(root/relative,**arrays)
                 record['saved_fields'][method]=dict(path=relative,sha256=digest(root/relative))
         atomic_json(root/'cases'/f'{record["id"]}.json',record)
@@ -129,15 +153,46 @@ def test_only_completed_predeclared_example_fields_are_copied_and_plotted(parent
     _,meta,s=BUILDER['load_snapshot'](out)
     assert meta['available_map_cases']==[records[0]['id']]
     assert s['hours']==2 and s['settings']['saved_cases']==m['settings']['saved_cases']
-    maps=BUILDER['render'](out,72)
-    assert len(maps)==14 and all(records[0]['id'] in name for name in maps)
-    paper=tmp_path/'paper.tex';shutil.copyfile('manuscript/MERRA21C_ML_arxiv.tex',paper)
-    BUILDER['update_paper'](out,paper)
-    assert '\\section{Saved interim map examples}' in paper.read_text()
-    assert (tmp_path/'figures'/'interim'/f'MERRAFlow_interim_fig09_{records[0]["id"]}_t2m.pdf').is_file()
+    figs=BUILDER['render'](out,72)
+    assert [c['id'] for c in figs['cases']]==[records[0]['id']] and figs['cases'][0]['main']
+    for kind in ('overview','zoom','ensemble','gain'):
+        assert (out/'paper_figures'/f'{figs["cases"][0][kind]["stem"]}.pdf').is_file()
+    paper=tmp_path/'paper.tex';paper.write_text(paper_template())
+    BUILDER['update_paper'](out,paper,figs)
+    text=paper.read_text()
+    assert '\\label{fig:overview}' in text and '\\label{fig:zoom}' in text and '\\label{tab:spectral}' in text
+    assert (tmp_path/'figures'/'auto'/f'fig_case_{records[0]["id"]}_overview.pdf').is_file()
 
 
-def test_submission_stages_only_publishing_files_and_backs_up_paper(tmp_path):
+def test_storm_case_study_from_storm_animation_netcdf(parent,tmp_path):
+    xr=pytest.importorskip('xarray');pytest.importorskip('h5netcdf')
+    root,m,records=parent
+    rng=np.random.default_rng(0);T,H,W=5,40,48
+    lat,lon=np.meshgrid(np.linspace(33,36,H),np.linspace(-90,-86,W),indexing='ij')
+    data={}
+    base=dict(t2m=285.,precip=0.,ps=1e5,u10m=2.,v10m=1.,q2m=.008)
+    for name,b in base.items():
+        f=lambda: (b+rng.gamma(.3,4,(T,H,W)) if name=='precip' else b+rng.normal(0,1e-3*abs(b)+.1,(T,H,W))).astype('float32')
+        data[f'truth_{name}']=(('time','y','x'),f());data[f'geosfp_{name}']=(('time','y','x'),f())
+        data[f'member_{name}']=(('time','run','member','y','x'),np.stack([f()[:,None],f()[:,None]],2).reshape(T,1,2,H,W))
+    for k,v in (('lat',lat),('lon',lon),('elevation',np.full((H,W),100.))):
+        data[k]=(('time','y','x'),np.repeat(v[None],T,0).astype('float32'))
+    data['window_row0']=(('time',),np.zeros(T,'int32'));data['window_col0']=(('time',),np.zeros(T,'int32'))
+    times=np.array([np.datetime64('2026-03-07T17:30')+np.timedelta64(k,'h') for k in range(T)])
+    path=tmp_path/'storm_fields.nc'
+    xr.Dataset(data,coords=dict(time=times,run=np.array(['flow'],dtype=object),member=[1,2]),
+               attrs=dict(peak='2026-03-07T19:30:00',post='none',grid_km=3.)).to_netcdf(path,engine='h5netcdf')
+    out=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
+    figs=BUILDER['render'](out,72,str(path))
+    assert figs['storm']['peak'].startswith('2026-03-07T19:30') and figs['storm']['totals']
+    paper=tmp_path/'paper.tex';paper.write_text(paper_template())
+    BUILDER['update_paper'](out,paper,figs,inline=False)
+    text=paper.read_text()
+    assert '\\subsection{Storm case study}' in text and '\\label{fig:storm}' in text and 'filecontents' not in text.split('% END AUTO FIGURES')[0].split('% BEGIN AUTO FIGURES')[1]
+
+
+@pytest.mark.parametrize('plots_only',[False,True])
+def test_submission_stages_only_publishing_files_and_backs_up_paper(tmp_path,plots_only):
     import os
     import subprocess
     project=tmp_path/'project';project.mkdir()
@@ -145,7 +200,8 @@ def test_submission_stages_only_publishing_files_and_backs_up_paper(tmp_path):
     (live/'worker.py').write_text('frozen evaluator\n')
     output=project/'evaluation';output.mkdir();(output/'manifest.json').write_text('{}')
     paper=project/'manuscript'/'MERRA21C_ML_arxiv.tex';paper.parent.mkdir()
-    paper.write_text('local source before template update\n')
+    paper.write_text(paper_template())
+    if plots_only:paper.unlink()
     tools=tmp_path/'bin';tools.mkdir()
     (tools/'git').write_text('''#!/usr/bin/env python3
 import os,sys
@@ -168,13 +224,45 @@ print('123456;discover')
         PROJECT_DIR=str(project),OUTPUT=str(output))
     for name in ('KEEP_MANUSCRIPT','PUBLISHING_REF','MANUSCRIPT','SNAPSHOT_OUTPUT'):
         environment.pop(name,None)
+    environment['PLOTS_ONLY']='1' if plots_only else '0'
     result=subprocess.run(['bash',str(Path('scripts/submit_interim_paper_v4_1.sh').resolve())],
                           env=environment,capture_output=True,text=True,check=True)
     submission=json.loads((tmp_path/'submitted.json').read_text())
     staged=Path(submission['builder']).parent
     assert 'Interim CPU paper job: 123456' in result.stdout
     assert submission['output']==str(output)
-    assert (staged/'manuscript_before_template_update.tex').read_text()=='local source before template update\n'
-    assert paper.read_bytes()==Path('manuscript/MERRA21C_ML_arxiv.tex').read_bytes()
+    if plots_only:
+        assert not paper.exists()
+        assert 'MERRAFlow_plots_metrics.zip' in result.stdout
+    else:
+        assert (staged/'manuscript_before_update.tex').read_text()==paper_template()
+        assert paper.read_text()==paper_template()
     assert (staged/'build_interim_paper_v4_1.py').read_bytes()==Path('scripts/build_interim_paper_v4_1.py').read_bytes()
+    assert (staged/'paper_plots_v4_1.py').read_bytes()==Path('scripts/paper_plots_v4_1.py').read_bytes()
+    assert (staged/'conus_boundaries_50m.json.gz').read_bytes()==Path('src/merraflow/assets/conus_boundaries_50m.json.gz').read_bytes()
     assert (live/'worker.py').read_text()=='frozen evaluator\n'
+
+
+def test_plots_only_cli_needs_no_manuscript(parent,tmp_path):
+    import os,subprocess,sys,zipfile,csv
+    root,_,_=parent
+    out=tmp_path/'plots_only'
+    source=tmp_path/'absent_manuscript.tex'
+    subprocess.run([sys.executable,'scripts/build_interim_paper_v4_1.py',
+                    '--evaluation',str(root),'--output',str(out),'--manuscript',str(source),
+                    '--plots-only','--dpi','72'],check=True,capture_output=True,text=True)
+    assert not source.exists()
+    with (out/'paper_figures'/'score_matrix.csv').open() as stream:rows=list(csv.DictReader(stream))
+    assert len(rows)==21 and rows[0]['hours']=='2' and rows[0]['expected_hours']=='3'
+    with zipfile.ZipFile(out/'MERRAFlow_plots_metrics.zip') as archive:
+        assert 'analysis/paper_figures/score_matrix.csv' in archive.namelist()
+        assert not any(name.startswith('manuscript/') for name in archive.namelist())
+
+
+def test_score_matrix_retains_zero_skill(parent,tmp_path):
+    root,_,_=parent
+    out=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
+    summary=BUILDER['load_snapshot'](out)[2]
+    summary['sources']['raw']['fields']['t2m']['crpss_vs_coarse']=0.
+    result=BUILDER['_plots']().fig_scorecard(summary,out,72,'zero_skill')
+    assert result['crpss']['t2m']==0.

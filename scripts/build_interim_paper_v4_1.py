@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Freeze completed MERRA-Flow hours and build an explicitly interim paper.
+"""Freeze completed MERRA-Flow hours and build the paper from them.
 
-Run from the frozen evaluation checkout. This script lives outside src so it
-can be fetched without invalidating live workers. It never runs inference or
-writes to the parent evaluation. --snapshot redraws saved data without analysis.
+Run from the frozen evaluation checkout. This script and its plotter
+(scripts/paper_plots_v4_1.py) live outside src/ so they can be fetched without
+invalidating the live evaluator, which hashes src/merraflow/*.py. It never runs
+inference or writes to the parent evaluation. --snapshot redraws saved data.
+
+Figures (scripts/paper_plots_v4_1.py) are map-first: native GEOS-FP cells versus
+3-km MERRA-Flow members and the reference, zooms, ensemble probabilities, gain
+maps, and aggregate skill. An optional --storm storm_fields.nc (written by
+merraflow.storm_animation_v4_1) adds the storm case study. The manuscript is
+updated only inside its "% BEGIN AUTO <name>" blocks.
 """
 import argparse
 import base64
@@ -112,288 +119,593 @@ def load_snapshot(root):
     return manifest, metadata, summary
 
 
-def render(root, dpi=300):
-    from merraflow import paper_figures_v4_1 as plots
+def _plots():
+    """Import the publication plotter that sits next to this script (also when staged elsewhere)."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location('paper_plots_v4_1', here/'paper_plots_v4_1.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+def _finite(value):
+    """JSON-safe figure metadata: NaN/inf become None, NumPy scalars become Python."""
+    if isinstance(value, dict):
+        return {str(k): _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def render(root, dpi=300, storm=None):
+    """Redraw every paper figure from the frozen snapshot (no analysis, no inference)."""
     from merraflow.evaluate_all_v4_1 import atomic_json, digest
+    plots = _plots()
     manifest, meta, summary = load_snapshot(root)
-    out = Path(root)/'paper_figures';out.mkdir(exist_ok=True)
-    plots.style();original = plots.export
-    def interim_export(fig, output, stem, dpi=300):
-        fig.text(.5, -.10, f'MERRA-Flow | INTERIM: {summary["hours"]}/{summary["expected_hours"]} eligible test hours | completion-ordered subset',
-                 ha='center', va='top', fontsize=9, color='#a04a15')
-        original(fig, output, stem, dpi)
-    plots.export = interim_export
-    try:
-        plots.skill(summary,out,dpi);plots.calibration(summary,out,dpi)
-        plots.structure(summary,out,dpi);plots.precipitation(summary,out,dpi);plots.filtering(summary,out,dpi)
-        maps_manifest = deepcopy(manifest)
-        maps_manifest['settings']['saved_cases'] = meta['available_map_cases']
-        maps = plots.saved_maps(Path(root), maps_manifest, out, dpi)
-        # Temporal support: all eligible hours versus the frozen completed subset.
-        import matplotlib.pyplot as plt
-        expected = np.array([e['time'] for e in manifest['entries']], dtype='datetime64[m]')
-        included = np.array([e['time'] for e in meta['entries']], dtype='datetime64[m]')
-        days, counts = np.unique(expected.astype('datetime64[D]'), return_counts=True)
-        finished = {str(d):n for d,n in zip(*np.unique(included.astype('datetime64[D]'),return_counts=True))}
-        fig, ax = plt.subplots(figsize=(7.2,2.8),layout='constrained')
-        ax.bar(days.astype(object), counts, color='#d6dee4', label='All eligible hours')
-        ax.bar(days.astype(object), [finished.get(str(d),0) for d in days], color='#0072b2',label='Completed snapshot')
-        ax.set(ylabel='Hours per UTC day',xlabel='Test date (UTC)',title='Temporal coverage of the interim snapshot')
-        ax.legend(frameon=False);fig.autofmt_xdate()
-        plots.export(fig,out,'interim_test_coverage',dpi)
-    finally:
-        plots.export = original
+    root = Path(root); out = root/'paper_figures'; out.mkdir(exist_ok=True)
+    for old in out.glob('*'):
+        if old.suffix in ('.pdf', '.png', '.svg'):
+            old.unlink()
+    maps_manifest = deepcopy(manifest)
+    maps_manifest['settings']['saved_cases'] = meta['available_map_cases']
+    ids = [e['id'] for e in meta['entries']]
+    subject = (f'MERRA-Flow v4.1 | {summary["hours"]}/{summary["expected_hours"]} held-out hours'
+               + ('' if summary['hours'] == summary['expected_hours'] else ' (interim, completion-ordered)'))
+    figs = plots.render_all(root, maps_manifest, summary, ids, out, dpi, storm_path=storm, subject=subject)
+    if storm:
+        figs['storm']['sha256'] = digest(storm)
+    figs = _finite(figs)
+    atomic_json(out/'figures.json', figs)
     atomic_json(out/'figure_data.json', summary)
     import csv
-    with (out/'table01_all_variables.csv').open('w',newline='') as stream:
-        writer=csv.writer(stream)
-        writer.writerow(['scope','hours','expected_hours','method','field','unit','rmse','mae','bias','crps','fair_crps','crps_skill','coverage_90'])
+    with (out/'table01_all_variables.csv').open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['hours', 'expected_hours', 'method', 'field', 'unit', 'rmse', 'mae', 'bias', 'crps', 'fair_crps',
+                         'crps_skill_vs_geosfp', 'coverage_90', 'spread_skill_corrected'])
         for method in plots.methods(summary):
-            for i,field in enumerate(plots.FIELDS):
-                values=summary['sources'][method]['fields'][field]
-                writer.writerow(['interim',summary['hours'],summary['expected_hours'],method,field,plots.UNITS[i],
-                    *[None if values[key] is None else values[key]*plots.FACTORS[i] for key in
-                      ('rmse_pooled','mae','bias','crps','fair_crps')],values['crpss_vs_coarse'],values['coverage_90']])
-    (out/'captions.md').write_text(f'# MERRA-Flow interim snapshot\n\n{summary["hours"]}/{summary["expected_hours"]} eligible hours; completion-ordered subset.\n'
-        +'No full-test or statistical-significance claim. All figures use the same saved subset; no confidence intervals are drawn.\n'
-        +'See the populated paper captions and figure_data.json for metrics and conventions.\n')
-    atomic_json(out/'plot_manifest.json', dict(scope='interim', complete=False, snapshot_id=meta['snapshot_id'],
-        run_id=manifest['run_id'], hours=summary['hours'], expected_hours=summary['expected_hours'], dpi=dpi,
-        summary_sha256=digest(Path(root)/'summary.json'), builder_sha256=digest(__file__),
-        files={p.name:digest(p) for p in out.iterdir() if p.suffix in ('.pdf','.svg','.png')}))
-    return maps
+            for i, field in enumerate(plots.FIELDS):
+                v = summary['sources'][method]['fields'][field]
+                writer.writerow([summary['hours'], summary['expected_hours'], method, field, plots.UNITS[i],
+                                 *[None if v[k] is None else v[k]*plots.FACTORS[i] for k in
+                                   ('rmse_pooled', 'mae', 'bias', 'crps', 'fair_crps')],
+                                 v['crpss_vs_coarse'], v['coverage_90'], v['spread_skill_corrected']])
+    with (out/'score_matrix.csv').open('w', newline='') as stream:
+        writer = csv.writer(stream)
+        writer.writerow(['field', 'method', 'crps_skill_percent', 'rmse_reduction_percent',
+                         'coverage_90_percent', 'hours', 'expected_hours'])
+        for field in plots.FIELDS:
+            base = summary['sources']['coarse']['fields'][field]['rmse_pooled']
+            for method in plots.methods(summary):
+                v = summary['sources'][method]['fields'][field]
+                writer.writerow([field, method,
+                    None if v['crpss_vs_coarse'] is None else 100*v['crpss_vs_coarse'],
+                    100*(1-v['rmse_pooled']/base) if base > 0 else None,
+                    None if v['coverage_90'] is None else 100*v['coverage_90'],
+                    summary['hours'], summary['expected_hours']])
+    atomic_json(out/'plot_manifest.json', dict(scope='interim' if summary['hours'] < summary['expected_hours'] else 'all-hours',
+        snapshot_id=meta['snapshot_id'], run_id=manifest['run_id'], hours=summary['hours'],
+        expected_hours=summary['expected_hours'], dpi=dpi, storm=figs.get('storm') and figs['storm'].get('sha256'),
+        summary_sha256=digest(root/'summary.json'), builder_sha256=digest(__file__),
+        plotter_sha256=digest(Path(__file__).resolve().parent/'paper_plots_v4_1.py'),
+        files={p.name: digest(p) for p in sorted(out.iterdir()) if p.suffix in ('.pdf', '.png')}))
+    return figs
+
+
+# ----------------------------------------------------------------------------- manuscript text
+
+NAMES = ('temperature', 'precipitation', 'surface pressure', 'zonal wind', 'meridional wind', 'specific humidity',
+         'wind speed')
+TITLES = ('Temperature', 'Precipitation', 'Surface pressure', 'Zonal wind', 'Meridional wind', 'Specific humidity',
+          'Wind speed')
+FACTORS = (1, 1, .01, 1, 1, 1000, 1)
+UNITS = (r'K', r'mm\,h$^{-1}$', r'hPa', r'm\,s$^{-1}$', r'm\,s$^{-1}$', r'g\,kg$^{-1}$', r'm\,s$^{-1}$')
+FIELD_KEYS = ('t2m', 'precip', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed')
 
 
 def number(value, factor=1, digits=3):
     return '--' if value is None or not np.isfinite(value) else f'{value*factor:.{digits}g}'
 
 
-def table(caption, label, columns, headings, rows):
-    return ('\\begin{table*}[t]\n\\caption{'+caption+'}\\label{'+label+'}\n\\centering\\small\n'
-        +'\\begin{tabular}{'+columns+'}\\toprule\n'+' & '.join(headings)+r' \\ \midrule'+'\n'
-        +'\n'.join(' & '.join(row)+r' \\' for row in rows)+'\n\\bottomrule\\end{tabular}\n\\end{table*}\n')
+def pct(value, digits=0):
+    """Percentage text for a fraction, e.g. 0.384 -> '38'."""
+    if value is None or not np.isfinite(value):
+        return '--'
+    v = 100*value
+    return f'{v:.{1 if abs(v) < 10 and digits == 0 else digits}f}'
 
 
-def apply_block(source, key, text, pattern=None):
-    start, end = f'% BEGIN INTERIM {key}', f'% END INTERIM {key}'
-    block = start+'\n'+text.rstrip()+'\n'+end+'\n'
-    if start in source:
-        first=source.index(start);last=source.index(end,first)+len(end)
-        return source[:first]+block+source[last:].lstrip('\n')
-    if pattern:
-        source, count = re.subn(pattern, lambda _:block.rstrip(), source, count=1, flags=re.M)
-        if count != 1:raise ValueError(f'Cannot locate manuscript block: {key}')
-        return source
-    raise ValueError(f'Missing manuscript marker: {key}')
+def join(items):
+    items = list(items)
+    return items[0] if len(items) == 1 else ', '.join(items[:-1])+', and '+items[-1]
 
 
-def figure(stem, caption, label):
-    name='MERRAFlow_interim_'+stem+'.pdf'
-    return ('\\begin{figure*}[t]\\centering\n'
-        +'\\IfFileExists{figures/interim/'+name+'}{\\includegraphics[width=\\textwidth]{figures/interim/'+name+'}}{%\n'
-        +'\\IfFileExists{manuscript/figures/interim/'+name+'}{\\includegraphics[width=\\textwidth]{manuscript/figures/interim/'+name+'}}'
-        +'{\\includegraphics[width=\\textwidth]{'+name+'}}}\n\\caption{'+caption+'}\\label{'+label+'}\n\\end{figure*}\n')
+def apply_block(source, key, text):
+    start, end = f'% BEGIN AUTO {key}', f'% END AUTO {key}'
+    if start not in source:
+        raise ValueError(f'Manuscript lacks the "{start}" marker; copy the current local manuscript '
+                         'with AUTO blocks to Discover, or use --plots-only')
+    first = source.index(start); last = source.index(end, first)+len(end)
+    return source[:first]+start+'\n'+text.rstrip()+'\n'+end+source[last:]
 
 
-def inline_pdf(path, width=518.4):
-    """ASCII PDF fallback for the editor's single-source compiler; lossless RGB."""
+def table(caption, label, columns, headings, rows, star=True, size='\\small', sep=None):
+    env = 'table*' if star else 'table'
+    size = size+(f'\\setlength{{\\tabcolsep}}{{{sep}}}' if sep else '')
+    return (f'\\begin{{{env}}}[t]\n\\caption{{{caption}}}\\label{{{label}}}\n\\centering{size}\n'
+            + '\\begin{tabular}{'+columns+'}\\toprule\n'+' & '.join(headings)+r' \\ \midrule'+'\n'
+            + '\n'.join(' & '.join(row)+r' \\' for row in rows)+'\n\\bottomrule\\end{tabular}\n'+f'\\end{{{env}}}\n')
+
+
+def figure(stem, caption, label, placement='t', width='\\textwidth'):
+    name = stem+'.pdf'
+    preview = stem+'_preview.pdf'
+    return (f'\\begin{{figure*}}[{placement}]\\centering\n'
+            + '\\IfFileExists{figures/auto/'+name+'}{\\includegraphics[width='+width+']{figures/auto/'+name+'}}{%\n'
+            + '\\IfFileExists{manuscript/figures/auto/'+name+'}{\\includegraphics[width='+width+']{manuscript/figures/auto/'+name+'}}'
+            + '{\\includegraphics[width='+width+']{'+preview+'}}}\n\\caption{'+caption+'}\\label{'+label+'}\n\\end{figure*}\n')
+
+
+def inline_pdf(path, width=518.4, max_pixels=1800):
+    """ASCII PDF fallback for the editor's single-source compiler (PNG preview, RGB)."""
     from PIL import Image
-    with Image.open(Path(path).with_suffix('.png')) as image:
-        rgb=image.convert('RGB');pixels=rgb.tobytes();w,h=rgb.size
     import zlib
-    stream=base64.a85encode(zlib.compress(pixels),wrapcol=100)+b'~>\n';height=width*h/w
-    objects=[b'<< /Type /Catalog /Pages 2 0 R >>',b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-        f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /XObject << /Im 4 0 R >> >> /Contents 5 0 R >>'.encode(),
-        f'<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter [/ASCII85Decode /FlateDecode] /Length {len(stream)} >>\nstream\n'.encode()+stream+b'endstream']
-    content=f'q {width} 0 0 {height} 0 0 cm /Im Do Q\n'.encode()
+    with Image.open(Path(path).with_suffix('.png')) as image:
+        rgb = image.convert('RGB')
+        if rgb.size[0] > max_pixels:
+            rgb = rgb.resize((max_pixels, round(rgb.size[1]*max_pixels/rgb.size[0])), Image.LANCZOS)
+        pixels = rgb.tobytes(); w, h = rgb.size
+    stream = base64.a85encode(zlib.compress(pixels, 9), wrapcol=100)+b'~>\n'; height = width*h/w
+    objects = [b'<< /Type /Catalog /Pages 2 0 R >>', b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+               f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /XObject << /Im 4 0 R >> >> /Contents 5 0 R >>'.encode(),
+               f'<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter [/ASCII85Decode /FlateDecode] /Length {len(stream)} >>\nstream\n'.encode()+stream+b'endstream']
+    content = f'q {width} 0 0 {height} 0 0 cm /Im Do Q\n'.encode()
     objects.append(f'<< /Length {len(content)} >>\nstream\n'.encode()+content+b'endstream')
-    result=b'%PDF-1.4\n';offsets=[0]
-    for i,obj in enumerate(objects,1):offsets.append(len(result));result+=f'{i} 0 obj\n'.encode()+obj+b'\nendobj\n'
-    xref=len(result);result+=f'xref\n0 {len(objects)+1}\n0000000000 65535 f \n'.encode()
-    result+=b''.join(f'{p:010d} 00000 n \n'.encode() for p in offsets[1:])
-    result+=f'trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    result = b'%PDF-1.4\n'; offsets = [0]
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(result)); result += f'{i} 0 obj\n'.encode()+obj+b'\nendobj\n'
+    xref = len(result); result += f'xref\n0 {len(objects)+1}\n0000000000 65535 f \n'.encode()
+    result += b''.join(f'{p:010d} 00000 n \n'.encode() for p in offsets[1:])
+    result += f'trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
     return result.decode('ascii')
 
 
-def update_paper(root, manuscript):
-    from merraflow.evaluate_all_v4_1 import FIELDS
-    manifest, meta, s = load_snapshot(root)
-    root=Path(root);path=Path(manuscript);source=path.read_text();n,N=s['hours'],s['expected_hours']
-    names=('Temperature','Precipitation','Surface pressure','Zonal wind','Meridional wind','Specific humidity','Wind speed')
-    factors=(1,1,.01,1,1,1000,1)
-    units=(r'K',r'mm h$^{-1}$',r'hPa',r'm s$^{-1}$',r'm s$^{-1}$',r'g kg$^{-1}$',r'm s$^{-1}$')
-    methods=[m for m in ('coarse','regression','raw','spectral') if m in s['sources']]
-    labels=dict(coarse='Coarse',regression='Regression',raw='Raw flow',spectral='Spectral flow')
-    raw=s['sources']['raw']['fields'];cov=[100*raw[f]['coverage_90'] for f in FIELDS]
-    skill=[100*raw[f]['crpss_vs_coarse'] for f in FIELDS if raw[f]['crpss_vs_coarse'] is not None]
-    count=sum(v>0 for v in skill);pct=f'{100*n/N:.1f}'
-    scope=f'Interim snapshot: {n} of {N} eligible test hours ({pct}\\%).'
-    source=re.sub(r'Interim snapshot: \d+ of \d+ eligible test hours \([\d.]+\\%\)\.',lambda _:scope,source)
-    abstract=(scope+' Raw-flow empirical CRPS skill relative to coarse input ranges from '
-        +number(min(skill))+' to '+number(max(skill))+r'\% across the evaluated fields, with positive skill for '
-        +f'{count} of {len(skill)} fields. Empirical central 90'+r'\% interval coverage ranges from '
-        +number(min(cov))+' to '+number(max(cov))+r'\%. Raw and spectrally processed ensembles are compared using identical noise draws. '
-        +'These are descriptive estimates for a completion-ordered subset, not a random or complete test sample; full-test inference and aggregation remain in progress.')
-    if '% BEGIN INTERIM ABSTRACT' not in source:
-        a=source.index('In an exploratory evaluation of three selected held-out hours')
-        b=source.index('\n\n\\vspace{0.8em}',a)
-        source=source[:a]+'% BEGIN INTERIM ABSTRACT\n'+abstract+'\n% END INTERIM ABSTRACT'+source[b:]
-    else:source=apply_block(source,'ABSTRACT',abstract)
-    source=re.sub(r'Draft status: Figure 1[^\n]+',lambda _:scope+' All populated numerical results refer to this frozen interim subset. Full-test evaluation and author declarations remain in progress.}',source,count=1)
-    # Update the scope wherever legacy case-study claims would otherwise persist.
-    old='The available numerical evidence comprises three selected held-out hours, rather than a completed climatological evaluation. We report those results explicitly, identify their restrictions, and specify the additional comparisons needed to establish general skill.'
-    source=source.replace(old,scope+' We report the frozen completion-ordered subset explicitly and retain the full-test manifest. Partial completion does not establish representative population skill.')
-    source=source.replace('The preliminary diagnostic discussed below instead uses the latest checkpoint at epoch 243; it must not be relabeled as the validation-best model.',
-        'The quantitative evaluation checkpoint is frozen by the parent run and identified in Table~\\ref{tab:settings}; workflow map illustrations retain their separate development provenance.')
-    source=source.replace('The diagnostic averages these per-hour statistics; averaging RMSE across cases differs from taking the square root of a pooled mean-square error.',
-        'The interim evaluator pools area-weighted MSE across hours before taking the square root. MAE and bias are averaged equally across hours.')
-    source=source.replace('The saved central interval uses the interpolated empirical 5th and 95th percentiles of only eight members.',
-        'The central interval uses interpolated empirical 5th and 95th percentiles of the frozen evaluation ensemble.')
-    source=source.replace('Low coverage across several variables nevertheless identifies a practical limitation requiring larger-ensemble verification and calibration analysis.',
-        'Coverage and corrected spread/error are reported for every field without assuming calibrated population quantiles.')
-    source=source.replace('The saved evaluator uses Eq.~\\eqref{eq:crps}, not a finite-ensemble fair score.',
-        'The evaluator saves both empirical CRPS in Eq.~\\eqref{eq:crps} and finite-ensemble fair CRPS; the main score table uses the empirical score.')
-    source=source.replace('Fair scores cannot be reconstructed from the aggregate scorecard alone without its underlying pairwise statistics or ensemble fields.',
-        'Both empirical and fair scores are retained in the saved per-hour records and pooled summary.')
-    source=source.replace('The current three cases do not support stable block-bootstrap confidence intervals or seasonal significance tests; none are reported.',
-        'The current completion-ordered subset does not support representative population intervals or seasonal significance tests; none are reported.')
-    source=source.replace('The default production configuration requests 32 steps and 16 members, whereas the presentation evidence uses 64 steps and eight members.',
-        'The frozen run settings in Table~\\ref{tab:settings} supersede default inference settings for the interim quantitative evaluation.')
-    a=source.index('\\caption{GEOS-based generative downscaling framework.') if '\\caption{GEOS-based generative downscaling framework.' in source else source.index('\\caption{MERRA-Flow generative downscaling framework.')
-    b=source.index('\\label{fig:workflow}',a)
-    source=source[:a]+(r'\caption{MERRA-Flow generative downscaling framework. \textbf{A:} Representative stacked native GEOS-FP maps and the complete weather, coarse-baseline, static, and temporal input inventory. SLP and PS denote sea-level and surface pressure, respectively. \textbf{B:} Matched 2-m temperature maps on the same extent and scale, with a threefold tighter crop and unchanged source cells. \textbf{C:} Regression-conditioned flow matching, the conditional U-Net, weighted core/halo velocity loss, synchronized tiled Heun sampling, and a compact six-field output stack. The architecture illustration reuses the 7 March 2026, 19:30 UTC development diagnostic (epoch-243 EMA, eight members, 64 steps, spectral processing). Its map checkpoint is distinct from the frozen quantitative interim run in Table~\ref{tab:settings}. Input/output stacks summarize variables without a shared scalar color scale; panel B retains its temperature scale.}'+'\n')+source[b:]
-    a=source.index('\\subsection{Spectral processing in the exploratory diagnostics}') if '\\subsection{Spectral processing in the exploratory diagnostics}' in source else source.index('\\subsection{Spectral processing}')
-    b=source.index('\\section{Evaluation design}',a)
-    dates=manifest.get('spectral_reference',{}).get('times',[])
-    spectral=('\\subsection{Spectral processing}\nThe frozen evaluation records '+str(len(dates))+' training-reference hours for a fixed spectral adjustment. '
-        +'Raw and processed predictions use the same member seeds. The transform is applied after generation; it does not retrain the model or use evaluation truth. '
-        +'Reference dates and fixed gain/cutoff settings are retained in the parent manifest. Sharper gradients and spectra are assessed together with CRPS, bias, and calibration; amplitude adjustment does not establish correct feature location.\n\n')
-    source=source[:a]+spectral+source[b:]
-    a=source.index('The saved diagnostic contains 7 March 2026') if 'The saved diagnostic contains 7 March 2026' in source else source.index('% BEGIN INTERIM EVALUATION')
-    b=source.index('\\subsection{Deterministic and probabilistic scores}',a)
-    evaluation=(scope+' The snapshot includes every valid atomic hour record present when its ID list was frozen. '
-        +'Completion depends on shard scheduling and runtime, so this subset is neither random nor a contiguous independent holdout. '
-        +'Figure~\\ref{fig:data} shows its temporal support against all eligible hours. The original full-test completion checks remain unchanged.\n\n'
-        +'\\subsection{Frozen full-test protocol and interim extraction}\\label{sec:fulltest}\n'
-        +f"The parent run fixes {s['settings']['members']} members and {s['settings']['steps']} Heun steps with {s['settings']['weights']} weights. "
-        +'Completed per-hour metrics are pooled on the fixed grid, with equal hour weighting and area weighting within each hour. '
-        +'RMSE is the square root of pooled MSE; precipitation contingency, reliability, and FSS statistics pool their numerator/denominator terms. '
-        +'The snapshot preserves parent run identity, selected IDs, case hashes, and any completed predeclared example fields. No new inference is performed for this interim report. '
-        +'Temporal-block confidence intervals are withheld because completion-order sampling does not justify population inference.\n\n')
-    source=source[:a]+'% BEGIN INTERIM EVALUATION\n'+evaluation+source[b:]
-    # Four genuine tables, with unavailable controlled ablations explicitly unclaimed.
-    rows=[[names[i]+' ('+units[i]+')',coarse,ref,support] for i,(coarse,ref,support) in enumerate([
-        ('T2M','TMP\\_2M','Midpoint'),('PRECTOT','PRECTOT','Hourly trapezoid'),('PS','PRES\\_SFC','Midpoint'),
-        ('U10M','UGRD\\_10M','Midpoint'),('V10M','VGRD\\_10M','Midpoint'),('QV2M','SPFH\\_2M','Midpoint')])]
-    data_table=table('Generated variables, units, and learning reference. All reference fields are high-resolution GEOS replay output.',
-        'tab:data','llll',['Variable','Coarse baseline','GEOS reference','Temporal support'],rows)
-    cfg=manifest['config'];patch=cfg['patch'];model=cfg.get('model',{});record=json.loads((root/'cases'/f'{meta["entries"][0]["id"]}.json').read_text())
-    rows=[['Snapshot scope',f'{n}/{N} eligible hours; descriptive interim subset'],['Evaluation checkpoint',f"Epoch {record['epoch']}; {s['settings']['weights']} weights"],
-        ['Members / Heun steps',f"{s['settings']['members']} / {s['settings']['steps']}"],['Core / halo',f"{patch['size']} / {patch['halo']} pixels"],
-        ['Context',f"Scale {patch['context_scale']}; pooled size {patch['context_size']} pixels"],
-        ['Network',f"Base width {model.get('base_channels','not recorded')}; multipliers {model.get('channel_mult',[])}"],
-        ['Post-processing',str(s['settings']['post'])],['Score confidence intervals','Withheld for completion-ordered interim subset']]
-    settings_table=table('Frozen evaluation and configured model settings. The checkpoint epoch is read from saved cases.','tab:settings','lp{0.65\\textwidth}',['Setting','Value'],rows)
-    rows=[]
-    for i,f in enumerate(FIELDS):
-        for m in methods:
-            v=s['sources'][m]['fields'][f]
-            rows.append([names[i],labels[m],number(v['rmse_pooled'],factors[i]),number(v['mae'],factors[i]),
-                number(v['crps'],factors[i]),number(v['crpss_vs_coarse'],100),number(v['coverage_90'],100)])
-    scores_table=table(scope+' Scores use the physical units in Table~\\ref{tab:data}; wind speed uses m s$^{-1}$. CRPS skill is relative to coarse input. Coverage is empirical central 90\\% coverage. No significance intervals are claimed.',
-        'tab:scores','llrrrrr',['Variable','Method','RMSE','MAE','CRPS','Skill (\\%)','Coverage (\\%)'],rows)
-    rows=[]
-    for i,f in enumerate(FIELDS):
-        r=raw[f];v=s['sources'].get('spectral',{}).get('fields',{}).get(f)
-        rows.append([names[i],number(v['crps']-r['crps'],factors[i]) if v else '--',
-            number(r['bias'],factors[i]),number(v['bias'],factors[i]) if v else '--',
-            number(r['gradient_p99_members_mean']/r['gradient_p99_reference']) if r['gradient_p99_reference']>0 else '--',
-            number(v['gradient_p99_members_mean']/v['gradient_p99_reference']) if v and v['gradient_p99_reference']>0 else '--'])
-    processing_table=table('Paired processing effects on the interim subset. CRPS difference is spectral minus raw in physical units; negative favors processing. Gradient ratios compare member gradient p99 to the reference. Controlled representation/history/context ablations are not available and are not inferred from this table.',
-        'tab:ablation','lrrrrr',['Variable','$\\Delta$CRPS','Raw bias','Spectral bias','Raw gradient','Spectral gradient'],rows)
-    for key,text in [('data',data_table),('settings',settings_table),('scores',scores_table)]:
-        source=apply_block(source,'TABLE_'+key,text,r'^\\tableslot\{[^\n]+\}\{tab:'+key+r'\}$')
-    source=apply_block(source,'FIG_data',figure('interim_test_coverage',scope+' Expected and completed hours per UTC day. Completion-order coverage need not represent the full test period.','fig:data'),r'^\\figslot\{[^\n]+\}\{fig:data\}$')
-    # Replace the old three-case results section in its entirety.
-    results='\\section{Interim results}\\label{sec:results}\n'+scope+' All results below use this frozen subset; the remaining '+str(N-n)+' hours were not included.\n\n'
-    results+='\\subsection{Deterministic and probabilistic comparison}\nTable~\\ref{tab:scores} and Fig.~\\ref{fig:skill} compare coarse input, frozen regression, raw flow, and paired spectral processing. Positive CRPS skill is observed for '+f'{count} of {len(skill)}'+' evaluated raw-flow fields. These are point estimates for the available subset, without a claim of full-test superiority.\n\n'
-    for i,f in enumerate(FIELDS):
-        v=raw[f];c=s['sources']['coarse']['fields'][f];reg=s['sources']['regression']['fields'][f]
-        results+=names[i]+': raw-flow ensemble-mean RMSE is '+number(v['rmse_pooled'],factors[i])+' '+units[i]+', compared with '+number(c['rmse_pooled'],factors[i])+' for coarse input and '+number(reg['rmse_pooled'],factors[i])+' for regression. Raw empirical CRPS skill relative to coarse input is '+number(v['crpss_vs_coarse'],100)+r'\%. '
-        if 'spectral' in methods:
-            v=s['sources']['spectral']['fields'][f];results+='With spectral processing, RMSE is '+number(v['rmse_pooled'],factors[i])+' and CRPS skill is '+number(v['crpss_vs_coarse'],100)+r'\%. '
-        results+='\n\n'
-    results+=figure('fig02_skill',scope+' CRPS skill and pooled RMSE reduction relative to coarse input. All seven evaluated fields include derived wind speed.','fig:skill')
-    results+='\\subsection{Calibration and conditional variability}\nRaw empirical central 90'+r'\% coverage ranges from '+number(min(cov))+' to '+number(max(cov))+r'\% across fields. Finite-member empirical quantile intervals are not population quantiles; both spread and bias contribute to coverage. '+f"The snapshot uses {s['settings']['members']} members. "+'Figures~\\ref{fig:calibration} and \\ref{fig:ranks} assess interval coverage, corrected spread/error, and randomized-tie observation ranks.\n\n'
-    results+=figure('fig03_calibration',scope+' Empirical central 90\\% interval coverage and corrected spread-to-RMSE ratio.','fig:calibration')
-    results+=figure('fig05_rank_histograms',scope+' Area-weighted randomized-tie ranks, averaged equally across saved hours.','fig:ranks')
-    results+='\\subsection{Spatial structure, precipitation, and processing}\nThe spectral, reliability, FSS, and gradient diagnostics use the same subset and member pairing as the score table. No object-based storm displacement or humidity-front width is inferred from marginal spectra. Spectral processing changes amplitude rather than establishing fine-scale phase accuracy. Table~\\ref{tab:ablation} reports its paired effects.\n\n'
-    for stem,label,caption in [
-        ('fig04_spectral_structure','fig:spatial','Member power relative to reference power across index-space spatial frequencies.'),
-        ('fig06_precipitation_reliability','fig:reliability','Precipitation exceedance reliability; insets show issued raw-flow probability mass. Empty bins carry no reliability estimate.'),
-        ('fig07_precipitation_fss','fig:fss','Pooled precipitation FSS versus neighborhood width in grid pixels. Solid curves use ensemble means; faint dotted curves pool member numerator/denominator terms.'),
-        ('fig08_filtering','fig:filtering','Paired raw/spectral gradient recovery and CRPS changes. No confidence intervals are shown for this interim subset.')]:
-        results+=figure(stem,scope+' '+caption,label)
-    results+='\\subsection{Representation hypothesis and computational record}\\label{sec:qualitative}\nDevelopment comparisons motivated direct square-root precipitation generation because organized rain patterns appeared better retained than under earlier residual-rain configurations. Sharper moisture features remained difficult. Those observations are hypotheses for matched training ablations, not causal conclusions from this interim evaluation. Joint network training does not establish thermodynamic consistency.\n\n'
-    results+=f"Saved records contain {s['sampling_seconds']/3600:.2f} summed worker-hours of ensemble sampling and {s['total_worker_seconds']/3600:.2f} summed worker-hours of total evaluation. "
-    results+=f"Mean recorded sampling time is {s['sampling_seconds']/n:.1f} s per test hour ({s['sampling_seconds']/n/s['settings']['members']:.1f} s per full-domain member). "
-    results+='These sums exclude unsaved/interrupted work and startup; parallel worker time is not elapsed wall time. No dynamical-model speedup or hardware-independent efficiency claim follows.\n\n'+processing_table
-    a=source.index('\\section{Preliminary results}') if '\\section{Preliminary results}' in source else source.index('\\section{Interim results}')
-    b=source.index('\\section{Discussion}',a);source=source[:a]+results+source[b:]
-    source=source.replace('The observed combination of improved CRPS, slightly degraded RMSE, and negative bias is therefore a substantive evaluation outcome, not a contradiction to be resolved by selecting a single favorable score.',
-        'CRPS, ensemble-mean error, and physical-amount bias measure different properties; the interim table reports them together rather than selecting a single favorable score.')
-    source=source.replace('The preliminary ensemble is informative relative to deterministic baselines under empirical CRPS, yet its uncertainty intervals remain too narrow or biased in the selected cases.',
-        'The interim probability scores and empirical coverage describe different aspects of conditional performance and require full-test confirmation.')
-    source=source.replace('If recipes were selected using the three current cases, an additional independent test sample is required.',
-        'This snapshot preserves the parent run settings; no interim result is used to retune the recipe.')
-    source=source.replace('summarized in the reserved Table~', 'summarized in Table~')
-    if 'The saved presentation scorecard instead multiplies' in source:
-        a=source.index('The saved presentation scorecard instead multiplies')
-        b=source.index('Similarly, the empirical CRPS',a)
-        source=source[:a]+('The interim aggregation uses the population-to-ensemble-mean variance correction stated above. '
-            'Neither spread/error ratio alone proves calibration. Pooling second moments across hours precedes forming the aggregate ratio.\n\n')+source[b:]
-    source=source.replace('because eight members poorly resolve tails',
-        f"because {s['settings']['members']} members still provide limited tail resolution")
-    source=source.replace('This selected example illustrates the method rather than complete-test skill.',
-        'These workflow maps illustrate an earlier development diagnostic; the quantitative interim results use the separate frozen evaluation checkpoint in Table~\\ref{tab:settings}.')
-    a=source.index('The available three-case processed ensemble') if 'The available three-case processed ensemble' in source else source.index('% BEGIN INTERIM CONCLUSIONS')
-    b=source.index('\\section*{Author contributions}',a)
-    conclusion=(f'{scope} Raw-flow empirical CRPS skill is positive for {count} of {len(skill)} evaluated fields; coverage spans '+number(min(cov))+'--'+number(max(cov))+r'\%. '
-        +'These descriptive point estimates neither establish representative full-test skill nor observational accuracy. The paired raw/spectral diagnostics assess sharpening together with error and calibration, while controlled target-representation and conditioning ablations remain outstanding.\n\n'
-        +'The full '+str(N)+'-hour evaluation remains in progress. Global coverage is future work; the present scope is CONUS. Final conclusions require the complete frozen test run, longer independent periods, and observational validation.\n\n'
-        +'\\section*{Code and data availability}\nThe implementation is available in the \\model{} repository at \\url{https://github.com/afahadabdullah/MERRA21C-ML}. '
-        +'This interim result preserves a frozen parent manifest, completed-hour JSON, available example fields, pooled summary, plotting data, and snapshot/code hashes. The high-resolution reference is project-hosted on NASA NCCS Discover; source-data access and permanent archival identifiers must be documented before submission.\n\n')
-    source=source[:a]+'% BEGIN INTERIM CONCLUSIONS\n'+conclusion+source[b:]
-    # Optional predeclared case maps in the appendix: all are also exported.
-    map_stems=[]
-    if meta['available_map_cases']:
-        first=meta['available_map_cases'][0]
-        map_stems=[f'fig09_{first}_{f}' for f in ('t2m','precip')]
-        appendix='\\section{Saved interim map examples}\n'
-        for i,stem in enumerate(map_stems):
-            appendix+=figure(stem,scope+' Predeclared saved example '+first.replace('_',r'\_')+'. The same raw member, baselines, reference, and ensemble means use shared physical scales. This illustration is not evidence of population-wide organization.','fig:interim_example_'+str(i))
-        if '% BEGIN INTERIM EXAMPLES' in source:source=apply_block(source,'EXAMPLES',appendix)
-        else:source=source.replace('\\begin{thebibliography}', '% BEGIN INTERIM EXAMPLES\n'+appendix+'% END INTERIM EXAMPLES\n\\begin{thebibliography}',1)
-    stems=['interim_test_coverage','fig02_skill','fig03_calibration','fig05_rank_histograms',
-        'fig04_spectral_structure','fig06_precipitation_reliability','fig07_precipitation_fss','fig08_filtering',*map_stems]
-    assets=path.parent/'figures'/'interim';assets.mkdir(parents=True,exist_ok=True)
-    inline=''
+def when(time):
+    """'2026-03-07T19:30:00' -> '19:30 UTC on 7 March 2026'."""
+    t = datetime.fromisoformat(str(time)[:19])
+    return f'{t:%H:%M} UTC on {t.day} {t:%B %Y}'
+
+
+class Context:
+    def __init__(self, manifest, meta, summary, figs):
+        self.m, self.meta, self.s, self.f = manifest, meta, summary, figs
+        self.n, self.N = summary['hours'], summary['expected_hours']
+        self.complete = self.n == self.N
+        self.src = summary['sources']
+        self.methods = [m for m in ('coarse', 'regression', 'raw', 'spectral') if m in self.src]
+        self.M = summary['settings']['members']
+        if self.complete:
+            self.scope = f'all {self.N} eligible held-out hours'
+            self.scope_cap = f'All {self.N} eligible held-out hours.'
+        else:
+            self.scope = (f'{self.n} of {self.N} eligible held-out hours ({100*self.n/self.N:.0f}\\%; '
+                          'an interim, completion-ordered subset)')
+            self.scope_cap = (f'Interim snapshot: {self.n} of {self.N} eligible held-out hours '
+                              f'({100*self.n/self.N:.0f}\\%, completion-ordered).')
+
+    def v(self, method, field, key):
+        return self.src[method]['fields'][field][key]
+
+    def skill(self, method='raw'):
+        return [self.v(method, f, 'crpss_vs_coarse') for f in FIELD_KEYS]
+
+    def rmse_red(self, method='raw'):
+        out = []
+        for f in FIELD_KEYS:
+            c = self.v('coarse', f, 'rmse_pooled')
+            out.append(1-self.v(method, f, 'rmse_pooled')/c if c > 0 else None)
+        return out
+
+
+def settings_table(c):
+    cfg = c.m['config']; patch = cfg['patch']; model = cfg.get('model', {})
+    rows = [['Evaluated hours', c.scope],
+            ['Members / Heun steps', f"{c.M} / {c.s['settings']['steps']}"],
+            ['Weights', f"{c.s['settings']['weights'].upper()} (frozen checkpoint, hash in manifest)"],
+            ['Core / halo / context', f"{patch['size']} / {patch['halo']} px; {(patch['size']+2*patch['halo'])*patch.get('context_scale', 3)} px context pooled to {patch['context_size']}"],
+            ['Network', f"U-Net, base width {model.get('base_channels', 64)}, multipliers {tuple(model.get('channel_mult', [1, 2, 3, 4]))}"],
+            ['Tile stride', f"{patch['stride']} px with Hann blending"],
+            ['Spectral variant', 'paired with identical members' if c.s['settings']['post'] == 'both' else 'not evaluated'],
+            ['Saved example hours', ', '.join(x.replace('_', r'\_') for x in c.m['settings'].get('saved_cases', [])) or 'none']]
+    rows = [[a, b] for a, b in rows]
+    return table('Frozen evaluation and model settings, read from the evaluation manifest.', 'tab:settings',
+                 'lp{0.62\\textwidth}', ['Setting', 'Value'], rows, star=True)
+
+
+def scores_table(c):
+    has_sp = 'spectral' in c.src
+    head = ['Variable', 'Unit', 'GEOS-FP MAE', 'Regr. MAE', 'Flow CRPS'] + (['+spec. CRPS'] if has_sp else []) + \
+           ['CRPSS (\\%)', 'GEOS-FP RMSE', 'Flow RMSE', '90\\% cov.']
+    rows = []
+    for i, f in enumerate(FIELD_KEYS):
+        k = FACTORS[i]
+        row = [TITLES[i], UNITS[i], number(c.v('coarse', f, 'mae'), k), number(c.v('regression', f, 'mae'), k),
+               number(c.v('raw', f, 'crps'), k)]
+        if has_sp:
+            row.append(number(c.v('spectral', f, 'crps'), k))
+        row += [pct(c.v('raw', f, 'crpss_vs_coarse')), number(c.v('coarse', f, 'rmse_pooled'), k),
+                number(c.v('raw', f, 'rmse_pooled'), k), pct(c.v('raw', f, 'coverage_90'))]
+        rows.append(row)
+    caption = (c.scope_cap+' Deterministic predictions are scored by MAE, which equals their CRPS. '
+               f'Flow scores use {c.M} members; CRPSS is the raw-flow CRPS skill relative to GEOS-FP MAE. '
+               'RMSE is for the ensemble mean, pooled over hours. Coverage is the fraction of reference values inside the '
+               'central 90\\% ensemble interval.' + ('' if c.complete else ' No significance intervals are given for an interim subset.'))
+    return table(caption, 'tab:scores', 'll'+'r'*(len(head)-2), head, rows, size='\\footnotesize', sep='3pt')
+
+
+def processing_table(c):
+    if 'spectral' not in c.src:
+        return ''
+    rows = []
+    for i, f in enumerate(FIELD_KEYS):
+        r, s = c.src['raw']['fields'][f], c.src['spectral']['fields'][f]
+        g = lambda v: number(v['gradient_p99_members_mean']/v['gradient_p99_reference']) if v['gradient_p99_reference'] > 0 else '--'
+        rows.append([TITLES[i], number(s['crps']-r['crps'], FACTORS[i]), number(r['bias'], FACTORS[i]), number(s['bias'], FACTORS[i]),
+                     g(r), g(s)])
+    return table('Paired effect of the spectral adjustment (identical members). $\\Delta$CRPS is adjusted minus raw in '
+                 'physical units (negative favors the adjustment). Gradient ratios compare the members\' 99th-percentile '
+                 'gradient magnitude with the reference.', 'tab:spectral', 'lrrrrr',
+                 ['Variable', '$\\Delta$CRPS', 'Raw bias', 'Adjusted bias', 'Raw gradient', 'Adjusted gradient'], rows)
+
+
+def results(c):
+    f = c.f; s = []
+    sk, red = c.skill('raw'), c.rmse_red('raw')
+    rsk = c.skill('regression')
+    positive = [i for i, v in enumerate(sk) if v is not None and v > 0]
+    s.append('\\section{Results}\\label{sec:results}\n')
+    s.append(f'All quantitative results use {c.scope}, generated with {c.M} members and '
+             f"{c.s['settings']['steps']} Heun steps. Maps come from the archived example hours fixed before inference "
+             '(Section~\\ref{sec:fulltest}); aggregate scores pool every evaluated hour.\n\n')
+    cases = f.get('cases') or []
+    main = next((x for x in cases if x.get('main')), None)
+    if main:
+        g = main['gain']['numbers']
+        s.append('\\subsection{From 25-km cells to kilometer-scale structure}\\label{sec:maps}\n')
+        s.append(f"Figure~\\ref{{fig:overview}} shows {when(main['time'])}, the archived hour with the largest GEOS-FP "
+                 'wet area. At its native resolution GEOS-FP represents the Rockies, the Appalachians, and the coastlines '
+                 'as staircases of $\\sim$25-km cells, and convective rain as broad, weak blobs. A single \\model{} member '
+                 '(middle column) carries the valley--ridge temperature contrasts, terrain-channelled winds, sharp coastal '
+                 'humidity gradients, and compact rain cores that appear in the kilometer-scale reference (right). '
+                 'The member is a sample, not a forecast of the reference realization, so individual small features need not '
+                 'coincide; the correspondence is in their location relative to terrain and in their statistics.\n\n')
+        s.append(figure(main['overview']['stem'],
+            f"Downscaling GEOS-FP for {when(main['time'])}. Rows show 2-m temperature, 10-m wind speed, precipitation rate, "
+            'and 2-m specific humidity. Left: GEOS-FP on its native $0.25^\\circ\\times0.3125^\\circ$ cells (each 3-km pixel '
+            'takes the value of the GEOS-FP cell containing it; no interpolation). Middle: \\model{} member 1. Right: '
+            'GEOS-CAM reference. Each row shares one color scale. Panels are displayed at 6-km '
+            '($2\\times2$ block mean) for legibility; boxes A and B mark the zooms in Fig.~\\ref{fig:zoom}.',
+            'fig:overview'))
+        s.append('Inside the zoom boxes (Fig.~\\ref{fig:zoom}) the native GEOS-FP cells are outlined. Bilinear '
+                 'interpolation removes the staircase but adds no information, and the deterministic regression adds '
+                 'the predictable, terrain-locked component while remaining smooth because it estimates a conditional mean. '
+                 '\\model{} members add the remaining kilometer-scale variability: cold-air drainage and ridge-top winds in '
+                 'box A, and cellular rain cores embedded in the stratiform shield in box B. ')
+        if 'spectral' in c.src:
+            s.append('The spectral adjustment (fifth column) sharpens the same member without changing its structure. ')
+        s.append('\n\n')
+        s.append(figure(main['zoom']['stem'],
+            'Resolution ladder inside the zoom boxes of Fig.~\\ref{fig:overview}. Box A (rows 1--2) is a fixed Colorado '
+            'Rockies window; box B (rows 3--4) is centered on the heaviest smoothed GEOS-FP precipitation, chosen without '
+            'reference to the model output or the reference. Columns: native GEOS-FP cells (white outlines mark cell '
+            'boundaries), bilinearly interpolated GEOS-FP, deterministic regression, a \\model{} member'
+            + (', the same member after spectral adjustment' if 'spectral' in c.src else '')
+            + ', and the reference. All panels show every 3-km pixel.', 'fig:zoom'))
+        best = sorted([(v.get('skill') or -9, k) for k, v in g.items()], reverse=True)
+        names = dict(zip(FIELD_KEYS, NAMES))
+        s.append('\\subsection{Where downscaling helps}\\label{sec:gain}\n')
+        s.append('Figure~\\ref{fig:gain} maps the pixelwise GEOS-FP absolute error, the \\model{} CRPS, and their difference '
+                 'for the same hour. For this hour the domain-mean CRPS skill relative to the GEOS-FP error is '
+                 + join([f"{pct(v['skill'])}\\% for {names[k]}" for k, v in g.items() if v.get('skill') is not None]) + '. '
+                 'The left column marks where sub-grid structure matters---large GEOS-FP errors over complex terrain, along '
+                 'coastlines, and around precipitating systems---and the right column shows how much of that error the '
+                 'ensemble removes (blue) or adds (red).\n\n')
+        s.append(figure(main['gain']['stem'],
+            f"Where downscaling helps, {when(main['time'])}. Left: absolute error of interpolated GEOS-FP. Middle: "
+            f"CRPS of the {main['members']}-member \\model{{}} ensemble (same scale). Right: GEOS-FP error minus CRPS; blue "
+            'marks improvement. Fields are averaged over $4\\times4$ blocks (12~km) for display. The label gives the '
+            'domain-mean CRPS skill for this hour.', 'fig:gain'))
+    storm = f.get('storm')
+    if storm:
+        ev = storm['evolution']['hours']; pk = next((h for h in ev if h['time'].startswith(storm['peak'][:16])), ev[-1])
+        se = storm['series']['maxima']
+        s.append('\\subsection{Storm case study}\\label{sec:storm}\n')
+        s.append(f"Figures~\\ref{{fig:storm}}--\\ref{{fig:stormseries}} follow the wettest held-out event through "
+                 f"{storm['hours']} consecutive hours ({when(storm['start'])} to {when(storm['end'])}), with "
+                 f"{storm['members']} members that keep their noise seed from hour to hour. GEOS-FP resolves the "
+                 'pressure pattern and the location of the rain shield, but its 25-km cells spread the convective cores '
+                 'into broad maxima. At the peak hour the maximum rain rate in the window is '
+                 f"{pk['geos_max']:.0f}~mm\\,h$^{{-1}}$ in GEOS-FP, {pk['member_max']:.0f}~mm\\,h$^{{-1}}$ in member 1, and "
+                 f"{pk['truth_max']:.0f}~mm\\,h$^{{-1}}$ in the reference. ")
+        closer = [k for k, lab in enumerate(('heavy-rain area', '99.9th-percentile rain rate', '99th-percentile wind speed'))
+                  if abs(se['member'][k]-se['truth'][k]) < abs(se['geos'][k]-se['truth'][k])]
+        labels = ('heavy-rain area', '99.9th-percentile rain rate', '99th-percentile wind speed')
+        s.append('Through the event (Fig.~\\ref{fig:stormseries}), the largest 99.9th-percentile rain rate is '
+                 f"{se['truth'][1]:.0f}~mm\\,h$^{{-1}}$ in the reference, {se['member'][1]:.0f}~mm\\,h$^{{-1}}$ for the member "
+                 f"mean, and {se['geos'][1]:.0f}~mm\\,h$^{{-1}}$ for GEOS-FP. "
+                 + (f"The members are closer to the reference than GEOS-FP in {join([labels[k] for k in closer])}. " if closer
+                    else 'GEOS-FP is closer to the reference than the members in all three statistics. '))
+        if storm.get('totals'):
+            t = storm['totals']['max']
+            s.append(f"Event totals (Fig.~\\ref{{fig:stormtotals}}) reach {t['truth']:.0f}~mm in the reference, "
+                     f"{t['member']:.0f}~mm in member 1, and {t['geos']:.0f}~mm in GEOS-FP. ")
+        s.append('Members differ in the exact placement of individual cells, which is the uncertainty the ensemble is '
+                 'designed to express; the organization of the rainbands and the wind maxima along them is common to all.\n\n')
+        s.append(figure(storm['evolution']['stem'],
+            'Evolution of the storm case. Rows are valid times through the event; columns are native GEOS-FP cells, two '
+            '\\model{} members, and the reference. Shading is precipitation rate; contours are terrain-reduced sea-level '
+            'pressure (4 hPa interval, smoothed, masked above 1000 m).' + (' Raw flow members.' if storm['post'] == 'none'
+            else ' Members include the spectral adjustment.'), 'fig:storm', placement='p'))
+        s.append(figure(storm['peak_fields']['stem'],
+            f"Storm structure at the peak hour ({when(storm['peak'])}): 10-m wind speed, 2-m temperature, and 2-m specific "
+            'humidity for native GEOS-FP, two members, and the reference.', 'fig:stormpeak'))
+        s.append(figure(storm['series']['stem'],
+            'Window statistics through the storm: (a) area with rain rate $\\geq$5~mm\\,h$^{-1}$, (b) 99.9th-percentile '
+            'rain rate, and (c) 99th-percentile 10-m wind speed. The shaded band spans the members; the blue line is their mean.',
+            'fig:stormseries'))
+        if storm.get('totals'):
+            s.append(figure(storm['totals']['stem'],
+                'Event-total precipitation over the storm window for native GEOS-FP, member 1, the ensemble mean, and the '
+                'reference.', 'fig:stormtotals'))
+    if main and main.get('ensemble'):
+        s.append('\\subsection{Ensemble realizations and probabilities}\\label{sec:ensemble}\n')
+        s.append('Because the generator samples the conditional distribution, a single coarse input yields many distinct, '
+                 'equally detailed fields (Fig.~\\ref{fig:ensemble}). Members agree on the rain shield and on the region '
+                 'where heavy rain is possible but differ in the placement of individual cores. The ensemble mean is '
+                 'therefore smooth, while the spread concentrates in and around the convective cores, and the member '
+                 'fraction exceeding 1~mm\\,h$^{-1}$ gives a probability map that can be compared directly with the '
+                 'reference rain area (red contour). This is information a deterministic downscaling cannot supply.\n\n')
+        s.append(figure(main['ensemble']['stem'],
+            f"Ensemble realizations in box B, {when(main['time'])}. Top: native GEOS-FP and three \\model{{}} members. "
+            f"Bottom: reference, {main['members']}-member ensemble mean, ensemble standard deviation, and the fraction of "
+            'members with rain rate $\\geq$1~mm\\,h$^{-1}$, with the reference 1~mm\\,h$^{-1}$ contour in red.',
+            'fig:ensemble'))
+    # Aggregate skill
+    s.append('\\subsection{Skill over the held-out period}\\label{sec:skill}\n')
+    nrs = sum(1 for v in red if v is not None and v > 0)
+    s.append(f"Table~\\ref{{tab:scores}} and Fig.~\\ref{{fig:scorecard}} summarize {c.scope}. Relative to interpolated "
+             'GEOS-FP, the raw \\model{} ensemble lowers CRPS by '
+             + join([f'{pct(sk[i])}\\% for {NAMES[i]}' for i in range(len(FIELD_KEYS))]) + '. '
+             f"CRPS skill is positive for {len(positive)} of {len(FIELD_KEYS)} fields, and ensemble-mean RMSE is lower "
+             f"than GEOS-FP for {nrs} of {len(FIELD_KEYS)}. ")
+    better_reg = [NAMES[i] for i, f in enumerate(FIELD_KEYS)
+                  if f != 'q2m' and c.v('raw', f, 'crps') < c.v('regression', f, 'mae')]
+    s.append(f"Against the deterministic regression, the ensemble has lower CRPS than regression MAE for "
+             f"{len(better_reg)} of {len(FIELD_KEYS)-1} fields with a regression output"
+             + (f" ({join(better_reg)})" if better_reg and len(better_reg) < len(FIELD_KEYS)-1 else '') + '. ')
+    p_i = FIELD_KEYS.index('precip')
+    if red[p_i] is not None and red[p_i] < 0:
+        s.append('For precipitation, ensemble-mean RMSE is higher than for the smooth GEOS-FP field even though CRPS improves: '
+                 'sharp members that misplace cells by a few kilometers are penalized twice by a point-wise squared error, '
+                 'which is why neighbourhood and intensity diagnostics (Section~\\ref{sec:scales}) are more informative. ')
+    s.append('\n\n')
+    s.append(scores_table(c))
+    s.append(figure(f['scorecard']['stem'],
+        c.scope_cap+' (a) CRPS skill (left block) and ensemble-mean RMSE reduction (right block) relative to interpolated '
+        'GEOS-FP, for the deterministic regression (Regr.), the raw \\model{} ensemble (Flow), and the spectrally '
+        'adjusted ensemble (Flow+sp.); blue is better than GEOS-FP. (b) Central 90\\% interval coverage; the dashed line '
+        'marks the nominal value.', 'fig:scorecard'))
+    t = f['temporal']
+    lowest = min(range(len(FIELD_KEYS)), key=lambda i: t['positive_fraction'][FIELD_KEYS[i]])
+    low = t['positive_fraction'][FIELD_KEYS[lowest]]
+    s.append((f"The gain is not driven by a few favorable hours (Fig.~\\ref{{fig:temporal}}). " if low >= 80 else
+              f"Figure~\\ref{{fig:temporal}} resolves the skill hour by hour. ")
+             + f"CRPS skill is positive in {low:.0f}\\% or more of the {t['hours']} evaluated hours for every field "
+             f"(lowest: {NAMES[lowest]}). "
+             + f"Daily-mean skill is positive on every evaluated day for {sum(1 for v in t['daily_positive'].values() if v == 1)} "
+             f"of {len(FIELD_KEYS)} fields. "
+             'The diurnal composite shows how the gain varies with the boundary-layer cycle; hourly precipitation skill is '
+             'expected to vary most because many hours contain little rain.\n\n')
+    s.append(figure(t['stem'],
+        c.scope_cap+' (a) Daily-mean CRPS skill of the raw ensemble relative to GEOS-FP for every field; the bar strip '
+        'above shows eligible (light) and evaluated (dark) hours per day. (b) Mean skill by UTC hour. (c) Distribution '
+        'of hourly skill (violins, with medians). (d) Percentage of hours with positive skill.', 'fig:temporal'))
+    # Scales
+    sp = f['spectra']['ratio']; fs = f['precip']
+    s.append('\\subsection{Scale-dependent variance and precipitation structure}\\label{sec:scales}\n')
+    words = []
+    for k in ('t2m', 'wind_speed', 'precip', 'q2m'):
+        r = sp.get(k, {})
+        if r.get('raw') is not None and r.get('coarse') is not None:
+            words.append(f"{dict(zip(FIELD_KEYS, NAMES))[k]} ({pct(r['raw'])}\\% versus {pct(r['coarse'])}\\%)")
+    retained = all((sp.get(k, {}).get('raw') or 0) > (sp.get(k, {}).get('coarse') or 0) for k in ('t2m', 'wind_speed', 'precip', 'q2m'))
+    s.append('Power spectra (Fig.~\\ref{fig:spectra}) show where the added variance lives. At synoptic wavelengths all '
+             'predictions follow the reference closely, as expected for a replay constrained by GEOS-FP. Below the GEOS-FP '
+             'grid scale, interpolated GEOS-FP and the regression lose power rapidly'
+             + (', whereas \\model{} members retain much of it. ' if retained else '. ')
+             + 'Averaged over wavelengths from 6 to 54~km, member power relative to the reference is '
+             + join(words) + ' for the raw ensemble versus interpolated GEOS-FP. '
+             + ('The spectral adjustment raises this ratio further. ' if 'spectral' in c.src else '') + '\n\n')
+    s.append(figure(f['spectra']['stem'],
+        c.scope_cap+' Top: hour-averaged radial power spectra of the reference, interpolated GEOS-FP, regression, and '
+        '\\model{} members, versus wavelength (3-km grid spacing; index-space spectra). Bottom: ratio to the reference. '
+        'Shading marks wavelengths shorter than twice the GEOS-FP grid spacing.', 'fig:spectra'))
+    def fss_at(th, m, w):
+        try:
+            row = fs['fss'][th][m]
+            return row[w] if w in row else row[str(w)]
+        except KeyError:
+            return None
+    w5 = 5
+    q = fs['tails']; probs = fs['quantiles']
+    top = len(probs)-1
+    s.append('Neighbourhood verification (Fig.~\\ref{fig:precip}) shows how precipitation skill depends on scale. '
+             f"At 1~mm\\,h$^{{-1}}$ and a 15-km neighbourhood, ensemble-mean FSS is {number(fss_at('1.0', 'raw', w5), 1, 2)} for "
+             f"\\model{{}} and {number(fss_at('1.0', 'coarse', w5), 1, 2)} for GEOS-FP; at 5~mm\\,h$^{{-1}}$ the values are "
+             f"{number(fss_at('5.0', 'raw', w5), 1, 2)} and {number(fss_at('5.0', 'coarse', w5), 1, 2)}. "
+             'Individual members (dotted) are scored separately from the ensemble mean; any gap between them at small '
+             'neighbourhoods is the price of sharp, stochastic placement, and it narrows as the neighbourhood grows. ')
+    if q.get('reference') and q.get('raw') and q.get('coarse'):
+        s.append(f"The intensity distribution is where downscaling matters most: the {100*probs[top]:g}th-percentile "
+                 f"rain rate is {number(q['reference'][top], 1, 3)}~mm\\,h$^{{-1}}$ in the reference, "
+                 f"{number(q['raw'][top], 1, 3)}~mm\\,h$^{{-1}}$ in \\model{{}} members, and "
+                 f"{number(q['coarse'][top], 1, 3)}~mm\\,h$^{{-1}}$ in interpolated GEOS-FP. ")
+    s.append('\n\n')
+    s.append(figure(fs['stem'],
+        c.scope_cap+' (a--c) Fractions skill score versus neighbourhood width for rain-rate thresholds of 1, 5, and '
+        '10~mm\\,h$^{-1}$; solid lines use ensemble means (or the deterministic field), dotted lines the average over '
+        'members. (d) Hour-averaged pixel percentiles of precipitation rate (symmetric-log axis).', 'fig:precip'))
+    # Calibration
+    cov = [c.v('raw', fk, 'coverage_90') for fk in FIELD_KEYS]
+    ssr = [c.v('raw', fk, 'spread_skill_corrected') for fk in FIELD_KEYS]
+    s.append('\\subsection{Calibration and the spectral adjustment}\\label{sec:calibration}\n')
+    s.append(f"Central 90\\% interval coverage ranges from {pct(min(cov))}\\% to {pct(max(cov))}\\% across fields, and the "
+             f"corrected spread--error ratio from {number(min(ssr), 1, 2)} to {number(max(ssr), 1, 2)} "
+             '(Appendix~\\ref{app:calibration}). Coverage below the nominal value together with a ratio below one indicates '
+             'an under-dispersive ensemble; rank histograms and reliability diagrams in Fig.~\\ref{fig:calibration} show '
+             'which fields and which tails are affected. ')
+    if 'spectral' in c.src:
+        better = [NAMES[i] for i, fk in enumerate(FIELD_KEYS) if c.v('spectral', fk, 'crps') < c.v('raw', fk, 'crps')]
+        s.append(f"The paired spectral adjustment lowers CRPS for {len(better)} of {len(FIELD_KEYS)} fields"
+                 + (f" ({join(better)})" if 0 < len(better) < len(FIELD_KEYS) else '')
+                 + ' (Table~\\ref{tab:spectral}); its main effect is on fine-scale amplitude rather than on placement.')
+    s.append('\n\n')
+    return ''.join(s)
+
+
+def appendix(c):
+    f = c.f; s = ['\\section{Additional diagnostics}\\label{app:calibration}\n']
+    s.append(figure(f['calibration']['stem'],
+        c.scope_cap+' (a, b) Relative frequency of the reference rank among the ensemble members (1 = uniform; '
+        'randomized ties), for the raw and spectrally adjusted ensembles. U-shapes indicate under-dispersion; slopes '
+        'indicate bias. (c) Corrected spread--error ratio. (d, e) Precipitation reliability at 1 and 5~mm\\,h$^{-1}$ '
+        'with the issued-probability area distribution (inset). (f) Brier skill score relative to GEOS-FP by threshold.',
+        'fig:calibration'))
+    s.append(processing_table(c))
+    for case in (f.get('cases') or []):
+        if case.get('main'):
+            continue
+        s.append(figure(case['overview']['stem'],
+            f"As Fig.~\\ref{{fig:overview}}, for the archived example hour {when(case['time'])}.",
+            'fig:case_'+case['id'].replace('_', '')))
+    return ''.join(s)
+
+
+def abstract(c):
+    sk = c.skill('raw'); p = FIELD_KEYS.index('precip')
+    state = [i for i in range(len(FIELD_KEYS)) if i != p and sk[i] is not None]
+    lo = min(state, key=lambda i: sk[i]); hi = max(state, key=lambda i: sk[i])
+    t = c.f['temporal']
+    text = (f"Evaluated on {c.scope}, the {c.M}-member ensemble has continuous ranked probability "
+            f"score skill relative to interpolated GEOS-FP ranging from {pct(sk[lo])} to {pct(sk[hi])}\\% for the state variables "
+            f"and {pct(sk[p])}\\% for precipitation, with positive skill in at least "
+            f"{min(t['positive_fraction'].values()):.0f}\\% of hours for every field. ")
+    sp = c.f['spectra']['ratio']
+    if all((sp.get(k, {}).get('raw') or 0) > (sp.get(k, {}).get('coarse') or 0) for k in ('t2m', 'wind_speed', 'precip', 'q2m')):
+        text += 'Member spectra contain more power than interpolated GEOS-FP in the evaluated fine-scale band; this does not establish spatial phase accuracy. '
+    q = c.f['precip']['tails']
+    if q.get('reference') and q.get('raw') and q.get('coarse') and \
+            abs(q['raw'][-1]-q['reference'][-1]) < abs(q['coarse'][-1]-q['reference'][-1]):
+        text += 'The upper tail of hourly rain rates is closer to the reference than in GEOS-FP. '
+    st = c.f.get('storm')
+    if st:
+        se = st['series']['maxima']
+        if abs(se['member'][1]-se['truth'][1]) < abs(se['geos'][1]-se['truth'][1]):
+            text += ('In a storm case study, generated members reproduce peak rain intensities that GEOS-FP spreads across '
+                     'its grid cells. ')
+        else:
+            text += 'A storm case study illustrates the structure and limits of the generated rain cores. '
+    if not c.complete:
+        text += 'These numbers describe an interim, completion-ordered subset; the full held-out evaluation is in progress.'
+    return text
+
+
+def keypoints(c):
+    sk = c.skill('raw'); t = c.f['temporal']
+    pos = sum(1 for v in sk if v is not None and v > 0)
+    items = ['A six-variable conditional flow-matching model downscales hourly GEOS-FP from $\\sim$25-km cells to a '
+             '3-km CONUS grid and generates multi-member ensembles from a single coarse input.',
+             f"The ensemble improves the CRPS of interpolated GEOS-FP for {pos} of {len(FIELD_KEYS)} fields"
+             + (', consistently from hour to hour' if min(t['positive_fraction'].values()) >= 80 else '')
+             + '; spectra and calibration assess the associated fine-scale variability.']
+    st = c.f.get('storm')
+    if st and abs(st['series']['maxima']['member'][1]-st['series']['maxima']['truth'][1]) < \
+            abs(st['series']['maxima']['geos'][1]-st['series']['maxima']['truth'][1]):
+        items.append('In a storm case study, members reproduce convective rain cores and peak intensities that the native '
+                     'GEOS-FP cells cannot resolve.')
+    elif st:
+        items.append('A storm case study follows convective rain cores and wind maxima at 3~km through the event.')
+    else:
+        items.append('Available archived examples compare generated and reference fields; ensemble spread and '
+                     'exceedance probabilities describe conditional variability.')
+    return '\\begin{itemize}\n'+'\n'.join('\\item '+x for x in items)+'\n\\end{itemize}'
+
+
+def conclusions(c):
+    sk = c.skill('raw')
+    pos = sum(1 for v in sk if v is not None and v > 0)
+    text = (f"On {c.scope}, the generated ensembles have positive CRPS skill relative to interpolated GEOS-FP for {pos} of "
+            f"{len(FIELD_KEYS)} evaluated fields. The score matrix reports both probabilistic skill and ensemble-mean "
+            'error, while spectra and neighbourhood scores assess structure at different scales. Ensemble spread, '
+            'ranks, and exceedance reliability provide separate calibration diagnostics. These comparisons do not '
+            'establish observational accuracy, causal benefits of individual design choices, or learned temporal coherence.')
+    if not c.complete:
+        text += ' These conclusions rest on an interim subset and will be revisited with the complete held-out evaluation.'
+    return text
+
+
+def storm_method(c):
+    st = c.f.get('storm')
+    if not st:
+        return '% No storm case study was supplied to the builder (--storm).'
+    window = 'a window that follows the surface low' if st.get('tracked') else 'a fixed regional window'
+    return ('\\subsection{Storm case study}\n'
+            f"To examine a high-impact event in time, a separate run with the same frozen checkpoint and sampler generates "
+            f"{st['hours']} consecutive hours around the selected held-out hour ({when(st['peak'])}) on {window}, writing "
+            f"native GEOS-FP cells, {st['members']} members, and the reference. "
+            + ('Members are raw flow output. ' if st['post'] == 'none' else 'Members include the spectral adjustment. ')
+            + 'Fixed noise seeds can retain member identity across hours but do not establish learned temporal coherence. '
+            'Sea-level pressure is reduced from surface pressure, 2-m temperature, and elevation for display only.\n')
+
+
+def update_paper(root, manuscript, figs=None, inline=True):
+    manifest, meta, summary = load_snapshot(root)
+    root = Path(root); path = Path(manuscript)
+    if figs is None:
+        figs = json.loads((root/'paper_figures'/'figures.json').read_text())
+    c = Context(manifest, meta, summary, figs)
+    source = path.read_text()
+    blocks = dict(
+        ABSTRACT=abstract(c), KEYPOINTS=keypoints(c),
+        SCOPE='\\noindent{\\small\\color{muted}Evaluation scope: '+c.scope+'. '
+              + ('' if c.complete else 'Numbers will be updated when the full held-out evaluation completes. ')
+              + 'Author declarations remain to be completed.}',
+        TABLE_SETTINGS=settings_table(c), TABLE_SCORES='% Table~\\ref{tab:scores} is placed with the results.',
+        RESULTS=results(c), CONCLUSIONS=conclusions(c), APPENDIX=appendix(c), STORM_METHOD=storm_method(c))
+    for key, text in blocks.items():
+        source = apply_block(source, key, text)
+    stems = sorted(set(re.findall(r'figures/auto/([A-Za-z0-9_\-]+)\.pdf', source)))
+    assets = path.parent/'figures'/'auto'; assets.mkdir(parents=True, exist_ok=True)
+    for old in assets.glob('fig_*'):
+        old.unlink()
+    previews = ''
     for stem in stems:
-        name='MERRAFlow_interim_'+stem+'.pdf';target=assets/name
-        shutil.copyfile(root/'paper_figures'/f'{stem}.pdf',target)
-        shutil.copyfile(root/'paper_figures'/f'{stem}.png',target.with_suffix('.png'))
-        inline+='\\begin{filecontents*}[overwrite]{'+name+'}\n'+inline_pdf(target)+'\\end{filecontents*}\n'
-    if '% BEGIN INTERIM FIGURES' in source:source=apply_block(source,'FIGURES',inline)
-    else:source=source.replace('\\begin{document}', '% BEGIN INTERIM FIGURES\n'+inline+'% END INTERIM FIGURES\n\\begin{document}',1)
-    # No old numeric case claims should survive outside the embedded images.
-    clean=re.sub(r'\\begin\{filecontents\*\}.*?\\end\{filecontents\*\}', '', source, flags=re.S)
-    for stale in ('three-case processed ensemble', 'The saved three-case scorecard', '3822 s'):
-        if stale in clean:raise ValueError(f'Stale case-study claim remains: {stale}')
-    backup=root/'manuscript_before_update.tex'
-    if not backup.exists():shutil.copyfile(path,backup)
-    temporary=path.with_name(path.name+'.interim.tmp')
-    temporary.write_text(source);temporary.replace(path)
-    (root/'manuscript_update.json').write_text(json.dumps(dict(manuscript=str(path),snapshot_id=meta['snapshot_id'],hours=n,expected_hours=N),indent=2)+'\n')
+        shutil.copyfile(root/'paper_figures'/f'{stem}.pdf', assets/f'{stem}.pdf')
+        shutil.copyfile(root/'paper_figures'/f'{stem}.png', assets/f'{stem}.png')
+        if inline:
+            previews += ('\\begin{filecontents*}[overwrite]{'+stem+'_preview.pdf}\n'
+                         + inline_pdf(assets/f'{stem}.pdf')+'\\end{filecontents*}\n')
+    source = apply_block(source, 'FIGURES', previews or '% (no inline previews)')
+    backup = root/'manuscript_before_update.tex'
+    if not backup.exists():
+        shutil.copyfile(path, backup)
+    temporary = path.with_name(path.name+'.auto.tmp')
+    temporary.write_text(source); temporary.replace(path)
+    (root/'manuscript_update.json').write_text(json.dumps(dict(
+        manuscript=str(path), snapshot_id=meta['snapshot_id'], hours=c.n, expected_hours=c.N, figures=stems), indent=2)+'\n')
     return path
 
 
@@ -412,42 +724,64 @@ def compile_paper(root, manuscript):
     return out/(path.stem+'.pdf')
 
 
-def bundle(root, manuscript):
-    root=Path(root);path=Path(manuscript);target=root/'MERRAFlow_interim_paper.zip'
-    with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED) as z:
-        z.write(path,'manuscript/'+path.name)
-        for p in (path.parent/'figures').rglob('*.pdf'):z.write(p,'manuscript/figures/'+str(p.relative_to(path.parent/'figures')))
-        for name in ('snapshot.json','manifest.json','summary.json','manuscript_update.json'):
-            z.write(root/name,'analysis/'+name)
-        for p in (root/'cases').glob('*.json'):z.write(p,'analysis/cases/'+p.name)
+
+def bundle(root, manuscript=None):
+    root = Path(root); path = Path(manuscript) if manuscript else None
+    target = root/('MERRAFlow_paper.zip' if path else 'MERRAFlow_plots_metrics.zip')
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
+        if path:
+            z.write(path, 'manuscript/'+path.name)
+            workflow = path.parent/'figures'/'MERRA21C_ML_workflow.pdf'
+            if workflow.is_file():
+                z.write(workflow, 'manuscript/figures/'+workflow.name)
+            for p in sorted((path.parent/'figures'/'auto').glob('*.pdf')):
+                z.write(p, 'manuscript/figures/auto/'+p.name)
+        for name in ('snapshot.json', 'manifest.json', 'summary.json', 'manuscript_update.json'):
+            if (root/name).is_file():z.write(root/name, 'analysis/'+name)
+        for p in (root/'cases').glob('*.json'):
+            z.write(p, 'analysis/cases/'+p.name)
         for p in (root/'paper_figures').iterdir():
-            if p.suffix in ('.pdf','.csv','.json','.md'):z.write(p,'analysis/paper_figures/'+p.name)
-        for p in (root/'pdf').glob('*.pdf'):z.write(p,'pdf/'+p.name)
-        z.writestr('README.txt','INTERIM MERRA-Flow paper. Numerical results cover only the frozen subset in snapshot.json.\n'
-            +'The complete snapshot directory retains example NPZ fields; this lightweight paper bundle omits them.\n'
-            +'Compile the saved manuscript source normally or with the single-source desktop compiler.\n')
+            if p.suffix in ('.pdf', '.png', '.csv', '.json', '.md'):
+                z.write(p, 'analysis/paper_figures/'+p.name)
+        for p in (root/'pdf').glob('*.pdf') if (root/'pdf').is_dir() else ():
+            z.write(p, 'pdf/'+p.name)
+        z.writestr('README.txt', 'MERRA-Flow results bundle. Numerical results cover the frozen hours listed in '
+                   'analysis/snapshot.json. Example NPZ fields and storm NetCDF stay in the snapshot/run directories.\n'
+                   'Compile manuscript/MERRA21C_ML_arxiv.tex with pdfLaTeX (twice) or Tectonic.\n')
     return target
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    mode=p.add_mutually_exclusive_group();mode.add_argument('--evaluation');mode.add_argument('--snapshot')
-    p.add_argument('--output',help='New immutable snapshot directory; defaults to a timestamped sibling of the evaluation')
-    p.add_argument('--manuscript',default='manuscript/MERRA21C_ML_arxiv.tex',help='Existing manuscript .tex to update in place')
-    p.add_argument('--skip-maps',action='store_true',help='Do not copy/render saved example ensembles')
-    p.add_argument('--dpi',type=int,default=300)
-    p.add_argument('--compile',action='store_true',help='Export a PDF if tectonic or pdflatex is installed')
-    a=p.parse_args()
-    if not Path(a.manuscript).is_file():p.error('--manuscript must be an existing source file')
-    if a.dpi<72:p.error('--dpi must be at least 72')
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = p.add_mutually_exclusive_group(); mode.add_argument('--evaluation'); mode.add_argument('--snapshot')
+    p.add_argument('--output', help='New immutable snapshot directory; defaults to a timestamped sibling of the evaluation')
+    p.add_argument('--manuscript', default='manuscript/MERRA21C_ML_arxiv.tex', help='Manuscript .tex with AUTO blocks, updated in place')
+    p.add_argument('--plots-only', action='store_true', help='Generate plots and metrics without reading or updating a manuscript')
+    p.add_argument('--storm', help='storm_fields.nc from merraflow.storm_animation_v4_1 for the storm case study')
+    p.add_argument('--skip-maps', action='store_true', help='Do not copy/render saved example fields')
+    p.add_argument('--no-inline', action='store_true', help='Do not embed PNG previews in the .tex (smaller source)')
+    p.add_argument('--dpi', type=int, default=300)
+    p.add_argument('--compile', action='store_true', help='Export a PDF if tectonic or pdflatex is installed')
+    a = p.parse_args()
+    if not a.plots_only and not Path(a.manuscript).is_file():
+        p.error('--manuscript must be an existing source file')
+    if a.dpi < 72:
+        p.error('--dpi must be at least 72')
+    if a.storm and not Path(a.storm).is_file():
+        p.error(f'--storm file not found: {a.storm}')
     if not a.snapshot:
-        a.evaluation=a.evaluation or 'runs/merraflow_v4_1/evaluation/all_test_best_m16_s64'
-        a.output=a.output or (a.evaluation+'_interim_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
-    root=snapshot(a.evaluation,a.output,not a.skip_maps) if a.evaluation else Path(a.snapshot)
-    render(root,a.dpi);update_paper(root,a.manuscript)
-    if a.compile:compile_paper(root,a.manuscript)
-    archive=bundle(root,a.manuscript)
-    print(f'Interim snapshot and figures: {root}\nUpdated manuscript: {a.manuscript}\nPaper bundle: {archive}',flush=True)
+        a.evaluation = a.evaluation or 'runs/merraflow_v4_1/evaluation/all_test_best_m16_s64'
+        a.output = a.output or (a.evaluation+'_interim_'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+    root = snapshot(a.evaluation, a.output, not a.skip_maps) if a.evaluation else Path(a.snapshot)
+    figs = render(root, a.dpi, a.storm)
+    if not a.plots_only:
+        update_paper(root, a.manuscript, figs, inline=not a.no_inline)
+    if a.compile and not a.plots_only:
+        compile_paper(root, a.manuscript)
+    archive = bundle(root, None if a.plots_only else a.manuscript)
+    print(f'Snapshot and figures: {root}\nResults bundle: {archive}', flush=True)
+    if not a.plots_only:print(f'Updated manuscript: {a.manuscript}', flush=True)
 
 
-if __name__=='__main__':main()
+if __name__ == '__main__':
+    main()

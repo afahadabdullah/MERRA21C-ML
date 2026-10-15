@@ -2,11 +2,11 @@
 
 For the latest six-variable **v4.1 complete-test evaluation and paper figures**, see the [evaluation and plotting runbook](docs/evaluation_all_v4_1.md). It provides resumable Discover jobs, saved numeric diagnostics and lossless example ensembles, plus PDF/SVG/600-dpi PNG figures that can be regenerated without model inference.
 
-While evaluation is running, the [interim paper job](docs/interim_paper_v4_1.md) automatically discovers completed hours, saves a reproducible snapshot, and fills the manuscript with plots and numerical tables. Its CPU job leaves live inference unchanged and labels every result with the actual partial-test coverage.
+While evaluation is running, the [interim plotting job](docs/interim_paper_v4_1.md) automatically discovers completed hours, saves a reproducible snapshot, and generates map figures, a score matrix, and metric CSVs. Set `PLOTS_ONLY=1` to run without a manuscript. It can also populate an existing local paper; `manuscript/` is ignored by Git. Its CPU job leaves live inference unchanged and labels every result with the actual partial-test coverage.
 
 ![v4.1 hybrid-target conditional flow-matching workflow](docs/assets/merraflow-v4-1-workflow.png)
 
-The workflow now shows actual native GEOS-FP inputs, the dynamically downscaled high-resolution HWT GEOS replay reference, and v4.1 model predictions, including precipitation. All six generated fields are shown as a compact map stack, with 2 m temperature as the focused coarse/reference comparison. This three-panel figure is included as Figure 1 in the [paper source](manuscript/MERRA21C_ML_arxiv.tex).
+The workflow now shows actual native GEOS-FP inputs, the dynamically downscaled high-resolution HWT GEOS replay reference, and v4.1 model predictions, including precipitation. All six generated fields are shown as a compact map stack, with 2 m temperature as the focused coarse/reference comparison. This three-panel figure is included as Figure 1 in the local paper; manuscript files are not tracked in Git.
 
 For the six-variable experiment, see the [v4 task list and runbook](docs/v4.md):
 direct square-root hourly rainfall, residual states including 2 m humidity,

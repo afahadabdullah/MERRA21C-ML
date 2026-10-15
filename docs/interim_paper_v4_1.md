@@ -1,57 +1,89 @@
-# MERRA-Flow paper from whatever evaluation hours have finished
+# MERRA-Flow plots, score matrix, and local paper
 
-Run the interim CPU job while the full-test GPU array continues. It scans `cases/*.json`, freezes the IDs present at snapshot start, validates each against the original manifest, and aggregates those saved records. There is no fixed 156-hour requirement and no new inference. New completions after the ID list is frozen belong to a later snapshot.
+The CPU job dynamically scans the running evaluation, freezes all completed valid hour records, and generates map comparisons, zooms, ensemble probabilities, gain maps, a skill matrix, temporal diagnostics, spectra, precipitation skill, and calibration. It never reruns model inference or modifies `src/merraflow`, whose Python files are hashed by live evaluators.
 
-The full-test aggregator and plotter retain their existing completeness checks. Interim output is a separate immutable sibling directory, carries `complete: false`, retains the original 815-hour manifest/run ID, and records its own snapshot ID, included hours, data/code hashes, and available predeclared example fields. Partial data are never presented as a complete test run. Confidence intervals and significance claims are withheld because completion order is not random sampling.
+The entire `manuscript/` directory is ignored by Git. It stays on disk locally; source, figures, PDF exports, and the synthetic layout preview are not published. Existing Git history is unchanged. Plot generation works without a manuscript.
 
-## Submit on Discover without modifying live evaluator code
+## Generate plots and metric matrices on Discover
 
-From the existing project checkout on Discover:
+From the existing evaluation checkout, fetch the publishing scripts without checking out new evaluator code:
 
 ```bash
 cd /gpfsm/dnb10/projects/p311/ML_downscaling
 git fetch origin main
 git show origin/main:scripts/submit_interim_paper_v4_1.sh > /tmp/submit_interim_paper.sh
+PLOTS_ONLY=1 FIGURE_DPI=300 bash /tmp/submit_interim_paper.sh
+```
+
+The launcher extracts the builder, plotter, boundary asset, and CPU job into a separate directory under `runs/`. It submits four CPUs, 32 GB, and two hours. It leaves running GPU workers and their source files unchanged. `OUTPUT` defaults to `runs/merraflow_v4_1/evaluation/all_test_best_m16_s64`. Override it to process another frozen evaluation. Set `FIGURE_DPI=600` for higher-resolution PNG exports; labels and line plots in PDF are vector graphics.
+
+The launcher prints the actual snapshot and log paths. Outputs are under `<evaluation>_interim_<JOBID>/`:
+
+- `paper_figures/fig_scorecard.pdf` and `.png`: annotated CRPS-skill / RMSE-reduction matrix and interval coverage.
+- `paper_figures/score_matrix.csv`: the matrix values, percentages, and actual/expected hour counts.
+- `paper_figures/table01_all_variables.csv`: physical-unit errors, CRPS, fair CRPS, bias, coverage, and corrected spread/error for every field and method.
+- Other `paper_figures/fig_*.pdf` and `.png`: temporal, spectral, precipitation, calibration, and available predeclared case maps.
+- `paper_figures/figures.json`: plotted diagnostics and map statistics; `figure_data.json`: pooled metrics; `plot_manifest.json`: data/code/figure hashes.
+- `snapshot.json`, unchanged parent `manifest.json`, copied `cases/*.json`, and available predeclared `fields/*.npz`: reproducible frozen evidence. Later completed hours belong to a new snapshot.
+- `MERRAFlow_plots_metrics.zip`: portable plots and metrics (large NPZ/NetCDF arrays remain in their saved directories).
+
+The environment needs NumPy, SciPy, Matplotlib, and Pillow; optional storm NetCDF input also needs xarray and h5netcdf. Plotting needs no model load, GPU, Cartopy, or downloads. Existing saved map cases are used only if their hour has finished. Missing native GEOS-FP fields are labelled as interpolated inputs in the map metadata.
+
+## Also update the local paper
+
+Copy the current manuscript with `% BEGIN AUTO ...` blocks from the Mac to Discover once, and again whenever you revise its prose. Run this on the Mac, from the project folder:
+
+```bash
+scp manuscript/MERRA21C_ML_arxiv.tex \
+  discover:/gpfsm/dnb10/projects/p311/ML_downscaling/manuscript/
+scp manuscript/figures/MERRA21C_ML_workflow.pdf \
+  discover:/gpfsm/dnb10/projects/p311/ML_downscaling/manuscript/figures/
+```
+
+The destination directories must already exist (`mkdir -p manuscript/figures` on Discover if needed). Then use the same fetched launcher on Discover, omitting `PLOTS_ONLY=1`:
+
+```bash
 bash /tmp/submit_interim_paper.sh
 ```
 
-`OUTPUT` defaults to `runs/merraflow_v4_1/evaluation/all_test_best_m16_s64`. Set it before the final command if your run directory differs. This submits a four-core, 32-GB CPU job with no GPU request or dependency on the live array. It discovers the completed-hour count when it starts. Output is `.../all_test_best_m16_s64_interim_JOBID`, printed by the launcher, with log `logs_v4_1/paper_interim_JOBID.log`.
+The launcher requires an existing compatible manuscript and preserves a backup. It never fetches manuscript files from Git or replaces local prose with an old template. The builder updates the AUTO blocks and copies figures into `manuscript/figures/auto/`. It creates `MERRAFlow_paper.zip`; `pdf/` is populated if Tectonic or pdfLaTeX is available. Otherwise compile the updated source in the desktop editor. `NO_INLINE=1` skips embedded PNG previews when only normal multi-file compilation is needed.
 
-The launcher extracts only publishing scripts and the current paper/template asset from the fetched commit. It does **not** check out, pull, or edit `src/merraflow`, so running evaluators keep their frozen code. It backs up an existing manuscript and workflow asset in the printed `runs/interim_paper_tools.*` directory, then updates the existing `manuscript/MERRA21C_ML_arxiv.tex` in place. Set `KEEP_MANUSCRIPT=1` to keep a locally edited, compatible current template instead of installing the latest template. Do not run two paper-building jobs against the same manuscript simultaneously.
+## Optional storm case (new GPU inference)
 
-For example, aggregate plots/tables only (no saved example arrays/maps):
+The already tracked storm job can generate the optional regional event; this is separate from the CPU plotting job:
 
 ```bash
-SKIP_MAPS=1 bash /tmp/submit_interim_paper.sh
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+EVAL=runs/merraflow_v4_1/evaluation/all_test_best_m16_s64
+RUNS="MERRA-Flow=configs/discover_v4_1.yaml:$EVAL/checkpoint.pt" \
+POST=none MEMBERS=3 HOURS=18 TRACK=0 REGION=512 \
+OUTPUT=runs/merraflow_v4_1/evaluation/storm_case_paper \
+sbatch --export=ALL scripts/slurm_storm_animation_v4_1.sh
 ```
 
-The environment needs the existing NumPy/SciPy/Matplotlib/Pillow dependencies. It does not require a model, a checkpoint load, Cartopy, or PyMuPDF for this pipeline. A PDF is exported if `tectonic` or `pdflatex` is installed. Otherwise the updated, self-contained TeX and all figures are still exported for compilation in the desktop editor. Author declarations requiring human information remain explicitly unresolved; they are not invented.
-
-## Outputs
-
-- `snapshot.json`: exact included IDs, parent identity, creation time, case/field/summary hashes, and completion-order scope.
-- `manifest.json`: unchanged original full-test manifest.
-- `cases/*.json`: byte-preserved per-hour scores; all six variables plus derived wind speed, all methods, and original member counts must validate.
-- `fields/*.npz`: only available predeclared map examples and their saved grid; raw/spectral seeds and hashes are retained. Missing unfinished examples are not regenerated or selected by score.
-- `summary.json`: pooled interim diagnostics with `scope: interim`, `complete: false`, and actual/expected hour counts.
-- `paper_figures/`: temporal coverage, skill, calibration, spectra, ranks, reliability, FSS, sharpening, and available seven-variable case/spread maps in PDF/PNG/SVG. Every plot carries an interim subset banner. `figure_data.json` and `table01_all_variables.csv` save plotted/printed values with units.
-- `manuscript_before_update.tex`: source backup before numerical population.
-- `manuscript_update.json`: snapshot ID and populated manuscript path/counts.
-- `pdf/`: compiled paper when a TeX engine is available.
-- `MERRAFlow_interim_paper.zip`: lightweight updated source, figure PDFs, metrics JSON/CSV, included case JSON, provenance, and optional compiled paper. It omits the large NPZ arrays, which remain in the complete snapshot directory.
-
-The updater fills all four data/settings/score/processing tables and replaces all four blank result/support figures. It adds the remaining aggregate diagnostic plots and temperature/precipitation examples when those predeclared fields are already available. It replaces the abstract, results, conclusions, and case-specific methodological statements using the actual interim summary. The workflow map illustration retains its explicitly separate development checkpoint; it is not relabeled as the quantitative validation-best run.
-
-Do not infer complete-test or observational skill from this snapshot. Per-hour pooled RMSE, empirical versus fair CRPS, finite-member spread correction, temporal support, and model-reference limitations remain explicit in the paper. Representation/history/context ablations cannot be reconstructed from this run and are not invented; the fourth table reports the available paired raw/spectral effects instead.
-
-## Regenerate without analysis or inference
-
-Use the saved snapshot to restyle and repopulate the paper:
+`TIMESTAMP=YYYYMMDD_HHMM` selects a particular event; otherwise the storm tool selects the wettest test hour. Its runtime for this configuration has not been measured; the batch limit is three hours. When `storm_fields.nc` exists, include it in a CPU run:
 
 ```bash
-python scripts/build_interim_paper_v4_1.py \
+STORM=runs/merraflow_v4_1/evaluation/storm_case_paper/storm_fields.nc \
+PLOTS_ONLY=1 bash /tmp/submit_interim_paper.sh
+```
+
+Omit `PLOTS_ONLY=1` to also populate the local manuscript. The plot manifest records the NetCDF hash; retain that file for reproducibility. The existing storm NetCDF does not record a checkpoint hash, so preserve its `storm.json`, command, and frozen checkpoint separately. A fixed noise seed retains a member label across hours; it does not establish learned temporal coherence.
+
+## Redraw a frozen snapshot
+
+To install scripts into the checkout, extract only the publishing files; do not pull or change evaluator code while GPU workers are running:
+
+```bash
+for name in paper_plots_v4_1.py build_interim_paper_v4_1.py; do
+  git show "origin/main:scripts/$name" > "scripts/$name"
+done
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+./env/bin/python scripts/build_interim_paper_v4_1.py \
   --snapshot runs/merraflow_v4_1/evaluation/all_test_best_m16_s64_interim_JOBID \
-  --manuscript manuscript/MERRA21C_ML_arxiv.tex --dpi 600 --compile
+  --plots-only --dpi 300
 ```
 
-This checks hashes, loads `summary.json` and saved example fields, redraws plots, and updates the existing source. It does not recompute verification or sampling. To include more completed hours later, submit a **new** snapshot. The original full-test finalizer remains separate and still requires all eligible hours.
+For the paper, replace `--plots-only` with `--manuscript manuscript/MERRA21C_ML_arxiv.tex --compile`. Add `--storm <saved storm_fields.nc>` when needed. Redrawing checks saved hashes and reads saved verification/fields without new inference. Spatial maps and hourly diagnostics are derived from those saved arrays/records. Submit a new snapshot to incorporate more completed hours.
+
+Partial snapshots remain explicitly interim and completion-ordered, with counts in visible figure footers, captions, and PDF metadata. They carry `complete: false`; no score confidence intervals are inferred. Once every eligible hour is present, the paper describes all eligible hours, but this descriptive publishing path still does not replace the strict full-test finalizer or its block-bootstrap analysis. RMSE pools MSE; CRPS skill uses interpolated GEOS-FP as baseline. The reference is the high-resolution GEOS replay, not independent observations.
