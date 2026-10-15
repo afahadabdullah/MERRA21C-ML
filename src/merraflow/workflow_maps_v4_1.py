@@ -235,12 +235,11 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     text(L+.100,.349,'Loss supervises core and halo',7.4,TEAL,weight='bold')
     text(L+.014,.296,'SYNCHRONIZED TILED ENSEMBLE SAMPLING',8.3,BLUE,weight='bold')
     text(L+.014,.279,'Blend tile velocities → shared-state Heun update\nIndependent seeds → multiple conditional members',7.8,linespacing=1.7,va='top')
-    if case.get('members_precip') is not None:
+    if case.get('members_t2m') is not None:
         mw=(width-.048)/2
-        rain_limits=(0,max(float(np.quantile(hr[1],.999)),.1))
-        for i,z in enumerate(case['members_precip'][:2]):
-            map_panel((L+.015+i*(mw+.018),.139,mw,.080),fine(1,z),f'Rain member {i+1}',
-                      'mm h$^{-1}$','YlGnBu',rain_limits,zoom)
+        for i,z in enumerate(case['members_t2m'][:2]):
+            map_panel((L+.015+i*(mw+.018),.139,mw,.080),fine(0,z-273.15),f'Temperature member {i+1}',
+                      '°C','RdYlBu_r',limits,zoom)
     else:
         for i in range(3):
             fig.patches.append(Rectangle((L+.028+i*.057,.159+i*.008),.058,.055,transform=fig.transFigure,facecolor='#e5f2f4',edgecolor=TEAL,lw=1))

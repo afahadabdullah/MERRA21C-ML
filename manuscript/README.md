@@ -62,7 +62,7 @@ The current source adds the CorrDiff comparison, the reported qualitative precip
 
 ## GEOS workflow figure and actual predictions
 
-Figure 1 is now populated at the author's request. It uses the original `20260307_1930` storm-map panels from `present_last_v4_1`, with native GEOS-FP input, HWT GEOS replay reference, a generated member and the eight-member mean. These are actual epoch-243 EMA, 64-step, spectral v4.1 outputs. The reference is dynamical GEOS replay; the model predictions are learned downscaling. Nominal 2–3 km labels follow the archive ambiguity already documented in the data section. No HRRR maps are used.
+Figure 1 is now populated at the author's request. It uses the original `20260307_1930` 2 m temperature panels from `present_last_v4_1`, with native GEOS-FP input, HWT GEOS replay reference, a generated member and the eight-member mean, all on the original common temperature scale in degrees Celsius. These are actual epoch-243 EMA, 64-step, spectral v4.1 outputs. The reference is dynamical GEOS replay; the model predictions are learned downscaling. Nominal 2–3 km labels follow the archive ambiguity already documented in the data section. No HRRR maps are used.
 
 Reproduce the two figure layouts with `python -m merraflow.workflow_archive_v4_1`. The compact vector PDF is included in `figures/MERRA21C_ML_workflow.pdf`; the broad layout appears in the repository README. `figures/workflow_provenance.json` records the source map hashes and clips. The compositor reuses rendered source plots without inferring values from images or rerunning evaluation. These qualitative panels do not add full-test statistics.
 

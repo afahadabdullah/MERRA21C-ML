@@ -66,7 +66,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     if metadata['members']!=8:raise ValueError('Archive compositor expects the documented eight-member presentation')
     folder=root/'cases'/case_id
     sources={f:folder/f'conus_{f}.pdf' for f in FIELDS}
-    zoom=folder/'zoomA_precip.pdf'
+    zoom=folder/'zoomA_t2m.pdf'
     for p in [*sources.values(),zoom]:
         if not p.is_file():raise FileNotFoundError(p)
     when=entry['time'].replace('T',' ')+' UTC'
@@ -96,7 +96,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     image(sources['precip'],'bar',(L+.014,.183,.201,.050))
     text(L+.015,.145,'Six weather fields at t − 1 h and t',8.5,weight='bold')
     text(L+.015,.116,'Terrain, location, time and broad context\n~25 km information remains coarse after interpolation',7.6,linespacing=1.6)
-    L=lefts[1];panel(L,'B','DYNAMICAL GEOS REFERENCE','Matched storm zoom; source panels share extent and color scale')
+    L=lefts[1];panel(L,'B','DYNAMICAL GEOS REFERENCE','Matched temperature zoom; common extent and color scale')
     image(zoom,0,(L+.024,.514,.181,.246),'GEOS-FP native (~25 km)')
     image(zoom,1,(L+.024,.227,.181,.246),'High-resolution GEOS replay (HWT)')
     image(zoom,'bar',(L+.012,.171,.205,.049))
@@ -120,7 +120,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     text(L+.114,.661,'$z_t=(1-t)z_0+t z_1$; velocity target $z_1-z_0$',8.4,ha='center')
     text(L+.015,.617,'TRAINING AND FULL-DOMAIN SAMPLING',8.5,weight='bold')
     text(L+.015,.588,'192² patches: 128² core + 32-pixel halo\nArea/channel-weighted loss includes halo\nBlend overlapping velocities at every Heun stage\nOne coarse input + independent noise → members',8.0,linespacing=1.8,va='top')
-    text(L+.015,.452,'Actual generated precipitation',9,BLUE,weight='bold')
+    text(L+.015,.452,'Actual generated 2 m temperature',9,BLUE,weight='bold')
     image(zoom,2,(L+.012,.246,.099,.183),'Member 1')
     image(zoom,3,(L+.124,.246,.099,.183),'Mean of 8 members')
     image(zoom,'bar',(L+.012,.184,.211,.052))
@@ -131,7 +131,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     text(.5,.029,'Original map/color scales are preserved. GEOS replay is the dynamical reference; flow matching performs learned generative downscaling.',7.8,MUTED,ha='center')
     base=out/'layout_readme.pdf';fig.savefig(base,facecolor=fig.get_facecolor());plt.close(fig)
     records=compose(base,out/'fig01_workflow.pdf',placements,dpi)
-    # Compact journal version: four large precipitation maps plus readable method blocks.
+    # Compact journal version: four large temperature maps plus readable method blocks.
     fig=plt.figure(figsize=(7.2,5.65),facecolor='white');paper=[]
     titles=('(a) GEOS-FP native','(b) GEOS replay reference','(c) Generated member 1','(d) Ensemble mean (8)')
     for i,title in enumerate(titles):
@@ -139,7 +139,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
         fig.text(x,.947,title,fontsize=7.3,weight='bold',color=INK)
         paper.append((zoom,i,(x,.591,.229,.329)))
     paper.append((zoom,'bar',(.12,.487,.76,.090)))
-    fig.text(.5,.425,f'Actual precipitation | {when} | epoch {metadata["epoch"]}, EMA, {metadata["steps"]} Heun steps, {metadata["post"]}',fontsize=7.1,ha='center',color=MUTED)
+    fig.text(.5,.425,f'2 m temperature (°C) | {when} | epoch {metadata["epoch"]}, EMA, {metadata["steps"]} Heun steps, {metadata["post"]}',fontsize=7.1,ha='center',color=MUTED)
     boxes=[(.025,'1. CONDITIONS','Current + previous-hour GEOS-FP\nLocal and broad spatial context\nStatic surface and time features'),
            (.352,'2. HYBRID FLOW MATCHING','Direct square-root precipitation\nResidual temperature, pressure, winds\nCoarse-residual humidity'),
            (.679,'3. ENSEMBLE SAMPLING','Shared-state tiled Heun solver\nIndependent member noise draws\nOptional paired spectral adjustment')]
@@ -154,7 +154,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     base_paper=out/'layout_paper.pdf';fig.savefig(base_paper);plt.close(fig)
     paper_records=compose(base_paper,out/'fig01_workflow_paper.pdf',paper,dpi)
     base.unlink();base_paper.unlink()
-    atomic_json(out/'workflow_provenance.json',dict(time=entry['time'],case=case_id,case_selection=entry['reason'],
+    atomic_json(out/'workflow_provenance.json',dict(time=entry['time'],case=case_id,case_selection=entry['reason'],focus_variable='t2m',
         checkpoint=metadata['checkpoint'],epoch=metadata['epoch'],weights=metadata['weights'],members=metadata['members'],
         steps=metadata['steps'],post=metadata['post'],metrics_sha256=digest(root/'metrics.json'),
         renderer_sha256=digest(__file__),readme_panels=records,paper_panels=paper_records,
