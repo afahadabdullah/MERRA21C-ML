@@ -4,7 +4,7 @@ For the latest six-variable **v4.1 complete-test evaluation and paper figures**,
 
 ![v4.1 hybrid-target conditional flow-matching workflow](docs/assets/merraflow-v4-1-workflow.png)
 
-The map-based v4.1 workflow keeps native GEOS-FP cells visible and uses matched regional zooms to show the resolution difference. The README illustration uses explicitly labeled public HRRR context; the paper pipeline renders the same design from saved HWT references and model members. Older experiments remain documented below.
+The workflow now shows actual native GEOS-FP inputs, the dynamically downscaled high-resolution HWT GEOS replay reference, and v4.1 model predictions, including precipitation. All six generated fields and a rain-member/ensemble-mean comparison are visible. The compact journal version is included as Figure 1 in the [paper source](manuscript/MERRA21C_ML_arxiv.tex).
 
 For the six-variable experiment, see the [v4 task list and runbook](docs/v4.md):
 direct square-root hourly rainfall, residual states including 2 m humidity,
@@ -38,30 +38,32 @@ Qualitative 24-hour storm forecast initialized at 2026-02-23 05:30 UTC. Each ani
 
 ## Workflow overview
 
-The figure above updates the original map-based design for the six-field v4.1 model: direct square-root precipitation, residual temperature/pressure/winds, coarse-residual humidity, current and previous-hour predictors, 192² patches with halo supervision, and synchronized tiled Heun ensembles. Coarse and fine temperature zooms use the **same geographic extent and color limits**, with native coarse cell edges and no artificial smoothing. Full-domain maps indicate the zoom location.
+Figure 1 uses the actual **7 March 2026, 19:30 UTC** v4.1 diagnostic: epoch-243 EMA weights, eight members, 64 Heun steps, and spectral post-processing. It shows native GEOS-FP (~25 km), the high-resolution **GEOS replay** dynamical reference on the nominal 2–3 km HWT grid, and **generated model predictions**. No HRRR fields are used. Original storm-map extents, color scales, and map detail are preserved.
 
-The README image uses numerical [NASA GEOS-FP](https://portal.nccs.nasa.gov/datashare/gmao/geos-fp/das/Y2025/M07/D04/) inputs at 10:30 UTC and [NOAA HRRR](https://registry.opendata.aws/noaa-hrrr-pds/) valid at 11:00 UTC on 4 July 2025. HRRR is public visual context; it is not HWT training data or model output. The public illustration has no generated weather panels.
+The broad README layout shows coarse temperature/precipitation, the coarse-versus-GEOS-replay storm zoom, all six generated fields, and generated rain/member averaging. The compact paper layout shows four large precipitation panels and the conditioning/flow/ensemble workflow at readable journal dimensions. This selected event illustrates the method; it does not establish complete-test skill.
 
-Generate and cache the public illustration (including humidity), or redraw it later from the saved bundle:
-
-```bash
-python -m pip install -e '.[workflow]'
-python scripts/make_workflow_figure.py --output output/figures/workflow_v4_1
-python scripts/make_workflow_figure.py \
-  --bundle output/figures/workflow_v4_1/workflow_data.npz \
-  --output output/figures/workflow_redraw --dpi 600
-```
-
-For the paper, use the actual saved evaluation fields. No source archive reads or inference are needed:
+Regenerate both layouts from the original saved vector map PDFs, without inference, source weather archives, or verification:
 
 ```bash
 python -m pip install -e '.[paper]'
+python scripts/make_workflow_figure.py \
+  --presentation present_last_v4_1 --case-id 20260307_1930 \
+  --output output/figures/workflow_geos_v4_1 --dpi 300
+```
+
+Outputs are `fig01_workflow.{pdf,png,svg}`, `fig01_workflow_paper.{pdf,png,svg}`, and `workflow_provenance.json` with source hashes and exact vector clip rectangles. The source PDFs and their numerical summary are retained in the presentation archive. No meteorological values are recovered or estimated from images.
+
+For future complete-test figures, use saved numerical fields directly:
+
+```bash
 python scripts/make_workflow_figure.py \
   --evaluation runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 \
   --output runs/merraflow_v4_1/evaluation/all_test_best_m16_s64/workflow --dpi 600
 ```
 
-The complete paper-figure pipeline uses this map-based Figure 1 automatically. New evaluation runs save original native GEOS-FP fields alongside the example ensembles. Older saved runs without native fields explicitly label interpolated coarse inputs. Outputs include PDF, SVG, PNG, a lossless `workflow_data.npz`, and provenance. Coast/state boundaries are bundled from public-domain Natural Earth data, so redraws need no map downloads. `--no-features` omits these overlays. Use `--zoom=-110,-102,35,41.5` to specify the shared regional view.
+The numerical-data renderer also shows an actual generated member for all six fields. Native coarse arrays, high-resolution GEOS references, generated fields, seeds, and coordinates come from saved evaluation outputs. A `workflow_data.npz` bundle supports subsequent numerical redraws. Coast/state boundaries are bundled from public-domain Natural Earth data.
+
+The paper's external vector figure is `manuscript/figures/MERRA21C_ML_workflow.pdf`. A lossless inline preview fallback lets the desktop editor compile the same figure when it cannot access external assets. The remaining figure and table interiors are still placeholders.
 
 ## Training method
 

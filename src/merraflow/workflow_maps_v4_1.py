@@ -23,10 +23,11 @@ def save_bundle(path, case):
     from .evaluate_all_v4_1 import atomic_npz
     arrays = {k: np.asarray(case[k]) for k in ('hr','lat','lon')}
     if case.get('coarse') is not None: arrays['coarse'] = np.asarray(case['coarse'])
-    if case.get('members_t2m') is not None: arrays['members_t2m'] = case['members_t2m']
+    for name in ('members_t2m','members_precip','prediction'):
+        if case.get(name) is not None:arrays[name]=case[name]
     for name, source in case.get('native',{}).items():
         for key in ('values','lat','lon'): arrays[f'native_{name}_{key}'] = source[key]
-    meta = {k:v for k,v in case.items() if k not in ('hr','lat','lon','coarse','members_t2m','native')}
+    meta = {k:v for k,v in case.items() if k not in ('hr','lat','lon','coarse','members_t2m','members_precip','prediction','native')}
     arrays['metadata_json'] = np.asarray(json.dumps(meta))
     Path(path).parent.mkdir(parents=True,exist_ok=True)
     atomic_npz(path,**arrays)
@@ -35,7 +36,7 @@ def save_bundle(path, case):
 def load_bundle(path):
     with np.load(path,allow_pickle=False) as f:
         case=json.loads(str(f['metadata_json']))
-        case.update({k:f[k] for k in ('hr','lat','lon','coarse','members_t2m') if k in f})
+        case.update({k:f[k] for k in ('hr','lat','lon','coarse','members_t2m','members_precip','prediction') if k in f})
         case['native']={}
         for name in (*FIELDS,'wind_speed'):
             if f'native_{name}_values' in f:
@@ -60,7 +61,9 @@ def from_evaluation(root, manifest):
             raise ValueError('Workflow member identity mismatch')
         native={name:{k:f[f'native_{name}_{k}'] for k in ('values','lat','lon')}
                 for name in (*FIELDS,'wind_speed') if f'native_{name}_values' in f}
-        return dict(hr=f['truth'],coarse=f['coarse'],members_t2m=f['ensemble'][:2,0],lat=g['lat'],lon=g['lon'],
+        ensemble=f['ensemble']
+        return dict(hr=f['truth'],coarse=f['coarse'],members_t2m=ensemble[:2,0],members_precip=ensemble[:2,1],
+            prediction=ensemble[0],lat=g['lat'],lon=g['lon'],
             native=native,time=record['time'],public_proxy=False,reference_label='HWT GEOS replay (~3 km)',
             native_label='GEOS-FP native 0.25° × 0.3125°',run_id=manifest['run_id'],state_shape=None,
             footer=f'{record["time"]} UTC | HWT reference and fixed raw members from the saved evaluation; same-grid metrics are reported separately.')
@@ -98,6 +101,8 @@ def zoom_limits(case, requested):
 
 
 def render(case, output, dpi=600, zoom=ZOOM, features=True):
+    if case.get('public_proxy'):
+        raise ValueError('HRRR demonstration maps are not accepted for the GEOS workflow; use saved project data or archived GEOS/v4.1 plots')
     try:
         import cartopy.crs as ccrs
     except ImportError as exc:
@@ -112,9 +117,6 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     fig.text(.5,.961,'MERRA21C-ML: GENERATIVE CONUS DOWNSCALING',ha='center',fontsize=23,weight='bold',color=NAVY)
     fig.text(.5,.928,'Native GEOS-FP (~25 km)  →  variable-specific conditional flow matching  →  six fields on the HWT (~3 km) grid',
              ha='center',fontsize=11,color=MUTED)
-    if case.get('public_proxy'):
-        fig.text(.5,.900,'MAP ILLUSTRATION: GEOS-FP + public HRRR context; HRRR is neither HWT training data nor a generated ensemble',
-                 ha='center',fontsize=8.5,color='#8a4c18')
     lefts=[.018,.263,.508,.753];width=.229
     def text(x,y,s,fs=8,color=INK,**kw):return fig.text(x,y,s,fontsize=fs,color=color,**kw)
     def arrow(x1,y1,x2,y2):
@@ -170,12 +172,9 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     input_note='Native 0.25° × 0.3125° cells' if 't2m' in native else 'Interpolated coarse input; native grid unavailable'
     text(L+.016,.773,input_note,8,BLUE,weight='bold')
     map_panel((L+.015,.515,width-.030,.235),native_t,'2 m temperature','°C','RdYlBu_r',(tlow,thigh),mark=True)
-    if 'wind_speed' in native:wind=native['wind_speed']
-    elif 'u10m' in native and 'v10m' in native:wind=dict(native['u10m'],values=np.hypot(native['u10m']['values'],native['v10m']['values']))
-    else:
-        a,b=coarse('u10m',3),coarse('v10m',4);wind=dict(a,values=np.hypot(a['values'],b['values']))
-    map_panel((L+.015,.224,width-.030,.224),wind,'10 m wind speed','m s$^{-1}$','magma',
-              (0,max(float(np.quantile(wind['values'],.99)),1e-5)),mark=True)
+    rain=coarse('precip',1)
+    map_panel((L+.015,.224,width-.030,.224),rain,'Precipitation input','mm h$^{-1}$','YlGnBu',
+              (0,max(float(np.quantile(rain['values'],.999)),.1)),mark=True)
     text(L+.016,.165,'Six weather fields at t − 1 h and t',9,weight='bold')
     text(L+.016,.135,'Local 192² patches + broad 576² context\nTerrain, land/sea, coordinates, cell area, time',8,linespacing=1.6)
     L=lefts[1];frame(L,'B','SAME REGION, TWO GRIDS','Identical extent and color scale; no display interpolation')
@@ -187,17 +186,20 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
               '~25 km: native cells' if 't2m' in native else 'Coarse information (on the HWT grid)',
               '°C','RdYlBu_r',limits,zoom,cells='t2m' in native)
     map_panel((L+.018,.231,width-.036,.233),fine_t,
-              '~3 km: '+('HRRR visual context' if case.get('public_proxy') else 'HWT reference'),
+              '~3 km GEOS replay reference (HWT)',
               '°C','RdYlBu_r',limits,zoom)
     text(L+.018,.165,'Temporal pairing and training-only statistics',8.7,weight='bold')
     text(L+.018,.132,'States: midpoint | Rain: ¼ P₋₃₀ + ½ P₀ + ¼ P₊₃₀\nChronological splits with gaps; packed training data',7.5,linespacing=1.7)
-    L=lefts[2];frame(L,'C','SIX JOINT OUTPUT FIELDS',case['reference_label'])
-    specs=[(hr[0]-273.15,'2 m temperature','°C','RdYlBu_r'),
-           (hr[1],'Hourly mean rain rate','mm h$^{-1}$','YlGnBu'),
-           (hr[2]*.01,'Surface pressure','hPa','Spectral_r'),
-           (hr[3],'10 m zonal wind','m s$^{-1}$','RdBu_r'),
-           (hr[4],'10 m meridional wind','m s$^{-1}$','RdBu_r'),
-           (hr[5]*1000,'2 m specific humidity','g kg$^{-1}$','YlGnBu')]
+    generated=case.get('prediction')
+    L=lefts[2];frame(L,'C','GENERATED ~3 km FIELDS' if generated is not None else 'REFERENCE FIELDS',
+        'Actual first raw model member' if generated is not None else case['reference_label'])
+    output_fields=generated if generated is not None else hr
+    specs=[(output_fields[0]-273.15,'2 m temperature','°C','RdYlBu_r'),
+           (output_fields[1],'Hourly mean rain rate','mm h$^{-1}$','YlGnBu'),
+           (output_fields[2]*.01,'Surface pressure','hPa','Spectral_r'),
+           (output_fields[3],'10 m zonal wind','m s$^{-1}$','RdBu_r'),
+           (output_fields[4],'10 m meridional wind','m s$^{-1}$','RdBu_r'),
+           (output_fields[5]*1000,'2 m specific humidity','g kg$^{-1}$','YlGnBu')]
     mw=(width-.044)/2
     for c,(z,title,unit,cmap) in enumerate(specs):
         lo,hi=np.quantile(z,[.02,.98])
@@ -233,10 +235,12 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     text(L+.100,.349,'Loss supervises core and halo',7.4,TEAL,weight='bold')
     text(L+.014,.296,'SYNCHRONIZED TILED ENSEMBLE SAMPLING',8.3,BLUE,weight='bold')
     text(L+.014,.279,'Blend tile velocities → shared-state Heun update\nIndependent seeds → multiple conditional members',7.8,linespacing=1.7,va='top')
-    if case.get('members_t2m') is not None:
+    if case.get('members_precip') is not None:
         mw=(width-.048)/2
-        for i,z in enumerate(case['members_t2m'][:2]):
-            map_panel((L+.015+i*(mw+.018),.139,mw,.080),fine(0,z-273.15),f'Raw member {i+1}','°C','RdYlBu_r',limits,zoom)
+        rain_limits=(0,max(float(np.quantile(hr[1],.999)),.1))
+        for i,z in enumerate(case['members_precip'][:2]):
+            map_panel((L+.015+i*(mw+.018),.139,mw,.080),fine(1,z),f'Rain member {i+1}',
+                      'mm h$^{-1}$','YlGnBu',rain_limits,zoom)
     else:
         for i in range(3):
             fig.patches.append(Rectangle((L+.028+i*.057,.159+i*.008),.058,.055,transform=fig.transFigure,facecolor='#e5f2f4',edgecolor=TEAL,lw=1))
@@ -250,5 +254,5 @@ def render(case, output, dpi=600, zoom=ZOOM, features=True):
     atomic_json(out/'workflow_provenance.json',dict(renderer_sha256=digest(__file__),data_sha256=digest(out/'workflow_data.npz'),
         zoom=list(zoom),native_variables=sorted(native),native_t2m_available='t2m' in native,features=features,
         public_proxy=case.get('public_proxy',False),time=case['time'],dpi=dpi,
-        note='Native coarse cells and unmodified high-resolution values; public HRRR context is never represented as model output.'))
+        note='Native coarse cells and unmodified high-resolution values; high-resolution reference and predictions are distinct project GEOS products.'))
     return out

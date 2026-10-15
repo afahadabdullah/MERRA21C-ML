@@ -4,7 +4,7 @@ The earlier presentation evaluated one wettest hour and two randomly chosen hour
 
 ## Run on Discover
 
-Install Cartopy in the existing project environment once with `python -m pip install -e '.[paper]'` (or `.[workflow]` for the optional public-data illustration). Initialization checks Cartopy before scheduling GPU evaluation. Production data/checkpoints are not present on the local Mac; these commands perform the real evaluation on Discover.
+Install Cartopy in the existing project environment once with `python -m pip install -e '.[paper]'` . Initialization checks Cartopy before scheduling GPU evaluation. Production data/checkpoints are not present on the local Mac; these commands perform the real evaluation on Discover.
 
 ```bash
 cd /gpfsm/dnb10/projects/p311/ML_downscaling
@@ -45,7 +45,7 @@ Initialization is CPU preparation and may read 12 full training reference fields
 
 ## Generate publication figures without inference or evaluation
 
-The final CPU job automatically generates the figures after successful complete aggregation. Figure 1 restores the README’s map-based design with native coarse temperature/wind maps, a matched regional native-versus-fine temperature zoom, all six reference fields, and the correct v4.1 targets/training/sampling. Its production version includes the first two fixed raw temperature members. Zooms use the same extent and color scale, and render the source cells without smoothing. Figures 2–8 cover complete-test skill, uncertainty, spectra, ranks, precipitation reliability/FSS and filtering. Figures 9–10 give all-variable maps and spread/error panels for each predeclared saved case. Value scales are shared across methods; pressure/humidity are converted to hPa/g kg⁻¹. Case maps retain native LCC array geometry and saved latitude/longitude contours. The workflow uses Cartopy and saved native/fine coordinates; boundary overlays use bundled public-domain Natural Earth geometry, with no downloads. Its `workflow_data.npz` and `workflow_provenance.json` preserve all numerical fields, zoom bounds and source labels for independent redraws.
+The final CPU job automatically generates the figures after successful complete aggregation. Figure 1 restores the README’s map-based design with native coarse temperature/wind maps, a matched regional native-versus-fine temperature zoom, all six generated fields, and the correct v4.1 targets/training/sampling. Its numerical-data version includes fixed raw precipitation members. The checked-in README and paper use actual archived GEOS/v4.1 plots, with precipitation member and ensemble mean shown. Zooms use the same extent and color scale, and render the source cells without smoothing. Figures 2–8 cover complete-test skill, uncertainty, spectra, ranks, precipitation reliability/FSS and filtering. Figures 9–10 give all-variable maps and spread/error panels for each predeclared saved case. Value scales are shared across methods; pressure/humidity are converted to hPa/g kg⁻¹. Case maps retain native LCC array geometry and saved latitude/longitude contours. The workflow uses Cartopy and saved native/fine coordinates; boundary overlays use bundled public-domain Natural Earth geometry, with no downloads. Its `workflow_data.npz` and `workflow_provenance.json` preserve all numerical fields, zoom bounds and source labels for independent redraws.
 
 Regenerate figures locally or on a CPU node after changing plot styling:
 
@@ -64,15 +64,22 @@ OUTPUT=runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 \
 FIGURE_DPI=600 sbatch --export=ALL scripts/slurm_paper_figures_v4_1.sh
 ```
 
-Generate a map-based illustration before a real run is available (public HRRR context is explicitly distinguished from HWT/model output):
+Regenerate the checked-in GEOS-FP/GEOS-replay/prediction workflow from the archived plot data:
 
 ```bash
-python -m pip install -e '.[workflow]'
-python scripts/make_workflow_figure.py --output output/figures/workflow_v4_1
+python -m pip install -e '.[paper]'
+python scripts/make_workflow_figure.py \
+  --presentation present_last_v4_1 --case-id 20260307_1930 \
+  --output output/figures/workflow_geos_v4_1 --dpi 300
+```
 
-# Later: regenerate solely from saved numerical map data
+This produces both a broad README layout and a compact paper layout from original vector PDF panels. Their map detail, shared scales and extents are preserved. The provenance JSON records every source hash and clip. No HRRR fields, synthetic weather, or new metrics enter this figure. The selected event is a preliminary illustration, not a complete-test result.
+
+For a subsequent redraw of a numerical GEOS workflow bundle:
+
+```bash
 python -m merraflow.paper_figures_v4_1 --workflow-only \
-  --workflow-data output/figures/workflow_v4_1/workflow_data.npz \
+  --workflow-data runs/full_test/paper_figures/workflow_data.npz \
   --output output/figures/workflow_redraw --dpi 600
 ```
 
