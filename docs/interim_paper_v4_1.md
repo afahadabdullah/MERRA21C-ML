@@ -126,3 +126,9 @@ The default throttle is four simultaneous GPU jobs across eight shards. Set `MAX
 The paper job requires at least one completed map hour and an existing local manuscript with AUTO blocks; add `PLOTS_ONLY=1` if no manuscript is installed. It copies the consolidated map arrays into its own `error_maps.npz` with a hash and includes them in the results ZIP. Redraw an existing paper snapshot without `--maps` to reuse that exact map sample; submit a new snapshot to incorporate later map completions. Map captions disclose their separate hour and member counts. A partial map pass is not a full-test result even if the domain-score snapshot is complete.
 
 The GPU pass verifies the frozen checkpoint, archive fingerprints, and evaluator source hash. It refuses changed source by default; preserve that check for the paper evaluation.
+
+`evaluate_maps_v4_1.py` resolves the local `src/merraflow` package automatically, including when launched directly without `PYTHONPATH`. A privately staged copy uses `PROJECT_DIR` or the project working directory. If an older script reports `ModuleNotFoundError: No module named 'merraflow'`, use this from the project root (also works in csh/tcsh):
+
+```bash
+env PYTHONPATH="$PWD/src" ./env/bin/python scripts/evaluate_maps_v4_1.py from-saved --evaluation runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 --output runs/merraflow_v4_1/evaluation/all_test_best_m16_s64_saved_maps
+```

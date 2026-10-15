@@ -36,10 +36,26 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import sys
 import time
 import uuid
 
 import numpy as np
+
+
+def add_local_source_path():
+    """Resolve the checkout's src package for direct and staged script execution."""
+    candidates = []
+    if os.environ.get('PROJECT_DIR'):
+        candidates.append(Path(os.environ['PROJECT_DIR'])/'src')
+    candidates.extend((Path(__file__).resolve().parent.parent/'src', Path.cwd()/'src'))
+    for candidate in candidates:
+        if (candidate/'merraflow'/'__init__.py').is_file():
+            sys.path.insert(0, str(candidate.resolve()))
+            return
+
+
+add_local_source_path()
 
 FIELDS = ('t2m', 'precip', 'ps', 'u10m', 'v10m', 'q2m', 'wind_speed')
 METRICS = ('crps', 'mae_coarse', 'mae_reg', 'se_mean', 'se_coarse', 'se_reg', 'var')

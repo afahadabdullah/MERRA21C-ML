@@ -340,6 +340,24 @@ def test_error_maps_use_hours_finished_so_far_and_archived_fields(parent,tmp_pat
     with np.load(saved) as f:
         meta=_json.loads(str(f['meta']))
         assert meta['source']=='saved_fields' and meta['completed']==[hid] and np.allclose(f['t2m_mae_coarse'],2)
+    # A real CLI subprocess must work without PYTHONPATH or an editable install,
+    # both from scripts/ and from the private copy used by batch submissions.
+    import os,subprocess,sys
+    environment=dict(os.environ)
+    environment.pop('PYTHONPATH',None);environment.pop('PROJECT_DIR',None)
+    script=Path('scripts/evaluate_maps_v4_1.py').resolve()
+    for staged in (False,True):
+        command=script
+        if staged:
+            command=tmp_path/'staged_maps.py';shutil.copyfile(script,command)
+            environment['PROJECT_DIR']=str(Path.cwd())
+        cli_out=tmp_path/f'cli_maps_{staged}'
+        result=subprocess.run([sys.executable,str(command),'from-saved','--evaluation',str(root),
+                               '--output',str(cli_out)],env=environment,cwd=tmp_path,
+                              text=True,capture_output=True,check=True)
+        assert 'no new inference' in result.stdout
+        with np.load(cli_out/'maps.npz') as f:
+            assert np.allclose(f['t2m_mae_coarse'],2)
 
 
 def test_maps_plan_lock_and_output_protection(parent,tmp_path):
