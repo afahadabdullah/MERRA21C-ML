@@ -19,6 +19,14 @@ from .evaluate_all_v4_1 import atomic_json,digest
 
 INK,NAVY,BLUE,TEAL,MUTED,LINE='#17354c','#0b3558','#1769aa','#118c91','#60788b','#bacbd8'
 FIELDS=('t2m','precip','ps','u10m','v10m','q2m')
+INPUT_VARIABLES=dict(
+    weather=['PRECTOT','U10M','V10M','TQV','QV2M','SLP'],history_hours=[-1,0],
+    current_coarse_baseline=['T2M','PRECTOT','PS','U10M','V10M'],
+    static=['elevation','sin(latitude)','cos(latitude)','sin(longitude)','cos(longitude)',
+            'log(cell_area)','land_fraction','lake_fraction','signed_water_boundary_distance',
+            'grid_y_terrain_slope','grid_x_terrain_slope','ocean_fraction','lake_fraction_known'],
+    temporal=['sin(annual_phase)','cos(annual_phase)','sin(UTC_phase)','cos(UTC_phase)',
+              'sin(local_solar_phase)','cos(local_solar_phase)'])
 # Same normalized geographic window in both archived axes: 3x linear zoom.
 # Coordinates are fractions from the upper-left of the original map panel.
 ZOOM_WINDOW=(1/3, .55-1/6, 2/3, .55+1/6)
@@ -136,12 +144,23 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     text(.5,.903,'GEOS-FP (~25 km)  →  Conditional flow matching  →  GEOS grid (~3 km)',18,MUTED,ha='center')
     lefts=[.018,.263,.508,.753];width=.229
     L=lefts[0];frame(L,'A','COARSE INPUTS','GEOS-FP · ~25 km')
-    image(sources['t2m'],0,(L+.015,.527,width-.030,.208),'Temperature (°C)')
-    bar(sources['t2m'],'t2m',(L+.015,.500,width-.030,.011))
-    image(sources['u10m'],0,(L+.015,.234,width-.030,.194),'Zonal wind (m s⁻¹)')
-    bar(sources['u10m'],'u10m',(L+.015,.205,width-.030,.011))
-    text(L+.016,.133,'Weather at t − 1 h and t',14,weight='bold')
-    text(L+.016,.100,'Terrain · location · time',14)
+    # Representative native predictor maps, stacked schematically. The full
+    # input inventory below distinguishes six raw predictors from five baselines.
+    for i,f in enumerate(('precip','q2m','u10m')):
+        placements.append((sources[f],0,(L+.012+i*.018,.608-i*.023,.167,.151),None))
+    text(L+.013,.529,'Weather at t − 1 h and t',14,weight='bold')
+    for y,label in zip((.502,.477,.452,.427,.402),(
+        'Rain rate · PRECTOT','10 m winds · U10M, V10M','Column vapor · TQV',
+        '2 m humidity · QV2M','Sea-level pressure · SLP')):text(L+.013,y,label,14)
+    text(L+.013,.363,'Coarse baselines at t',14,weight='bold')
+    text(L+.013,.335,'T2M, PRECTOT, U10M, V10M',14)
+    text(L+.013,.310,'Surface pressure · PS',14)
+    text(L+.013,.273,'Static fields',14,weight='bold')
+    for y,label in zip((.247,.222,.197,.172),(
+        'Elevation · lat/lon · cell area','Land/lake/ocean fractions',
+        'Water distance · x/y slopes','Lake-availability mask')):text(L+.013,y,label,14)
+    text(L+.013,.135,'Time (sine/cosine)',14,weight='bold')
+    text(L+.013,.110,'Annual · UTC · local solar',14)
     L=lefts[1];frame(L,'B','RESOLUTION','Same extent · same scale')
     image(zoom,0,(L+.018,.505,width-.036,.233),'GEOS-FP · ~25 km',window=ZOOM_WINDOW)
     bar(zoom,'t2m',(L+.018,.479,width-.036,.011))
@@ -190,7 +209,10 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
         layout='four-panel reference layout; simplified labels; identical paper and README figure',
         checkpoint=metadata['checkpoint'],epoch=metadata['epoch'],weights=metadata['weights'],members=metadata['members'],
         steps=metadata['steps'],post=metadata['post'],metrics_sha256=digest(root/'metrics.json'),
-        renderer_sha256=digest(__file__),panels=records,
+        renderer_sha256=digest(__file__),panels=records,input_variables=INPUT_VARIABLES,
+        input_definition_sources={str(p):digest(p) for p in map(Path,(
+            'configs/discover_annual_v2.yaml','configs/discover_v4_1.yaml',
+            'src/merraflow/prepare_v2.py','src/merraflow/static_v2.py','src/merraflow/v4_1.py'))},
         note='Original GEOS/v4.1 vector maps in the supplied four-stage layout; no HRRR fields and no meteorological values inferred from images.'))
     return out
 

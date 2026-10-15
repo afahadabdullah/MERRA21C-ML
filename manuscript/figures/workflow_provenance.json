@@ -11,11 +11,11 @@
   "steps": 64,
   "post": "spectral",
   "metrics_sha256": "e22668e96da615a7844a6daa7e40722cfe825556ed3684373ef6f2208bcfc819",
-  "renderer_sha256": "9a4e4d28c06e2412409463ce015bb9bf632795fc39ef7e9b2a26baa979280080",
+  "renderer_sha256": "17c7104983171433dc77dce9306a81c46ad939e6d9f1b5408dd8e4b0207e76cd",
   "panels": [
     {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_t2m.pdf",
-      "source_sha256": "7cff17475fe8812a074d8f262ba978346999a8f5125e8fd6cd47a3a2f7a891e1",
+      "source": "present_last_v4_1/cases/20260307_1930/conus_precip.pdf",
+      "source_sha256": "8211cc45c36ab3e31f57ebff7799428df66e93a1f9b73bea884610ef9ab6b8a7",
       "column": 0,
       "clip_points": [
         25.552045822143555,
@@ -24,28 +24,28 @@
         265.05474853515625
       ],
       "destination_fraction": [
-        0.033,
-        0.527,
-        0.199,
-        0.208
+        0.03,
+        0.608,
+        0.167,
+        0.151
       ],
       "map_window_fraction": null
     },
     {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_t2m.pdf",
-      "source_sha256": "7cff17475fe8812a074d8f262ba978346999a8f5125e8fd6cd47a3a2f7a891e1",
-      "column": "colorbar",
+      "source": "present_last_v4_1/cases/20260307_1930/conus_q2m.pdf",
+      "source_sha256": "2660b752cbf3fc2e130c490a3e4f112dd87404cba13f5c9f60c61477882e89a5",
+      "column": 0,
       "clip_points": [
-        421.68060302734375,
-        309.3968811035156,
-        1213.760009765625,
-        324.5771484375
+        25.552045822143555,
+        65.61474609375,
+        413.63203620910645,
+        265.05474853515625
       ],
       "destination_fraction": [
-        0.033,
-        0.5,
-        0.199,
-        0.011
+        0.048,
+        0.585,
+        0.167,
+        0.151
       ],
       "map_window_fraction": null
     },
@@ -60,28 +60,10 @@
         265.05474853515625
       ],
       "destination_fraction": [
-        0.033,
-        0.234,
-        0.199,
-        0.194
-      ],
-      "map_window_fraction": null
-    },
-    {
-      "source": "present_last_v4_1/cases/20260307_1930/conus_u10m.pdf",
-      "source_sha256": "5d1f4607e9c067bff02b48d9896f2c5d73ee81503f83dd4ed3a1156315396076",
-      "column": "colorbar",
-      "clip_points": [
-        421.68060302734375,
-        309.3968811035156,
-        1213.760009765625,
-        324.5771484375
-      ],
-      "destination_fraction": [
-        0.033,
-        0.205,
-        0.199,
-        0.011
+        0.066,
+        0.5619999999999999,
+        0.167,
+        0.151
       ],
       "map_window_fraction": null
     },
@@ -384,5 +366,56 @@
       "map_window_fraction": null
     }
   ],
+  "input_variables": {
+    "weather": [
+      "PRECTOT",
+      "U10M",
+      "V10M",
+      "TQV",
+      "QV2M",
+      "SLP"
+    ],
+    "history_hours": [
+      -1,
+      0
+    ],
+    "current_coarse_baseline": [
+      "T2M",
+      "PRECTOT",
+      "PS",
+      "U10M",
+      "V10M"
+    ],
+    "static": [
+      "elevation",
+      "sin(latitude)",
+      "cos(latitude)",
+      "sin(longitude)",
+      "cos(longitude)",
+      "log(cell_area)",
+      "land_fraction",
+      "lake_fraction",
+      "signed_water_boundary_distance",
+      "grid_y_terrain_slope",
+      "grid_x_terrain_slope",
+      "ocean_fraction",
+      "lake_fraction_known"
+    ],
+    "temporal": [
+      "sin(annual_phase)",
+      "cos(annual_phase)",
+      "sin(UTC_phase)",
+      "cos(UTC_phase)",
+      "sin(local_solar_phase)",
+      "cos(local_solar_phase)"
+    ]
+  },
+  "input_definition_sources": {
+    "configs/discover_annual_v2.yaml": "4c588fd8b56a40e676e3cd8d5ed95558304fd2aa39ae57198f6a10a2d7298455",
+    "configs/discover_v4_1.yaml": "d1e59532af9d13533a854b88cbb2cf0107a0598485e3b5d38084c90ec1d09af5",
+    "src/merraflow/prepare_v2.py": "f8f6d7ff5824a521eab09ae782f885702def3dc4cb354b61504f60a2424d8cef",
+    "src/merraflow/static_v2.py": "8fb89ece28c5d85609e1ded6893e8db7e5d51c54f331f9790fb85ad8ec079572",
+    "src/merraflow/v4_1.py": "b205a24cd8ae3cde5bd83b7fd54c4eef45a01d725c3b0db0fc47d8dd91722f96"
+  },
   "note": "Original GEOS/v4.1 vector maps in the supplied four-stage layout; no HRRR fields and no meteorological values inferred from images."
 }
