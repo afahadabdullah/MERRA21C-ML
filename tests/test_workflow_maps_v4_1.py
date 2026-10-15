@@ -22,6 +22,25 @@ def test_archived_vector_map_clips_retain_equal_extent_and_exclude_headings():
         assert all(r.y0>doc[0].search_for('Truth 2 km')[0].y0 for r in clips)
 
 
+def test_sparse_colorbar_labels_preserve_source_scale_and_signed_winds():
+    pymupdf=pytest.importorskip('pymupdf')
+    from pathlib import Path
+    from merraflow.workflow_archive_v4_1 import colorbar_spec
+    root=Path('present_last_v4_1/cases/20260307_1930')
+    if not root.exists():pytest.skip('Original archive plot is not installed')
+    for field,expected in [('precip',['0.1','4','64']),('u10m',['-5','0','5']),
+                           ('v10m',['-5','0','5']),('ps',['800','1000'])]:
+        with pymupdf.open(root/f'conus_{field}.pdf') as doc:
+            clip,ticks=colorbar_spec(doc[0],field)
+            assert [label for _,label in ticks]==expected
+            fractions=[fraction for fraction,_ in ticks]
+            assert 0<fractions[0]<fractions[-1]<1
+            assert fractions==sorted(fractions)
+            assert pymupdf.Rect(clip).height<30  # Gradient only; no old fine-print labels.
+            if field in ('u10m','v10m'):
+                assert fractions[1]==pytest.approx(.5,abs=.001)
+
+
 def test_lossless_preview_pdf_preserves_rgb_and_tex_source(tmp_path):
     pymupdf=pytest.importorskip('pymupdf')
     import io
