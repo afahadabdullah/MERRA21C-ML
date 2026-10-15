@@ -352,11 +352,15 @@ def run(output, shard_index=0, shards=1, batch=8, threads=4, device=None):
             saved_fields = {}
             save_maps = entry['id'] in opt.get('saved_cases', [])
             if save_maps:
+                from .evaluate_v4_1 import native_fields
+                native, native_missing = native_fields(entry, archive.static['lat'], archive.static['lon'])
+                native_arrays = {f'native_{name}_{key}': item[key] for name,item in native.items()
+                                 for key in ('values','lat','lon')}
                 relative = f'fields/{entry["id"]}_raw.npz'
                 atomic_npz(out/relative, truth=truth, coarse=sampler.coarse,
                            regression=sampler.regression, ensemble=ensemble,
-                           run_id=np.asarray(manifest['run_id']), seeds=np.asarray(seeds))
-                saved_fields['raw'] = dict(path=relative, sha256=digest(out/relative))
+                           run_id=np.asarray(manifest['run_id']), seeds=np.asarray(seeds), **native_arrays)
+                saved_fields['raw'] = dict(path=relative, sha256=digest(out/relative),native_missing=native_missing)
             if clim is not None:
                 for m in range(len(ensemble)):
                     ensemble[m] = spectral_fix(ensemble[m], clim, dx, opt['spectral_gain'], opt['spectral_cutoff'])

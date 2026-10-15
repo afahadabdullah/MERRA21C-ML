@@ -12,7 +12,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, TwoSlopeNorm
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 import numpy as np
 
 from .evaluate_all_v4_1 import FIELDS, atomic_json, digest, field, read_manifest
@@ -44,56 +43,11 @@ def export(fig, out, stem, dpi=600):
     plt.close(fig)
 
 
-def workflow(out, dpi=600, example=None):
-    """Scientific schematic of the implemented v4.1 target and sampler contracts."""
-    fig, ax = plt.subplots(figsize=(10.6, 8.3 if example else 6.2))
-    ax.set(xlim=(0, 12), ylim=(-3.2 if example else -.6, 7)); ax.axis('off')
-    blue, orange, green = '#e9f3fa', '#fff1df', '#eaf5ee'
-    def box(x, y, w, h, title, body, color):
-        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.04,rounding_size=0.12',
-            facecolor=color, edgecolor='#516170', linewidth=.85))
-        ax.text(x+.14, y+h-.26, title, va='top', weight='bold', fontsize=10, color='#17344a')
-        ax.text(x+.14, y+h-.66, body, va='top', fontsize=8.5, linespacing=1.55)
-    def arrow(start, end, color='#516170'):
-        ax.add_patch(FancyArrowPatch(start, end, arrowstyle='-|>', mutation_scale=12,
-                                   lw=1.2, color=color))
-    ax.text(.1, 6.8, '(a) Data and variable-specific targets', weight='bold', fontsize=11)
-    box(.15, 4.65, 2.8, 1.85, 'Coarse inputs',
-        'GEOS-FP (~25 km)\nCurrent + previous hour\nTerrain, location, time, area', blue)
-    box(3.45, 4.65, 3.45, 1.85, 'High-resolution reference',
-        'HWT GEOS replay (~3 km)\nStates at the hourly midpoint\nRain: hourly trapezoidal average', green)
-    box(7.4, 4.65, 4.4, 1.85, 'Hybrid target coordinates',
-        'T, pressure, winds: regression residual\nHumidity: coarse-input residual\nRain: direct g(P) = √(1 + P/P₀) − 1', orange)
-    arrow((2.99, 5.55), (3.4, 5.55)); arrow((6.94, 5.55), (7.35, 5.55))
-    ax.text(.1, 4.2, '(b) Conditional flow-matching training', weight='bold', fontsize=11)
-    box(.15, 2.1, 2.8, 1.85, 'Gaussian starting field',
-        '$z_0 \\sim \\mathcal{N}(0,I)$\n$t \\sim \\mathcal{U}(0,1)$\nFrozen regression conditioner', blue)
-    box(3.45, 2.1, 3.45, 1.85, 'Conditional transport',
-        '$z_t=(1-t)z_0+t z_1$\nTarget velocity: $z_1-z_0$\nStandardized hybrid target $z_1$', blue)
-    box(7.4, 2.1, 4.4, 1.85, 'Conditional U-Net',
-        '$v_\\theta(z_t,t,c)$\nPatch training; channel/area-weighted loss\nTrain-only statistics; validation-selected EMA', green)
-    arrow((2.99, 3.05), (3.4, 3.05)); arrow((6.94, 3.05), (7.35, 3.05))
-    arrow((9.65, 4.6), (9.65, 4.0))
-    ax.text(.1, 1.65, '(c) Ensemble inference and paired sharpening', weight='bold', fontsize=11)
-    box(.15, -.3, 2.8, 1.65, 'Conditional noise draws',
-        'One shared weather context\nIndependent member seeds\nNo HR labels at inference', blue)
-    box(3.45, -.3, 3.45, 1.65, 'Tiled Heun integration',
-        'Blend overlapping tile velocities\nUpdate a shared domain state\nDecode + variable-specific addback', green)
-    box(7.4, -.3, 4.4, 1.65, 'High-resolution ensemble',
-        'Raw and bounded spectral variants\nSame members; no model retraining\nSaved fields + complete-test verification', orange)
-    arrow((2.99, .5), (3.4, .5)); arrow((6.94, .5), (7.35, .5))
-    if example:
-        case, data = example
-        ax.text(.1, -.85, f'(d) Saved precipitation example | {case} UTC',weight='bold',fontsize=10)
-        values=[data['coarse'],data['truth'],data['ensemble'][0],data['ensemble'][1]]
-        norm,cmap=map_norm(values,1)
-        for i,(values,title) in enumerate(zip(values,['Coarse (HWT grid)','HWT reference','Raw member 1','Raw member 2'])):
-            inset=ax.inset_axes([.02+i*.24,.015,.215,.17])
-            im=inset.imshow(values,origin='lower',interpolation='nearest',norm=norm,cmap=cmap,rasterized=True)
-            inset.set(xticks=[],yticks=[],title=title)
-        cbax=ax.inset_axes([.97,.035,.012,.14])
-        fig.colorbar(im,cax=cbax,extend='max',label=UNITS[1])
-    export(fig, out, 'fig01_workflow', dpi)
+def workflow(out, dpi=600, case=None):
+    from .workflow_maps_v4_1 import render
+    if case is None:
+        raise ValueError('Map workflow requires --workflow-data or saved evaluation fields')
+    return render(case,out,dpi)
 
 
 def load_results(evaluation):
@@ -344,7 +298,7 @@ def saved_maps(root, manifest, out, dpi):
 def captions(summary, maps):
     return '\n'.join([
         '# Paper figure captions and conventions', '',
-        'Figure 1. The CONUS v4.1 framework: aligned coarse inputs and GEOS replay targets, variable-specific generative coordinates, conditional flow matching, synchronized tiled Heun inference, and paired spectral post-processing. P₀ = 1 mm h⁻¹. Humidity uses coarse residuals; precipitation has no regression addback. Panels a–c are schematic. When saved fields are available, panel d shows the first predeclared precipitation example and the first two raw members, without selecting on storm intensity or visual quality.', '',
+        'Figure 1. Map-based CONUS v4.1 workflow with native GEOS-FP cells and matched regional temperature zooms, six high-resolution reference fields, hybrid generative targets, halo-supervised conditional flow matching, and synchronized ensemble inference. The zoom panels use identical extent/color scale without smoothing. Native source fields are used when saved; interpolated coarse inputs are explicitly labeled otherwise. Model member maps, when available, use the first two fixed raw members from the first predeclared case. Public HRRR illustration bundles are explicitly identified as visual context. Optional raw/spectral filtering is paired without retraining. P₀ = 1 mm h⁻¹.', '',
         f'Figures 2–8 summarize all {summary["hours"]} eligible held-out hours, with fixed-grid area weighting and equal hour weighting. They verify the high-resolution GEOS replay, not independent observations. Missing source hours and exclusions are recorded in the manifest.', '',
         'Figure 2. CRPS skill and pooled RMSE reduction relative to the coarse input. CRPS whiskers transform the paired temporal-block bootstrap intervals for absolute score differences using the fixed full-test coarse score; they are not bootstrap intervals of the skill-score ratio itself. RMSE bars have no confidence intervals.', '',
         'Figure 3. Empirical central 90% interval coverage and corrected ensemble spread/error. Dotted lines indicate 90% and unity. Finite-ensemble empirical quantile intervals do not imply exactly 90% coverage under ideal calibration.', '',
@@ -359,13 +313,15 @@ def captions(summary, maps):
         'Example figure stems: '+', '.join(maps), ''])
 
 
-def make(evaluation=None, output='paper_figures_v4_1', dpi=600, workflow_only=False, skip_maps=False):
+def make(evaluation=None, output='paper_figures_v4_1', dpi=600, workflow_only=False, skip_maps=False, workflow_data=None):
     if dpi < 72: raise ValueError('DPI must be at least 72')
     style(); out=Path(output); out.mkdir(parents=True,exist_ok=True)
     provenance=dict(plotter_sha256=digest(__file__),matplotlib=matplotlib.__version__,numpy=np.__version__,
                     dpi=dpi,workflow_only=workflow_only,skip_maps=skip_maps)
     if workflow_only:
-        workflow(out,dpi);atomic_json(out/'plot_manifest.json',provenance);return out
+        from .workflow_maps_v4_1 import load_bundle
+        if not workflow_data: raise ValueError('--workflow-only needs --workflow-data; use scripts/make_workflow_figure.py for the public map illustration')
+        workflow(out,dpi,load_bundle(workflow_data));atomic_json(out/'plot_manifest.json',provenance);return out
     if evaluation is None: raise ValueError('--evaluation is required unless --workflow-only')
     root, manifest, summary=load_results(evaluation)
     previous=out/'plot_manifest.json'
@@ -373,21 +329,12 @@ def make(evaluation=None, output='paper_figures_v4_1', dpi=600, workflow_only=Fa
         old=json.loads(previous.read_text())
         if old.get('run_id') not in (None,manifest['run_id']):
             raise ValueError('Use a separate figure directory for a different evaluation run')
-    example=None
-    selected=manifest['settings'].get('saved_cases',[])
-    if selected and not skip_maps:
-        case=selected[0]
-        record=json.loads((root/'cases'/f'{case}.json').read_text())
-        item=record['saved_fields']['raw']
-        if item['path']!=f'fields/{case}_raw.npz' or digest(root/item['path'])!=item['sha256']:
-            raise ValueError('Saved workflow fields changed')
-        with np.load(root/item['path'],allow_pickle=False) as data:
-            if str(data['run_id'])!=manifest['run_id']:
-                raise ValueError('Foreign workflow fields')
-            # Only rain is needed for the workflow thumbnails.
-            rain={k:data[k][1] if k!='ensemble' else data[k][:2,1] for k in ('coarse','truth','ensemble')}
-            example=(record['time'].replace('T',' '),rain)
-    workflow(out,dpi,example);skill(summary,out,dpi);calibration(summary,out,dpi)
+    from .workflow_maps_v4_1 import from_evaluation,load_bundle
+    if workflow_data:
+        workflow(out,dpi,load_bundle(workflow_data))
+    elif manifest['settings'].get('saved_cases',[]) and not skip_maps:
+        workflow(out,dpi,from_evaluation(root,manifest))
+    skill(summary,out,dpi);calibration(summary,out,dpi)
     structure(summary,out,dpi);precipitation(summary,out,dpi);filtering(summary,out,dpi)
     maps=[] if skip_maps else saved_maps(root,manifest,out,dpi)
     # Bundle every plotted diagnostic without reading the source archive again.
@@ -414,6 +361,7 @@ def main():
     p.add_argument('--evaluation');p.add_argument('--output',default='paper_figures_v4_1')
     p.add_argument('--dpi',type=int,default=600);p.add_argument('--workflow-only',action='store_true')
     p.add_argument('--skip-maps',action='store_true')
+    p.add_argument('--workflow-data',help='Saved workflow_data.npz for map-based Figure 1')
     print(make(**vars(p.parse_args())))
 
 

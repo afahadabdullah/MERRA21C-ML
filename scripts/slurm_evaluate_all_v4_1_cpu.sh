@@ -21,6 +21,8 @@ if [[ "${STAGE:-init}" == aggregate ]]; then
   "$ENV_DIR/bin/python" -m merraflow.paper_figures_v4_1 --evaluation "$OUTPUT" \
     --output "${FIGURE_OUTPUT:-$OUTPUT/paper_figures}" --dpi "${FIGURE_DPI:-600}"
 elif [[ "${STAGE:-init}" == init ]]; then
+  # Fail before GPU allocation if the map-figure dependency is unavailable.
+  "$ENV_DIR/bin/python" -c 'import cartopy'
   "$ENV_DIR/bin/python" -m merraflow.evaluate_all_v4_1 init \
     --config "${CONFIG:-configs/discover_v4_1.yaml}" --checkpoint "${CHECKPOINT:-best}" \
     --output "$OUTPUT" --split "${SPLIT:-test}" --members "${MEMBERS:-16}" --steps "${STEPS:-64}" \

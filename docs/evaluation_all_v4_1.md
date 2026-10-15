@@ -4,7 +4,7 @@ The earlier presentation evaluated one wettest hour and two randomly chosen hour
 
 ## Run on Discover
 
-Use the existing project environment. Production data/checkpoints are not present on the local Mac; these commands perform the real evaluation on Discover.
+Install Cartopy in the existing project environment once with `python -m pip install -e '.[paper]'` (or `.[workflow]` for the optional public-data illustration). Initialization checks Cartopy before scheduling GPU evaluation. Production data/checkpoints are not present on the local Mac; these commands perform the real evaluation on Discover.
 
 ```bash
 cd /gpfsm/dnb10/projects/p311/ML_downscaling
@@ -45,7 +45,7 @@ Initialization is CPU preparation and may read 12 full training reference fields
 
 ## Generate publication figures without inference or evaluation
 
-The final CPU job automatically generates the figures after successful complete aggregation. Figure 1 follows the README workflow, updated for the actual v4.1 hybrid targets and synchronized sampler; its data-backed version includes the first saved rain case and two fixed raw members. Figures 2–8 cover complete-test skill, uncertainty, spectra, ranks, precipitation reliability/FSS and filtering. Figures 9–10 give all-variable maps and spread/error panels for each predeclared saved case. Value scales are shared across methods; pressure/humidity are converted to hPa/g kg⁻¹. Maps retain native LCC array geometry and saved latitude/longitude contours, without external map downloads.
+The final CPU job automatically generates the figures after successful complete aggregation. Figure 1 restores the README’s map-based design with native coarse temperature/wind maps, a matched regional native-versus-fine temperature zoom, all six reference fields, and the correct v4.1 targets/training/sampling. Its production version includes the first two fixed raw temperature members. Zooms use the same extent and color scale, and render the source cells without smoothing. Figures 2–8 cover complete-test skill, uncertainty, spectra, ranks, precipitation reliability/FSS and filtering. Figures 9–10 give all-variable maps and spread/error panels for each predeclared saved case. Value scales are shared across methods; pressure/humidity are converted to hPa/g kg⁻¹. Case maps retain native LCC array geometry and saved latitude/longitude contours. The workflow uses Cartopy and saved native/fine coordinates; boundary overlays use bundled public-domain Natural Earth geometry, with no downloads. Its `workflow_data.npz` and `workflow_provenance.json` preserve all numerical fields, zoom bounds and source labels for independent redraws.
 
 Regenerate figures locally or on a CPU node after changing plot styling:
 
@@ -64,16 +64,21 @@ OUTPUT=runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 \
 FIGURE_DPI=600 sbatch --export=ALL scripts/slurm_paper_figures_v4_1.sh
 ```
 
-Generate the schematic workflow before a real run is available:
+Generate a map-based illustration before a real run is available (public HRRR context is explicitly distinguished from HWT/model output):
 
 ```bash
+python -m pip install -e '.[workflow]'
+python scripts/make_workflow_figure.py --output output/figures/workflow_v4_1
+
+# Later: regenerate solely from saved numerical map data
 python -m merraflow.paper_figures_v4_1 --workflow-only \
-  --output paper_figures_v4_1 --dpi 600
+  --workflow-data output/figures/workflow_v4_1/workflow_data.npz \
+  --output output/figures/workflow_redraw --dpi 600
 ```
 
 The plotting program loads only saved JSON/NPZ: it never loads a model/checkpoint, original weather archives, or recomputes verification. `--skip-maps` produces the aggregate figures from older complete evaluations without saved fields. `figure_data.json` contains every aggregated numeric diagnostic plotted; `table01_all_variables.csv` provides converted paper units. Keep the **entire evaluation directory**, especially manifest, all case JSON, fields, spectral reference and summary, to reproduce both analysis and figures. `plot_manifest.json` records code/library versions, hashes, DPI and run identity. The saved checkpoint is needed only to reproduce inference. Changing statistical settings requires reaggregation of case JSON; changing plot appearance only requires plotting.
 
-Three saved 16-member examples require approximately **4.8 GB before compression** on the 1059×1799 grid with both raw/spectral ensembles plus reference/baselines. Saving every test hour may require terabytes. `SAVE_CASES=none` still permits aggregate figures and the schematic workflow, but cannot recover case maps later without inference. All real-data figures require a completed production run; local synthetic QA is not scientific evidence.
+Three saved 16-member examples require approximately **4.8 GB before compression** on the 1059×1799 grid with both raw/spectral ensembles plus reference/baselines. Saving every test hour may require terabytes. `SAVE_CASES=none` permits aggregate figures; supply a saved `--workflow-data` bundle for Figure 1. It cannot recover case maps later without inference. All real-data figures require a completed production run; local synthetic QA is not scientific evidence.
 
 The source tests cover frozen checkpoint, field/hash provenance, resume, corruption rejection, complete-run enforcement, numerical metrics, scheduler dependencies and rendering the full figure suite. Synthetic plot QA establishes that exports work, not that the production plots demonstrate skill. Inspect actual rain-bin overflows, state scales and rare-event bin counts before selecting paper panels; captions describe statistical limits.
 
@@ -83,7 +88,7 @@ The source tests cover frozen checkpoint, field/hash provenance, resume, corrupt
 - `checkpoint.pt`: independent frozen copy of the selected checkpoint.
 - `spectral_reference.npz`: fixed training-only spectrum and its manifest hash, when enabled. Reference selection is anchored to the first eligible evaluation date's calendar season, with no evaluation labels. This is one fixed reference for the run; the previous three-event presentation used a different first-case anchor. The helper's same-split fallback is explicitly forbidden here.
 - `cases/<timestamp>.json`: atomic per-hour scores for coarse input, frozen regression, raw flow, and optional spectral flow; member seeds; units; checkpoint epoch; sampling and total time.
-- `fields/grid.npz` and `fields/<timestamp>_{raw,spectral}.npz`: saved coordinates/areas and full six-variable example fields, baselines, reference, all members, seeds and run ID. Hashes are checked on resume and plotting. Raw data are saved before filtering, so variants remain paired.
+- `fields/grid.npz` and `fields/<timestamp>_{raw,spectral}.npz`: saved coordinates/areas and full six-variable example fields, baselines, reference, all members, seeds and run ID, plus available original native GEOS-FP arrays and their native coordinates. Missing native variables are recorded and interpolated fallbacks are explicitly labeled. Figures never manufacture native coarse blocks from interpolated fields. Hashes are checked on resume and plotting. Raw data are saved before filtering, so variants remain paired.
 - `paper_figures/`: vector PDF/SVG, 600-dpi PNG, figure data, converted-unit table, captions and plotting provenance.
 - `completion.json`: authoritative completeness status and any missing/unexpected hours.
 - `summary.json`, `scorecard.csv`, `report.md`: written by successful complete aggregation. Keep these with the manifest and per-hour JSON.
