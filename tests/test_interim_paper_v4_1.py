@@ -16,6 +16,19 @@ from merraflow.evaluate_all_v4_1 import canonical,atomic_json,read_case,aggregat
 BUILDER=runpy.run_path('scripts/build_interim_paper_v4_1.py')
 
 
+@pytest.mark.parametrize('name',['build_interim_paper_v4_1.py','paper_plots_v4_1.py','evaluate_maps_v4_1.py'])
+def test_plot_scripts_avoid_python312_only_fstring_backslashes(name):
+    # feature_version alone does not reject PEP 701 backslashes in Python 3.12.
+    # Inspect interpolation expressions explicitly for Discover's Python <=3.11.
+    import ast
+    source=(Path('scripts')/name).read_text()
+    tree=ast.parse(source,feature_version=(3,10))
+    for node in ast.walk(tree):
+        if isinstance(node,ast.FormattedValue):
+            expression=ast.get_source_segment(source,node.value)
+            assert '\\' not in expression, (name,node.lineno,expression)
+
+
 def paper_template():
     """Minimal public QA fixture; never requires the ignored author manuscript."""
     blocks=('FIGURES','ABSTRACT','KEYPOINTS','SCOPE','TABLE_SETTINGS','TABLE_SCORES',

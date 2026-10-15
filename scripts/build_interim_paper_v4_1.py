@@ -516,9 +516,10 @@ def results(c):
         gain_hi = [k for k in state if nm[k]['skill_top_decile'] is not None and nm[k]['skill_rest'] is not None
                    and nm[k]['skill_top_decile'] > nm[k]['skill_rest']]
         if gain_hi:
+            rest_scores = join([pct(nm[k]['skill_rest'])+r'\%' for k in gain_hi])
             s.append('Skill is highest where GEOS-FP errs most: in the 10\\% of the domain with the largest GEOS-FP error it '
                      'reaches ' + join([f"{pct(nm[k]['skill_top_decile'])}\\% for {names[k]}" for k in gain_hi])
-                     + f" (versus {join([pct(nm[k]['skill_rest'])+'\\%' for k in gain_hi])} elsewhere). ")
+                     + f" (versus {rest_scores} elsewhere). ")
         if 'precip' in nm:
             s.append(f"For precipitation, skill is positive over {pct(nm['precip']['positive_area'])}\\% of the area "
                      'where rain errors are non-negligible. ')
