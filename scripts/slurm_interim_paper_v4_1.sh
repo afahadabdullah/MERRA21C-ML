@@ -24,6 +24,7 @@ args=(--evaluation "$OUTPUT" --output "$snapshot"
       --dpi "${FIGURE_DPI:-300}" --compile)
 if [[ "${SKIP_MAPS:-0}" == 1 ]]; then args+=(--skip-maps); fi
 if [[ -n "${STORM:-}" ]]; then args+=(--storm "$STORM"); fi
+if [[ -n "${ERROR_MAPS:-}" ]]; then args+=(--maps "$ERROR_MAPS"); fi
 if [[ "${NO_INLINE:-0}" == 1 ]]; then args+=(--no-inline); fi
 if [[ "${PLOTS_ONLY:-0}" == 1 ]]; then args+=(--plots-only); fi
 "$ENV_DIR/bin/python" "${INTERIM_BUILDER:-$PROJECT_DIR/scripts/build_interim_paper_v4_1.py}" "${args[@]}"

@@ -87,3 +87,42 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 For the paper, replace `--plots-only` with `--manuscript manuscript/MERRA21C_ML_arxiv.tex --compile`. Add `--storm <saved storm_fields.nc>` when needed. Redrawing checks saved hashes and reads saved verification/fields without new inference. Spatial maps and hourly diagnostics are derived from those saved arrays/records. Submit a new snapshot to incorporate more completed hours.
 
 Partial snapshots remain explicitly interim and completion-ordered, with counts in visible figure footers, captions, and PDF metadata. They carry `complete: false`; no score confidence intervals are inferred. Once every eligible hour is present, the paper describes all eligible hours, but this descriptive publishing path still does not replace the strict full-test finalizer or its block-bootstrap analysis. RMSE pools MSE; CRPS skill uses interpolated GEOS-FP as baseline. The reference is the high-resolution GEOS replay, not independent observations.
+
+## All-hours error and skill maps
+
+The full-test evaluator saves only domain-mean scores per hour, plus full fields for the three predeclared example hours. Per-pixel error maps over many hours therefore need the fields again, which `scripts/evaluate_maps_v4_1.py` regenerates for every `EVERY`-th test hour with the same frozen checkpoint, code, sampler and member seeds (first `MEMBERS` members). It accumulates per-pixel CRPS, GEOS-FP/regression MAE, squared errors, ensemble variance and 1 mm/h Brier scores, and writes only to its own directory.
+
+Partial data is fine at every stage:
+
+* Each shard saves its running sums after every hour, so a killed or time-limited job loses at most one hour; resubmitting the same command resumes.
+* Keep `SHARDS`, `EVERY`, `MEMBERS`, and the maps script unchanged when resuming. The saved plan rejects incompatible changes, and a per-shard lock prevents simultaneous writers. Use a new `MAPS` directory for a different experiment.
+* Give the paper builder the maps **directory** (`ERROR_MAPS=..._maps`). It combines whatever hours are finished at that moment, and the caption says "N of P planned hours finished".
+* With no GPU pass at all, `python scripts/evaluate_maps_v4_1.py from-saved --evaluation EVAL --output EVAL_saved_maps` builds the same maps from whichever predeclared example hours are complete, using all their saved members. This sample has a separate scope from the deterministic maps-pass subsample.
+
+Install only these publishing scripts on Discover before using the commands below. Fetching and extracting individual files preserves the live evaluator's source hash:
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+git fetch origin main
+for f in evaluate_maps_v4_1.py submit_evaluate_maps_v4_1.sh slurm_evaluate_maps_v4_1.sh \
+         build_interim_paper_v4_1.py paper_plots_v4_1.py \
+         submit_interim_paper_v4_1.sh slurm_interim_paper_v4_1.sh; do
+  git show "origin/main:scripts/$f" > "scripts/$f"
+done
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+```bash
+cd /gpfsm/dnb10/projects/p311/ML_downscaling
+EVAL=runs/merraflow_v4_1/evaluation/all_test_best_m16_s64 EVERY=3 MEMBERS=8 SHARDS=8 \
+  bash scripts/submit_evaluate_maps_v4_1.sh
+# Any time later, with whatever hours are done:
+ERROR_MAPS=runs/merraflow_v4_1/evaluation/all_test_best_m16_s64_maps \
+  PUBLISHING_REF=worktree bash scripts/submit_interim_paper_v4_1.sh
+```
+
+The default throttle is four simultaneous GPU jobs across eight shards. Set `MAX_PARALLEL=8` on submission to allow all eight to run together. For 815 eligible hours, `EVERY=3` selects 272. At an assumed 100 s per member this is about 60 A100-hours: roughly 15 hours at four-way concurrency or 8 hours at eight-way concurrency, excluding queues and overhead. This maps-pass runtime has not been measured.
+
+The paper job requires at least one completed map hour and an existing local manuscript with AUTO blocks; add `PLOTS_ONLY=1` if no manuscript is installed. It copies the consolidated map arrays into its own `error_maps.npz` with a hash and includes them in the results ZIP. Redraw an existing paper snapshot without `--maps` to reuse that exact map sample; submit a new snapshot to incorporate later map completions. Map captions disclose their separate hour and member counts. A partial map pass is not a full-test result even if the domain-score snapshot is complete.
+
+The GPU pass verifies the frozen checkpoint, archive fingerprints, and evaluator source hash. It refuses changed source by default; preserve that check for the paper evaluation.

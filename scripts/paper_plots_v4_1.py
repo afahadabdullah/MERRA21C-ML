@@ -88,7 +88,8 @@ def export(fig, out, stem, dpi=300, subject=None):
     meta = {'Title': f'MERRA-Flow {stem}', 'Subject': subject or 'MERRA-Flow v4.1'}
     if subject and '(interim, completion-ordered)' in subject:
         count = re.search(r'\d+/\d+', subject).group()
-        fig.text(.5, -.025, f'INTERIM: {count} held-out hours; completion-ordered subset',
+        bottom = min([ax.get_position().y0 for ax in fig.axes] or [0])
+        fig.text(.5, min(bottom-.1, -.025), f'INTERIM: {count} held-out hours; completion-ordered subset',
                  ha='center', va='top', fontsize=6, color=MUTED)
     fig.savefig(out/f'{stem}.pdf', dpi=dpi, bbox_inches='tight', pad_inches=.02, facecolor='white', metadata=meta)
     fig.savefig(out/f'{stem}.png', dpi=dpi, bbox_inches='tight', pad_inches=.02, facecolor='white')
@@ -334,12 +335,15 @@ class Case:
         return name in self.native or (name == 'wind_speed' and {'u10m', 'v10m'} <= set(self.native))
 
     def native_field(self, name):
-        """Native GEOS-FP cells on the fine grid (nearest containing cell); interpolated input if absent."""
+        """Native GEOS-FP cells on the fine grid (nearest containing cell).
+
+        When the native file was not archived, the interpolated input is averaged back onto
+        the GEOS-FP 0.25 x 0.3125 degree cells, so the coarse grid is still shown honestly."""
         if name == 'wind_speed' and self.has_native(name):
             u, v = self.native_field('u10m'), self.native_field('v10m')
             return np.hypot(u, v)
         if name not in self.native:
-            return self.get(name, 'coarse')
+            return self.cell_mean(self.get(name, 'coarse'))
         n = self.native[name]
         key = (len(n['lat']), float(n['lat'][0]), len(n['lon']), float(n['lon'][0]))
         if key not in self._idx:
@@ -347,11 +351,28 @@ class Case:
         iy, ix = self._idx[key]
         return physical(name, n['values'][iy, ix])
 
+    def geosfp_cells(self):
+        """Index of the GEOS-FP 0.25 x 0.3125 degree cell (global grid from -90, -180) for every pixel."""
+        if 'geosfp' not in self._idx:
+            iy = np.rint((self.lat+90.)/.25).astype(int)
+            ix = np.rint((((self.lon+180.) % 360.))/.3125).astype(int)
+            self._idx['geosfp'] = (iy, ix)
+        return self._idx['geosfp']
+
+    def cell_mean(self, values):
+        """Area-weighted mean of a fine field over each GEOS-FP cell, painted back on the fine grid."""
+        iy, ix = self.geosfp_cells()
+        key = (iy-iy.min())*(ix.max()-ix.min()+1)+(ix-ix.min())
+        _, inverse = np.unique(key.ravel(), return_inverse=True)
+        w = self.area.ravel()
+        total = np.bincount(inverse, weights=np.asarray(values, dtype='float64').ravel()*w)
+        return (total/np.bincount(inverse, weights=w))[inverse].reshape(values.shape).astype('float32')
+
     def native_cells(self, name):
-        """(iy, ix) native-cell index arrays for outlining cells, or None."""
+        """(iy, ix) native-cell index arrays for outlining cells."""
         src = 'u10m' if name == 'wind_speed' else name
         if src not in self.native:
-            return None
+            return self.geosfp_cells()
         n = self.native[src]
         return native_index(self.lat, self.lon, n['lat'], n['lon'])
 
@@ -486,7 +507,7 @@ def fig_overview(case, geo, boxes, out, dpi, stem, subject=None, rows=OVERVIEW_R
                           interpolation='nearest')
             letter(axes[r, c], 3*r+c)
         if not native_ok[-1]:
-            tag(axes[r, 0], 'interpolated input')
+            tag(axes[r, 0], 'cell means of input')
         for label, b in boxes.items():
             if (label == 'A' and name in ('t2m', 'wind_speed')) or (label == 'B' and name in ('precip', 'q2m')):
                 for c in range(3):
@@ -523,7 +544,7 @@ def fig_zoom(case, geo, boxes, out, dpi, stem, subject=None):
             letter(axes[r, c], len(cols)*r+c)
         row_label(axes[r, 0], f'{VARS[name]["title"]}\nbox {key}')
         if not case.has_native(name):
-            tag(axes[r, 0], 'interpolated input')
+            tag(axes[r, 0], 'cell means of input')
         colorbar(fig, im, caxes[r], VARS[name]['unit'], extend,
                  ticks=RAIN_LEVELS[[0, 3, 5, 7, 9]] if name == 'precip' else None)
     col_titles(axes, titles, size=7.0)
@@ -531,8 +552,15 @@ def fig_zoom(case, geo, boxes, out, dpi, stem, subject=None):
     return dict(stem=stem)
 
 
-def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, threshold=1.):
-    """Plausible realizations: GEOS-FP, three members, reference; mean, spread, exceedance probability."""
+def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, threshold=None):
+    """Plausible realizations: GEOS-FP, three members, reference; mean, spread, exceedance probability.
+
+    The exceedance threshold defaults to 1 mm/h, or 0.25 mm/h when the GEOS-FP *input* in the box is
+    light (90th percentile of its wet pixels below 1 mm/h); the reference is never used to choose it."""
+    if threshold is None:
+        coarse = case.get(name, 'coarse')[box[0]:box[1], box[2]:box[3]]
+        wet = coarse[coarse >= .1]
+        threshold = 1. if wet.size and np.quantile(wet, .9) >= 1 else .25
     aspect = (box[1]-box[0])/(box[3]-box[2])
     fig, axes, _ = map_grid(2, 4, aspect, width=7.2, cbar=False, hspace=.05, top_pad=.2)
     ref = case.get(name, 'truth'); cmap, norm, extend = scale_for(name, ref[box[0]:box[1], box[2]:box[3]])
@@ -567,7 +595,7 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
         pos = ax.get_position(); cax = fig.add_axes([pos.x0+.1*pos.width, pos.y0-.05, .8*pos.width, .013])
         colorbar(fig, im, cax, lab, 'max' if ax is axes[1, 0] else 'neither', ticks, 'horizontal')
     export(fig, out, stem, dpi, subject)
-    return dict(stem=stem, members=case.members)
+    return dict(stem=stem, members=case.members, threshold=float(threshold))
 
 
 def pixel_crps(ens, truth):
@@ -689,8 +717,8 @@ def fig_scorecard(summary, out, dpi, stem, subject=None):
 SPECTRA_ROWS = ('t2m', 'wind_speed', 'precip', 'q2m')
 
 
-def fig_spectra(summary, out, dpi, stem, subject=None, coarse_km=27.):
-    dx = float(summary.get('dx_km_approx') or 3.)
+def fig_spectra(summary, out, dpi, stem, subject=None, coarse_km=27., dx_km=None):
+    dx = float(dx_km or summary.get('dx_km_approx') or 3.)
     fig = plt.figure(figsize=(7.2, 3.6))
     gs = fig.add_gridspec(2, 4, height_ratios=(2.1, 1), hspace=.08, wspace=.32, left=.07, right=.99, top=.87, bottom=.12)
     src = summary['sources']; result = {}
@@ -730,9 +758,9 @@ def fig_spectra(summary, out, dpi, stem, subject=None, coarse_km=27.):
     return dict(stem=stem, ratio=result)
 
 
-def fig_precip(summary, out, dpi, stem, subject=None):
+def fig_precip(summary, out, dpi, stem, subject=None, dx_km=None):
     """Neighbourhood skill and intensity tails for precipitation."""
-    dx = float(summary.get('dx_km_approx') or 3.)
+    dx = float(dx_km or summary.get('dx_km_approx') or 3.)
     src = summary['sources']
     fig = plt.figure(figsize=(7.2, 2.35))
     gs = fig.add_gridspec(1, 4, wspace=.38, left=.07, right=.99, top=.80, bottom=.2)
@@ -873,7 +901,8 @@ def fig_temporal(manifest, ids, cases_dir, out, dpi, stem, subject=None):
                 median=dict(zip(FIELDS, np.nanmedian(skill, 0).tolist())),
                 p10=dict(zip(FIELDS, np.nanquantile(skill, .1, axis=0).tolist())),
                 daily_positive=dict(zip(FIELDS, [float(np.mean(row[np.isfinite(row)] > 0)) if np.isfinite(row).any()
-                                                 else None for row in grid])))
+                                                 else None for row in grid])),
+                diurnal={f: {str(h): float(np.nanmean(skill[hours == h, i])) for h in hh} for i, f in enumerate(FIELDS)})
 
 
 def fig_calibration(summary, out, dpi, stem, subject=None):
@@ -1134,6 +1163,82 @@ def fig_storm_totals(storm, boundaries, out, dpi, stem, subject=None):
                                     truth=float(acc['truth'].max())))
 
 
+SKILL_MAP_ROWS = ('t2m', 'wind_speed', 'q2m', 'precip')
+
+
+def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4):
+    """Time-mean error and skill maps over all hours of the maps pass (scripts/evaluate_maps_v4_1.py)."""
+    with np.load(maps_path, allow_pickle=False) as f:
+        meta = json.loads(str(f['meta']))
+        data = {key: f[key] for key in f.files if key != 'meta'}
+    lat, lon = data.get('lat'), data.get('lon')
+    area = data.get('area', np.ones_like(data['t2m_crps'], dtype='float64')).astype('float64')
+    geo = Geo(lat, lon, load_boundaries() if boundaries is None else boundaries) if lat is not None else None
+    h, w = data['t2m_crps'].shape
+    fig, axes, caxes = map_grid(len(SKILL_MAP_ROWS), 4, h/w, width=7.2, hspace=.05, top_pad=.2, extra={1: .5})
+    skill_cmap = mcolors.LinearSegmentedColormap.from_list('sk', ['#8e0e2c', '#d6604d', '#f4a582', '#f7f7f7',
+                                                                  '#92c5de', '#4393c3', '#2166ac', '#0b3b70'])
+    skill_cmap = skill_cmap.with_extremes(bad='#e6e8eb')
+    skill_norm = mcolors.TwoSlopeNorm(0, -50, 80)
+    short = dict(t2m='Temperature', wind_speed='Wind speed', q2m='Humidity', precip='Precipitation')
+    numbers = {}
+    a = block(area, k)
+    for r, name in enumerate(SKILL_MAP_ROWS):
+        fct = VARS[name]['factor']
+        mae, crps = data[f'{name}_mae_coarse']*fct, data[f'{name}_crps']*fct
+        bm, bc = block(mae.astype('float64'), k), block(crps.astype('float64'), k)
+        # Skill is undefined where GEOS-FP is (almost) never wrong, e.g. rain over deserts: mask those blocks.
+        floor = .01 if name == 'precip' else 0.
+        valid = bm > floor
+        skill = np.where(valid, 100*(1-bc/np.where(valid, bm, 1)), np.nan)
+        rm = np.where(valid, 100*(1-np.sqrt(block(data[f'{name}_se_mean'].astype('float64'), k))/
+                                  np.sqrt(np.maximum(block(data[f'{name}_se_coarse'].astype('float64'), k), 1e-30))),
+                      np.nan)
+        top = valid & (bm >= np.nanquantile(bm[valid], .9)) if valid.any() else np.zeros_like(valid)
+        def relative(numerator, denominator):
+            return float(1-numerator/denominator) if denominator > 0 else None
+        numbers[name] = dict(
+            skill=relative(np.sum(crps*area), np.sum(mae*area)),
+            positive_area=float(np.sum(a*(skill > 0)*valid)/np.sum(a*valid)) if valid.any() else None,
+            skill_top_decile=relative(np.sum((bc*a)[top]), np.sum((bm*a)[top])),
+            skill_rest=relative(np.sum((bc*a)[valid & ~top]), np.sum((bm*a)[valid & ~top])),
+            rmse_reduction=relative(np.sqrt(np.sum(data[f'{name}_se_mean']*area)),
+                                    np.sqrt(np.sum(data[f'{name}_se_coarse']*area))))
+        vmax = max(float(np.nanquantile(bm, .99)), 1e-9)
+        en = mcolors.Normalize(0, vmax)
+        im1 = draw_map(axes[r, 0], mae, error_cmap(), en, geo=geo, k=k)
+        draw_map(axes[r, 1], crps, error_cmap(), en, geo=geo, k=k)
+        im3 = axes[r, 2].imshow(skill, origin='lower', cmap=skill_cmap, norm=skill_norm, interpolation='nearest',
+                                extent=(-.5, skill.shape[1]*k-.5, -.5, skill.shape[0]*k-.5), rasterized=True)
+        axes[r, 3].imshow(rm, origin='lower', cmap=skill_cmap, norm=skill_norm, interpolation='nearest',
+                          extent=(-.5, rm.shape[1]*k-.5, -.5, rm.shape[0]*k-.5), rasterized=True)
+        for c in (2, 3):
+            ax = axes[r, c]
+            if geo is not None:
+                geo.draw(ax)
+            ax.set_xlim(-.5, skill.shape[1]*k-.5); ax.set_ylim(-.5, skill.shape[0]*k-.5)
+            ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_linewidth(.5); sp.set_color('#55606b')
+        for c in range(4):
+            letter(axes[r, c], 4*r+c)
+        row_label(axes[r, 0], short[name])
+        pos = axes[r, 1].get_position()
+        cax = fig.add_axes([pos.x1+.008, pos.y0+.06*pos.height, .012, .88*pos.height])
+        colorbar(fig, im1, cax, VARS[name]['unit'], 'max')
+        colorbar(fig, im3, caxes[r], 'Skill (%)', 'both', ticks=[-50, -25, 0, 25, 50, 80])
+        score = numbers[name]['skill']
+        axes[r, 2].text(.98, .04, f"{100*score:.0f}%" if score is not None else 'undefined', transform=axes[r, 2].transAxes, ha='right',
+                        va='bottom', fontsize=6.4, color=INK, zorder=20,
+                        bbox=dict(boxstyle='round,pad=.25', fc='white', ec='none', alpha=.85))
+    col_titles(axes, ['GEOS-FP mean abs. error', 'MERRA-Flow mean CRPS', 'CRPS skill vs GEOS-FP', 'RMSE reduction'],
+               size=7.2)
+    export(fig, out, stem, dpi, subject)
+    return dict(stem=stem, numbers=numbers, hours=meta['n_hours'], every=meta.get('every'), members=meta['members'],
+                complete=meta['complete'], planned=len(meta['hours']), source=meta.get('source', 'maps_pass'),
+                block_km=None)
+
+
 # ----------------------------------------------------------------------------- driver
 
 def load_case(root, manifest, case_id):
@@ -1150,16 +1255,36 @@ def coarse_wet_fraction(root, manifest, case_id, threshold=1.):
         return float((f['coarse'][1] >= threshold).mean())
 
 
-def render_all(root, manifest, summary, case_ids, out, dpi=300, storm_path=None, subject=None, boundaries=None):
+def grid_spacing_km(root, manifest):
+    """Median great-circle spacing of the saved grid (km). The evaluator's dx_km_approx comes from the
+    archived cell-area field, which is not the 3-km geometric spacing, so it is used only as a fallback."""
+    item = manifest.get('saved_grid')
+    path = Path(root)/item['path'] if item else None
+    if not path or not path.is_file():
+        return None
+    with np.load(path, allow_pickle=False) as g:
+        lat, lon = np.deg2rad(g['lat'].astype('float64')), np.deg2rad(g['lon'].astype('float64'))
+    a = np.sin((lat[:, 1:]-lat[:, :-1])/2)**2+np.cos(lat[:, 1:])*np.cos(lat[:, :-1])*np.sin((lon[:, 1:]-lon[:, :-1])/2)**2
+    return float(np.median(2*6371.*np.arcsin(np.sqrt(a))))
+
+
+def render_all(root, manifest, summary, case_ids, out, dpi=300, storm_path=None, subject=None, boundaries=None,
+               maps_path=None):
     """Draw every paper figure available from saved data. Returns a dict of figure metadata."""
     style(); out = Path(out); out.mkdir(parents=True, exist_ok=True)
     boundaries = load_boundaries() if boundaries is None else boundaries
     figs = {}
     figs['scorecard'] = fig_scorecard(summary, out, dpi, 'fig_scorecard', subject)
-    figs['spectra'] = fig_spectra(summary, out, dpi, 'fig_spectra', subject)
-    figs['precip'] = fig_precip(summary, out, dpi, 'fig_precip_skill', subject)
+    dx_km = grid_spacing_km(root, manifest)
+    figs['grid_km'] = dx_km
+    figs['spectra'] = fig_spectra(summary, out, dpi, 'fig_spectra', subject, dx_km=dx_km)
+    figs['precip'] = fig_precip(summary, out, dpi, 'fig_precip_skill', subject, dx_km=dx_km)
     figs['temporal'] = fig_temporal(manifest, case_ids, Path(root)/'cases', out, dpi, 'fig_temporal', subject)
     figs['calibration'] = fig_calibration(summary, out, dpi, 'fig_calibration', subject)
+    figs['skill_maps'] = None
+    if maps_path:
+        figs['skill_maps'] = fig_skill_maps(maps_path, out, dpi, 'fig_skill_maps', subject, boundaries)
+        figs['skill_maps']['block_km'] = 4*float(dx_km or summary.get('dx_km_approx') or 3.)
     maps = [c for c in manifest['settings'].get('saved_cases', []) if c in case_ids]
     figs['cases'] = []
     if maps:
@@ -1177,7 +1302,7 @@ def render_all(root, manifest, summary, case_ids, out, dpi=300, storm_path=None,
                 item['zoom'] = fig_zoom(case, geo, boxes, out, dpi, f'fig_case_{tag}_zoom', subject)
                 item['ensemble'] = fig_ensemble(case, geo, bB, out, dpi, f'fig_case_{tag}_ensemble', subject=subject)
                 item['gain'] = fig_gain(case, geo, out, dpi, f'fig_case_{tag}_gain', subject)
-                item['gain']['block_km'] = 4*float(summary.get('dx_km_approx') or 3.)
+                item['gain']['block_km'] = 4*float(dx_km or summary.get('dx_km_approx') or 3.)
             figs['cases'].append(item)
             del case
     figs['storm'] = None

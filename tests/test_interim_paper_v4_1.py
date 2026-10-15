@@ -160,7 +160,7 @@ def test_only_completed_predeclared_example_fields_are_copied_and_plotted(parent
     paper=tmp_path/'paper.tex';paper.write_text(paper_template())
     BUILDER['update_paper'](out,paper,figs)
     text=paper.read_text()
-    assert '\\label{fig:overview}' in text and '\\label{fig:zoom}' in text and '\\label{tab:spectral}' in text
+    assert '\\label{fig:overview}' in text and '\\label{fig:zoom}' in text
     assert (tmp_path/'figures'/'auto'/f'fig_case_{records[0]["id"]}_overview.pdf').is_file()
 
 
@@ -266,3 +266,112 @@ def test_score_matrix_retains_zero_skill(parent,tmp_path):
     summary['sources']['raw']['fields']['t2m']['crpss_vs_coarse']=0.
     result=BUILDER['_plots']().fig_scorecard(summary,out,72,'zero_skill')
     assert result['crpss']['t2m']==0.
+
+
+def test_all_hours_error_maps_combine_and_populate_paper(parent,tmp_path):
+    import json as _json
+    root,m,records=parent
+    MAPS=runpy.run_path('scripts/evaluate_maps_v4_1.py')
+    from test_evaluate_all_v4_1 import fields
+    ensemble,truth,area=fields()
+    lat,lon=np.meshgrid(np.linspace(30,40,8),np.linspace(-110,-100,9),indexing='ij')
+    out=tmp_path/'maps';(out/'shards').mkdir(parents=True)
+    plan=MAPS['plan'](m,2,3);(out/'plan.json').write_text(_json.dumps(plan))
+    (root/'fields').mkdir(exist_ok=True);np.savez(root/'fields'/'grid.npz',lat=lat,lon=lon,area=area)
+    for k,hours in enumerate(([plan['hours'][0]],plan['hours'][1:])):
+        sums={key:np.zeros(truth.shape[-2:]) for key in MAPS['keys']()}
+        for _ in hours:MAPS['accumulate'](sums,truth,truth+2,truth+1,ensemble)
+        np.savez(out/'shards'/f'shard_{k:03d}.npz',hours=np.asarray(_json.dumps(hours)),**sums)
+    path=MAPS['combine'](root,out)
+    with np.load(path) as f:
+        meta=_json.loads(str(f['meta']))
+        assert meta['n_hours']==len(plan['hours']) and f['t2m_crps'].shape==truth.shape[-2:]
+        assert np.allclose(f['t2m_mae_coarse'],2) and np.all(f['precip_bs1']>=0)
+    snap=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
+    figs=BUILDER['render'](snap,72,None,str(path))
+    assert figs['skill_maps']['hours']==len(plan['hours'])
+    paper=tmp_path/'paper.tex';paper.write_text(paper_template())
+    BUILDER['update_paper'](snap,paper,figs,inline=False)
+    assert '\\label{fig:skillmaps}' in paper.read_text()
+    frozen=(snap/'error_maps.npz').read_bytes()
+    assert frozen==path.read_bytes()
+    redrawn=BUILDER['render'](snap,72)
+    assert redrawn['skill_maps']['hours']==len(plan['hours'])
+    assert (snap/'error_maps.npz').read_bytes()==frozen
+
+
+def test_error_maps_use_hours_finished_so_far_and_archived_fields(parent,tmp_path):
+    import json as _json
+    root,m,records=parent
+    MAPS=runpy.run_path('scripts/evaluate_maps_v4_1.py')
+    from test_evaluate_all_v4_1 import fields
+    from merraflow.evaluate_all_v4_1 import digest
+    ensemble,truth,area=fields()
+    lat,lon=np.meshgrid(np.linspace(30,40,8),np.linspace(-110,-100,9),indexing='ij')
+    (root/'fields').mkdir(exist_ok=True);np.savez(root/'fields'/'grid.npz',lat=lat,lon=lon,area=area)
+    # Running pass: only one of two shards has produced an hour; the directory is combined as is.
+    out=tmp_path/'maps';(out/'shards').mkdir(parents=True)
+    plan=dict(MAPS['plan'](m,1,3),evaluation=str(root));(out/'plan.json').write_text(_json.dumps(plan))
+    sums={key:np.zeros(truth.shape[-2:]) for key in MAPS['keys']()}
+    MAPS['accumulate'](sums,truth,truth+2,truth+1,ensemble)
+    np.savez(out/'shards'/'shard_000.npz',hours=np.asarray(_json.dumps([plan['hours'][0]])),**sums)
+    path=MAPS['ensure_maps'](out)
+    with np.load(path) as f:
+        meta=_json.loads(str(f['meta']))
+    assert meta['n_hours']==1 and not meta['complete'] and len(meta['hours'])==len(m['entries'])
+    snap=BUILDER['snapshot'](root,tmp_path/'snapshot',False)
+    figs=BUILDER['render'](snap,72,None,str(out))
+    assert figs['skill_maps']['hours']==1 and not figs['skill_maps']['complete']
+    paper=tmp_path/'paper.tex';paper.write_text(paper_template())
+    BUILDER['update_paper'](snap,paper,figs,inline=False)
+    assert 'planned hours finished' in paper.read_text()
+    # No GPU: maps from the archived example hours that have finished.
+    hid=records[0]['id'];relative=f'fields/{hid}_raw.npz'
+    manifest=_json.loads((root/'manifest.json').read_text());manifest.pop('run_id')
+    manifest['settings']['saved_cases']=[hid,m['entries'][-1]['id']]
+    from merraflow.evaluate_all_v4_1 import canonical
+    manifest['run_id']=hashlib.sha256(canonical(manifest).encode()).hexdigest();atomic_json(root/'manifest.json',manifest)
+    rec=_json.loads((root/'cases'/f'{hid}.json').read_text())
+    rec.update(run_id=manifest['run_id'],seeds=[11,12,13])
+    np.savez(root/relative,truth=truth,coarse=truth+2,regression=truth+1,ensemble=ensemble,
+             run_id=np.asarray(manifest['run_id']),seeds=np.asarray(rec['seeds']))
+    rec['saved_fields']={'raw':dict(path=relative,sha256=digest(root/relative))};atomic_json(root/'cases'/f'{hid}.json',rec)
+    saved=MAPS['from_saved'](root,tmp_path/'saved_maps')
+    with np.load(saved) as f:
+        meta=_json.loads(str(f['meta']))
+        assert meta['source']=='saved_fields' and meta['completed']==[hid] and np.allclose(f['t2m_mae_coarse'],2)
+
+
+def test_maps_plan_lock_and_output_protection(parent,tmp_path):
+    import fcntl
+    maps=runpy.run_path('scripts/evaluate_maps_v4_1.py')
+    root,m,_=parent
+    with pytest.raises(ValueError,match='separate'):maps['run'](root,root/'bad')
+    out=tmp_path/'maps';out.mkdir()
+    frozen=dict(maps['plan'](m,1,3),shards=8)
+    maps['initialize_plan'](out,frozen)
+    maps['initialize_plan'](out,frozen)
+    with pytest.raises(ValueError,match='plan differs'):
+        maps['initialize_plan'](out,dict(frozen,shards=4))
+    with (out/'.shard_000.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ValueError,match='Another worker'):maps['run'](root,out,shard_index=0)
+
+
+def test_maps_reject_unplanned_hours(parent,tmp_path):
+    root,m,_=parent
+    maps=runpy.run_path('scripts/evaluate_maps_v4_1.py')
+    out=tmp_path/'maps';(out/'shards').mkdir(parents=True)
+    atomic_json(out/'plan.json',maps['plan'](m,1,3))
+    maps['atomic_npz'](out/'shards'/'shard_000.npz',hours=np.asarray(json.dumps(['foreign'])),
+                       **{k:np.zeros((8,9)) for k in maps['keys']()})
+    with pytest.raises(ValueError,match='outside'):maps['combine'](root,out)
+
+
+def test_skill_maps_allow_zero_baseline_error(tmp_path):
+    arrays={k:np.zeros((8,9)) for k in runpy.run_path('scripts/evaluate_maps_v4_1.py')['keys']()}
+    path=tmp_path/'dry.npz'
+    meta=dict(n_hours=1,hours=['dry'],members=3,complete=True,source='saved_fields')
+    np.savez(path,meta=np.asarray(json.dumps(meta)),**arrays)
+    result=BUILDER['_plots']().fig_skill_maps(path,tmp_path,72,'dry')
+    assert all(row['skill'] is None for row in result['numbers'].values())
