@@ -38,9 +38,9 @@ Qualitative 24-hour storm forecast initialized at 2026-02-23 05:30 UTC. Each ani
 
 ## Workflow overview
 
-Figure 1 uses the actual **7 March 2026, 19:30 UTC** v4.1 diagnostic: epoch-243 EMA weights, eight members, 64 Heun steps, and spectral post-processing. It shows native GEOS-FP (~25 km), the high-resolution **GEOS replay** dynamical reference on the nominal 2–3 km HWT grid, and **generated model predictions**. No HRRR fields are used. Original storm-map extents, color scales, and map detail are preserved.
+Figure 1 uses the actual **7 March 2026, 19:30 UTC** v4.1 diagnostic: epoch-243 EMA weights, eight members, 64 Heun steps, and spectral post-processing. It shows native GEOS-FP (~25 km), the high-resolution **GEOS replay** dynamical reference on the nominal 2–3 km HWT grid, and **generated model predictions**. No HRRR fields are used. The temperature comparison uses the same threefold tighter crop of both original map panels, with unchanged source cells and temperature scale.
 
-The supplied four-panel design is preserved: **A**, coarse temperature and wind inputs; **B**, matched coarse/high-resolution T2m zooms; **C**, six generated output fields; **D**, regression-to-generation, the U-Net diagram, halo-supervised loss and tiled ensemble sampling. The paper and README use the same full figure, with no separate compact redesign. The archived input wind map shows the zonal component, which is one of the actual model channels. This selected event illustrates the method; it does not establish complete-test skill.
+The supplied four-panel design is preserved: **A**, coarse temperature and wind inputs; **B**, matched coarse/high-resolution T2m zooms enlarged threefold to expose the native cell-size difference; **C**, six generated output fields; **D**, regression-to-generation, the U-Net diagram, halo-supervised loss and tiled ensemble sampling. The paper and README use the same full figure, with no separate compact redesign. The archived input wind map shows the zonal component, which is one of the actual model channels. This selected event illustrates the method; it does not establish complete-test skill.
 
 Regenerate the figure from the original saved vector map PDFs, without inference, source weather archives, or verification:
 

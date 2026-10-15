@@ -19,9 +19,12 @@ from .evaluate_all_v4_1 import atomic_json,digest
 
 INK,NAVY,BLUE,TEAL,MUTED,LINE='#17354c','#0b3558','#1769aa','#118c91','#60788b','#bacbd8'
 FIELDS=('t2m','precip','ps','u10m','v10m','q2m')
+# Same normalized geographic window in both archived axes: 3x linear zoom.
+# Coordinates are fractions from the upper-left of the original map panel.
+ZOOM_WINDOW=(1/3, .55-1/6, 2/3, .55+1/6)
 
 
-def source_clip(page,column):
+def source_clip(page,column,window=None):
     """Locate original equal-extent map axes; exclude old headings and scale labels."""
     images=[i for i in page.get_image_info() if i['width']>100 and i['height']>100]
     if len(images)<4:raise ValueError('Expected four original map images')
@@ -31,7 +34,12 @@ def source_clip(page,column):
     if len(matches)!=1:raise ValueError(f'Cannot identify original panel: {labels[column]}')
     center=(matches[0].x0+matches[0].x1)/2
     width=first[2]-first[0]
-    return (center-width/2,first[1],center+width/2,first[3])
+    clip=(center-width/2,first[1],center+width/2,first[3])
+    if window is None:return clip
+    x0,y0,x1,y1=window
+    if not (0<=x0<x1<=1 and 0<=y0<y1<=1):raise ValueError('Crop must lie inside the source map')
+    height=clip[3]-clip[1]
+    return (clip[0]+x0*width,clip[1]+y0*height,clip[0]+x1*width,clip[1]+y1*height)
 
 
 def compose(base,output,placements,dpi):
@@ -39,16 +47,18 @@ def compose(base,output,placements,dpi):
     doc=pymupdf.open(base);page=doc[0];w,h=page.rect.width,page.rect.height
     opened={};records=[]
     try:
-        for source,column,bounds in placements:
+        for placement in placements:
+            source,column,bounds=placement[:3]
+            window=placement[3] if len(placement)>3 else None
             source=Path(source)
             if source not in opened:opened[source]=pymupdf.open(source)
             src=opened[source][0]
-            clip=(src.rect.width*.25,src.rect.height-68,src.rect.width*.78,src.rect.height) if column=='bar' else source_clip(src,column)
+            clip=(src.rect.width*.25,src.rect.height-68,src.rect.width*.78,src.rect.height) if column=='bar' else source_clip(src,column,window)
             x,y,dx,dy=bounds
             rect=pymupdf.Rect(x*w,(1-y-dy)*h,(x+dx)*w,(1-y)*h)
             page.show_pdf_page(rect,opened[source],0,clip=pymupdf.Rect(clip),keep_proportion=True)
             records.append(dict(source=str(source),source_sha256=digest(source),column=column,
-                                clip_points=list(clip),destination_fraction=list(bounds)))
+                                clip_points=list(clip),destination_fraction=list(bounds),map_window_fraction=window))
         path=Path(output);doc.save(path,garbage=4,deflate=True)
         pix=page.get_pixmap(matrix=pymupdf.Matrix(dpi/72,dpi/72),alpha=False)
         pix.save(path.with_suffix('.png'))
@@ -83,8 +93,8 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
         text(left+.012,.848,label,12,BLUE,weight='bold');text(left+.035,.848,title,10.5,weight='bold')
         fig.lines.append(plt.Line2D([left+.012,left+.217],[.830,.830],transform=fig.transFigure,color=BLUE,lw=1.3))
         text(left+.012,.807,sub,7.5,MUTED)
-    def image(source,col,bounds,title=None):
-        placements.append((source,col,bounds))
+    def image(source,col,bounds,title=None,window=None):
+        placements.append((source,col,bounds,window))
         if title:text(bounds[0],bounds[1]+bounds[3]+.008,title,8.2,weight='semibold')
     def bar(source,bounds):placements.append((source,'bar',bounds))
     text(.5,.961,'MERRA21C-ML: GENERATIVE CONUS DOWNSCALING',23,NAVY,ha='center',weight='bold')
@@ -100,10 +110,10 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     bar(sources['u10m'],(L+.015,.179,width-.030,.045))
     text(L+.016,.165,'Six weather fields at t − 1 h and t',9,weight='bold')
     text(L+.016,.135,'Local 192² patches + broad 576² context\nTerrain, land/sea, coordinates, cell area, time',8,linespacing=1.6)
-    L=lefts[1];frame(L,'B','SAME REGION, TWO GRIDS','Identical extent and color scale; no display interpolation')
-    image(zoom,0,(L+.018,.525,width-.036,.233),'~25 km: native cells')
+    L=lefts[1];frame(L,'B','SAME REGION, TWO GRIDS','3× closer: identical extent and scale; no interpolation')
+    image(zoom,0,(L+.018,.525,width-.036,.233),'~25 km: native cells',window=ZOOM_WINDOW)
     bar(zoom,(L+.018,.480,width-.036,.045))
-    image(zoom,1,(L+.018,.231,width-.036,.233),'~3 km: GEOS replay reference (HWT)')
+    image(zoom,1,(L+.018,.231,width-.036,.233),'~3 km: GEOS replay reference (HWT)',window=ZOOM_WINDOW)
     bar(zoom,(L+.018,.186,width-.036,.045))
     text(L+.018,.165,'Temporal pairing and training-only statistics',8.7,weight='bold')
     text(L+.018,.132,'States: midpoint | Rain: ¼ P₋₃₀ + ½ P₀ + ¼ P₊₃₀\nChronological splits with gaps; packed training data',7.5,linespacing=1.7)
@@ -148,7 +158,7 @@ def make(presentation='present_last_v4_1',case_id='20260307_1930',output='output
     text(L+.014,.104,'Raw / spectral: paired members, no retraining',7.8,TEAL,weight='bold')
     for i in range(3):arrow(lefts[i]+width+.001,.49,lefts[i+1]-.001,.49)
     text(.5,.054,f'Maps: native GEOS-FP, HWT dynamical GEOS replay reference and actual v4.1 predictions | {when} | {metadata["steps"]} Heun steps, {metadata["post"]}.',8,MUTED,ha='center')
-    text(.5,.030,'Temperature zooms share extent and scale. Original map panels are preserved; flow matching performs learned downscaling to the GEOS reference grid.',7.7,MUTED,ha='center')
+    text(.5,.030,'Temperature panels show the same 3× tighter crop with unchanged source cells and color scale; flow matching learns downscaling to the GEOS reference grid.',7.7,MUTED,ha='center')
     base=out/'layout_readme.pdf';fig.savefig(base,facecolor=fig.get_facecolor());plt.close(fig)
     records=compose(base,out/'fig01_workflow.pdf',placements,dpi)
     # Keep previous download names as aliases of the SAME supplied layout.
