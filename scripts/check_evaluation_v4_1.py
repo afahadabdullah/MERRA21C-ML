@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -107,15 +108,19 @@ def inspect(output, shards=None, verify_files=False, job_id=None, now=None):
         raise ValueError('Manifest has empty, duplicate, or invalid hour IDs')
     expected = set(ids)
     paths = {p.stem: p for p in (root / 'cases').glob('*.json')}
-    good, invalid, mtimes = set(), {}, []
+    good, invalid, mtimes, timings = set(), {}, [], []
     for entry in entries:
         path = paths.get(entry['id'])
         if path is None:
             continue
         try:
-            validate_case(path, manifest, entry, verify_files)
+            record = validate_case(path, manifest, entry, verify_files)
             mtimes.append(path.stat().st_mtime)
             good.add(entry['id'])
+            sample, total = record.get('sampling_seconds'), record.get('total_seconds')
+            if (isinstance(sample, (int, float)) and isinstance(total, (int, float))
+                    and math.isfinite(sample) and math.isfinite(total) and 0 <= sample <= total and total > 0):
+                timings.append((sample, total))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             invalid[entry['id']] = str(exc)
     missing = expected - paths.keys()
@@ -154,6 +159,13 @@ def inspect(output, shards=None, verify_files=False, job_id=None, now=None):
                   completed_last_hour=sum(now - 3600 <= t <= now for t in mtimes),
                   members=manifest['settings']['members'], steps=manifest['settings'].get('steps'),
                   post=manifest['settings']['post'])
+    if timings:
+        sampling = sum(t[0] for t in timings)
+        total = sum(t[1] for t in timings)
+        report['timing'] = dict(hours=len(timings), mean_total_seconds=total / len(timings),
+                              mean_sampling_seconds=sampling / len(timings),
+                              mean_other_seconds=(total - sampling) / len(timings),
+                              sampling_fraction=sampling / total)
     if shards:
         report['shards'] = [dict(shard=i, completed=sum(e['id'] in good for e in entries[i::shards]),
                                  expected=len(entries[i::shards])) for i in range(shards)]
@@ -180,6 +192,11 @@ def display(report, details=False):
         if age is not None:
             print(f'Newest completed hour saved {age / 60:.1f} minutes ago')
         print(f"Checks: {report['validation']}")
+        if report.get('timing'):
+            t = report['timing']
+            print(f"Mean per test hour ({t['hours']} saved records): {t['mean_total_seconds']/60:.1f} min total; "
+                  f"{t['mean_sampling_seconds']/60:.1f} min sampling ({100*t['sampling_fraction']:.0f}%); "
+                  f"{t['mean_other_seconds']/60:.1f} min preparation/scoring/filtering/I/O")
         if report.get('grid_error'):
             print(report['grid_error'])
         if details:

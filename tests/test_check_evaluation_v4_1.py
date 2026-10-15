@@ -113,3 +113,16 @@ def test_scheduler_is_read_only_and_reports_states(monkeypatch):
     assert [c[0] for c in calls] == ['squeue', 'sacct']
     assert status['queue_states'] == {'RUNNING': 1}
     assert status['accounting_states']['TIMEOUT'] == 1
+
+
+def test_timing_separates_sampling_from_other_work_and_ignores_missing_values(tmp_path):
+    m = run(tmp_path)
+    for i in range(3):
+        record = case(tmp_path, m, i)
+        if i < 2:
+            record.update(sampling_seconds=600, total_seconds=1800)
+            write(tmp_path/'cases'/f'{record["id"]}.json', record)
+    report = CHECKER['inspect'](tmp_path)
+    assert report['completed'] == 3
+    assert report['timing'] == dict(hours=2, mean_total_seconds=1800, mean_sampling_seconds=600,
+                                     mean_other_seconds=1200, sampling_fraction=1/3)

@@ -45,6 +45,24 @@ Add `--watch 60` to refresh every minute, `--json` for machine-readable snapshot
 
 `hours_saved` means every expected case record passed the selected checks; `aggregated` also requires a complete `summary.json` for the same run. Neither status proves the scheduler job is currently running. Missing `manifest.json` reports initialization pending/wrong path, with an unknown total rather than a misleading 0% claim. One-shot exit codes are 0 for a readable snapshot (including partial progress), 1 for invalid/unexpected records or a bad saved grid hash, and 2 for a read/manifest error. Ctrl-C stops watch mode.
 
+## Increase parallelism on the existing array
+
+The launcher defaults to `SHARDS=64 MAX_PARALLEL=4`: 64 disjoint hour assignments, with at most four GPU workers running at once. `MAX_PARALLEL` affects submission only. To raise an existing array's cap without restarting workers or changing shard assignments, use its **parent array job ID**:
+
+```bash
+scontrol show job ARRAY_JOB_ID
+scontrol update JobId=ARRAY_JOB_ID ArrayTaskThrottle=16
+squeue -r -j ARRAY_JOB_ID -o "%.20i %.10T %.35R"
+```
+
+Replace `ARRAY_JOB_ID` with the actual parent ID and confirm the job is the intended `eval_all_v41` array before updating. Slurm supports updating `ArrayTaskThrottle` on an existing array ([scontrol reference](https://slurm.schedmd.com/scontrol.html)). Increasing this cap leaves the frozen checkpoint/settings, completed records, live workers, shard assignment, and finalizer dependency in place. Availability, account/QoS GPU limits, and shared storage throughput determine how many extra tasks can actually start and the resulting speedup. Queue reasons distinguish an array throttle from resource/account limits. Start with 8 or 16 concurrent tasks and compare the observed completion rate.
+
+At eight completed test hours per wall-clock hour with four workers, 663 remaining hours take about 83 hours. Ideal linear scaling gives about 41 hours at eight workers or 21 hours at sixteen, assuming all workers are scheduled and throughput per worker holds. These are estimates from a recent rate, not measured guarantees. Increasing workers reduces elapsed time; it does not reduce total GPU work and can increase contention.
+
+Do not submit a second overlapping array into the same output while this array is live: the evaluator deliberately rejects competing locks. To change `SHARDS`, wait until the old array stops and use the documented resume procedure. Keep the frozen 16 members and 64 integration steps for this run; changing them would define a different experiment. The worker's runtime tile batch (`BATCH`, default 8) and CPU threads (`THREADS`, default 4) can be benchmarked for a later resume, but they are not changed by increasing the array throttle.
+
+The checker also reports mean saved-hour total time versus ensemble sampling time. The remainder includes input preparation, regression, verification, filtering, and I/O; it is not purely CPU time. If sampling dominates, test GPU utilization and tile-batch memory headroom. If the remainder dominates, investigate scoring, data reads, and output compression before adding more GPUs. These recorded timings exclude job startup and unsaved/interrupted work, and do not identify a bottleneck by themselves.
+
 ## Resume evaluation
 
 Resume after interrupted/failed array tasks:
