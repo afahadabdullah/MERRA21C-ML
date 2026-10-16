@@ -65,9 +65,13 @@ VARS = {
     'u10m': dict(c=3, title='10-m zonal wind', unit=r'm s$^{-1}$', offset=0., factor=1.),
     'v10m': dict(c=4, title='10-m meridional wind', unit=r'm s$^{-1}$', offset=0., factor=1.),
 }
-RAIN_LEVELS = np.array([.1, .25, .5, 1, 2, 4, 8, 16, 32, 64])
+RAIN_LEVELS = np.arange(0., 55., 5.)
 RAIN_COLORS = ['#d7ecfb', '#a6d3f2', '#5fb0e5', '#2c7fc9', '#1f9e5a', '#7cc644', '#f2d43a', '#f29434',
                '#de3b2f', '#a8166f']
+# Display-only neutral bands, in physical display units or percentage points.
+GAIN_WHITE_BAND = dict(t2m=.1, wind_speed=.1, precip=.1, q2m=.05)
+SKILL_WHITE_BAND = 5.
+SKILL_COLOR_LIMIT = 80.
 
 
 # ----------------------------------------------------------------------------- style / export
@@ -108,8 +112,27 @@ def letter(ax, i, text=None, inside=True, color=INK):
 
 
 def rain_cmap():
-    cmap = mcolors.ListedColormap(RAIN_COLORS[:len(RAIN_LEVELS)-1]).with_extremes(under='white', over=RAIN_COLORS[-1])
-    return cmap, mcolors.BoundaryNorm(RAIN_LEVELS, cmap.N)
+    cmap = mcolors.LinearSegmentedColormap.from_list('rain_linear', ['white', *RAIN_COLORS])
+    return cmap.with_extremes(under='white', over=RAIN_COLORS[-1]), mcolors.Normalize(RAIN_LEVELS[0], RAIN_LEVELS[-1])
+
+
+def precip_error_scale(limit, signed=False):
+    """Linear precipitation error/difference range with evenly spaced 5-mm/h ticks."""
+    maximum = 5.*max(1, np.ceil(limit/5.))
+    minimum = -maximum if signed else 0.
+    return mcolors.Normalize(minimum, maximum), np.arange(minimum, maximum+2.5, 5.)
+
+
+def difference_scale(vmin, vmax, white_band, cmap='RdBu'):
+    """Keep a linear numeric range; paint small signed changes white without altering data."""
+    norm = mcolors.Normalize(vmin, vmax)
+    base = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    values = np.linspace(vmin, vmax, 4097)
+    colors = base(np.interp(values, [vmin, 0., vmax], [0., .5, 1.]))
+    # Include the LUT cell touching each boundary so +/-white_band also stays white.
+    colors[np.abs(values) <= white_band+(vmax-vmin)/4096.] = (1., 1., 1., 1.)
+    result = mcolors.ListedColormap(colors, name='white_band_'+base.name)
+    return result.with_extremes(bad=base.get_bad(), under=base.get_under(), over=base.get_over()), norm
 
 
 def scale_for(name, reference):
@@ -514,7 +537,7 @@ def fig_overview(case, geo, boxes, out, dpi, stem, subject=None, rows=OVERVIEW_R
                     mark_box(axes[r, c], b, label)
         row_label(axes[r, 0], VARS[name]['title'])
         colorbar(fig, im, caxes[r], VARS[name]['unit'], extend,
-                 ticks=RAIN_LEVELS[[0, 3, 5, 7, 9]] if name == 'precip' else None)
+                 ticks=RAIN_LEVELS if name == 'precip' else None)
     col_titles(axes, [NATIVE_LABEL, 'MERRA-Flow (member 1, ~3 km)',
                       'GEOS-CAM reference (~3 km)'])
     export(fig, out, stem, dpi, subject)
@@ -546,7 +569,7 @@ def fig_zoom(case, geo, boxes, out, dpi, stem, subject=None):
         if not case.has_native(name):
             tag(axes[r, 0], 'cell means of input')
         colorbar(fig, im, caxes[r], VARS[name]['unit'], extend,
-                 ticks=RAIN_LEVELS[[0, 3, 5, 7, 9]] if name == 'precip' else None)
+                 ticks=RAIN_LEVELS if name == 'precip' else None)
     col_titles(axes, titles, size=7.0)
     export(fig, out, stem, dpi, subject)
     return dict(stem=stem)
@@ -577,7 +600,8 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
     letter(axes[1, 1], 5)
     spread = case.get(name, 'spread')
     smax = max(float(np.nanquantile(spread[box[0]:box[1], box[2]:box[3]], .995)), 1e-6)
-    im_s = draw_map(axes[1, 2], spread, spread_cmap(), mcolors.Normalize(0, smax), box=box, geo=geo)
+    spread_norm, spread_ticks = precip_error_scale(smax) if name == 'precip' else (mcolors.Normalize(0, smax), None)
+    im_s = draw_map(axes[1, 2], spread, spread_cmap(), spread_norm, box=box, geo=geo)
     axes[1, 2].set_title('Ensemble spread (s.d.)', fontsize=7.4, pad=3, weight='bold'); letter(axes[1, 2], 6)
     c = VARS[name]['c']
     prob = (channel(case.ensemble, c)*VARS[name]['factor']+VARS[name]['offset'] >= threshold).mean(0)
@@ -589,8 +613,8 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
     axes[1, 3].set_title(f'P(rate ≥ {threshold:g} mm h$^{{-1}}$)', fontsize=7.4, pad=3, weight='bold')
     letter(axes[1, 3], 7)
     # Horizontal colour bars under the bottom row.
-    for ax, im, lab, ticks in ((axes[1, 0], im_ref, VARS[name]['unit'], RAIN_LEVELS[[0, 3, 5, 7, 9]] if name == 'precip' else None),
-                               (axes[1, 2], im_s, f'Spread ({VARS[name]["unit"]})', None),
+    for ax, im, lab, ticks in ((axes[1, 0], im_ref, VARS[name]['unit'], RAIN_LEVELS if name == 'precip' else None),
+                               (axes[1, 2], im_s, f'Spread ({VARS[name]["unit"]})', spread_ticks),
                                (axes[1, 3], im_p, 'Probability (red: reference ≥ threshold)', [0, .25, .5, .75, 1])):
         pos = ax.get_position(); cax = fig.add_axes([pos.x0+.1*pos.width, pos.y0-.05, .8*pos.width, .013])
         colorbar(fig, im, cax, lab, 'max' if ax is axes[1, 0] else 'neither', ticks, 'horizontal')
@@ -629,18 +653,20 @@ def fig_gain(case, geo, out, dpi, stem, subject=None, k=4):
                                                  max(np.sum(case.area*fine_wet), 1e-12)))
         numbers[name]['skill'] = 1-numbers[name]['crps']/numbers[name]['coarse_mae'] if numbers[name]['coarse_mae'] > 0 else None
         vmax = max(float(np.nanquantile(ce, .99)), 1e-6)
-        n1 = mcolors.Normalize(0, vmax)
+        n1, error_ticks = precip_error_scale(vmax) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], coarse_err, error_cmap(), n1, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), n1, geo=geo, k=k)
         gm = max(float(np.nanquantile(np.abs(g), .99)), 1e-6)
-        im3 = draw_map(axes[r, 2], gain, 'RdBu', mcolors.TwoSlopeNorm(0, -gm, gm), geo=geo, k=k)
+        gain_norm, gain_ticks = precip_error_scale(gm, signed=True) if name == 'precip' else (mcolors.Normalize(-gm, gm), None)
+        gain_cmap, gain_norm = difference_scale(gain_norm.vmin, gain_norm.vmax, GAIN_WHITE_BAND[name])
+        im3 = draw_map(axes[r, 2], gain, gain_cmap, gain_norm, geo=geo, k=k)
         for cc in range(3):
             letter(axes[r, cc], 3*r+cc)
         row_label(axes[r, 0], VARS[name]['title'])
         pos = axes[r, 1].get_position()
         cax = fig.add_axes([pos.x1+.008, pos.y0+.06*pos.height, .012, .88*pos.height])
-        colorbar(fig, im1, cax, VARS[name]['unit'], 'max')
-        colorbar(fig, im3, caxes[r], 'Gain ' + VARS[name]['unit'], 'both')
+        colorbar(fig, im1, cax, VARS[name]['unit'], 'max', error_ticks)
+        colorbar(fig, im3, caxes[r], 'Gain ' + VARS[name]['unit'], 'both', gain_ticks)
         sk = numbers[name]['skill']
         axes[r, 2].text(.98, .04, f'CRPS skill {100*sk:.0f}%' if sk is not None else '', transform=axes[r, 2].transAxes,
                         ha='right', va='bottom', fontsize=6.2, color=INK,
@@ -668,10 +694,9 @@ def fig_scorecard(summary, out, dpi, stem, subject=None):
     data = np.c_[crpss, rmse]
     fig = plt.figure(figsize=(7.2, 2.7))
     ax = fig.add_axes([.165, .2, .50, .66])
-    lim = max(np.nanmax(np.abs(data)), 5)
     cmap = mcolors.LinearSegmentedColormap.from_list('skill', ['#b2182b', '#ef8a62', '#fbe3d6', '#f7f7f7',
                                                                '#d1e5f0', '#67a9cf', '#2166ac', '#0b3b70'])
-    norm = mcolors.TwoSlopeNorm(0, -min(lim, 40), lim)
+    cmap, norm = difference_scale(-SKILL_COLOR_LIMIT, SKILL_COLOR_LIMIT, SKILL_WHITE_BAND, cmap)
     im = ax.imshow(data, cmap=cmap, norm=norm, aspect='auto')
     for i in range(data.shape[0]):
         for j in range(data.shape[1]):
@@ -798,7 +823,9 @@ def fig_precip(summary, out, dpi, stem, subject=None, dx_km=None):
         if v is not None:
             ax.plot(xs, v, color=COLORS[m], marker='o', ms=2.6, lw=1.1, ls='--' if m == 'spectral' else '-')
             tails[m] = v
-    ax.set_yscale('symlog', linthresh=.1); ax.set_xticks(xs, [f'{100*p:g}' for p in q])
+    ax.set_yscale('linear'); ax.set_ylim(0, 5.*max(1, np.ceil(ax.get_ylim()[1]/5.)))
+    ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(5))
+    ax.set_xticks(xs, [f'{100*p:g}' for p in q])
     ax.set_xlabel('Pixel percentile'); ax.set_ylabel(r'Rate (mm h$^{-1}$)')
     ax.set_title('Intensity distribution', fontsize=7.8, weight='bold', pad=3)
     ax.grid(color=GRID, lw=.4); ax.text(.03, .93, 'd', transform=ax.transAxes, fontsize=9, weight='bold', va='top')
@@ -846,10 +873,9 @@ def fig_temporal(manifest, ids, cases_dir, out, dpi, stem, subject=None):
     cov.set_yticks([]); cov.spines['left'].set_visible(False); cov.tick_params(axis='x', labelbottom=False, length=0)
     cov.legend(loc='upper right', bbox_to_anchor=(1.0, 1.55), ncol=2, fontsize=6, handlelength=1, handleheight=.7)
     cov.text(-.135, 1.0, 'a', transform=cov.transAxes, fontsize=9, weight='bold', va='bottom')
-    finite = np.abs(grid[np.isfinite(grid)])
-    lim = max(float(np.quantile(finite, .98)) if finite.size else 10, 5)
     cmap = mcolors.LinearSegmentedColormap.from_list('skill', ['#b2182b', '#f4a582', '#f7f7f7', '#92c5de', '#2166ac', '#0b3b70'])
-    im = hm.imshow(grid, aspect='auto', cmap=cmap, norm=mcolors.TwoSlopeNorm(0, -lim/2, lim), interpolation='nearest')
+    cmap, norm = difference_scale(-SKILL_COLOR_LIMIT, SKILL_COLOR_LIMIT, SKILL_WHITE_BAND, cmap)
+    im = hm.imshow(grid, aspect='auto', cmap=cmap, norm=norm, interpolation='nearest')
     hm.set_yticks(range(len(FIELDS)), SHORT, fontsize=6.6)
     step = max(1, int(np.ceil(len(days)/9)))
     hm.set_xticks(x[::step], [str(d)[5:].replace('-', '/') for d in days[::step]], fontsize=6.2)
@@ -1063,7 +1089,7 @@ def fig_storm_evolution(storm, boundaries, out, dpi, stem, subject=None, n=4):
     pos = axes[-1, 0].get_position(); last = axes[-1, -1].get_position()
     cax = fig.add_axes([pos.x0+.15*(last.x1-pos.x0), pos.y0-.045, .7*(last.x1-pos.x0), .012])
     colorbar(fig, im, cax, r'Precipitation rate (mm h$^{-1}$); contours: sea-level pressure every 4 hPa', 'max',
-             RAIN_LEVELS[[0, 2, 3, 4, 5, 6, 7, 8, 9]], 'horizontal')
+             RAIN_LEVELS, 'horizontal')
     export(fig, out, stem, dpi, subject)
     return dict(stem=stem, hours=numbers)
 
@@ -1146,10 +1172,10 @@ def fig_storm_totals(storm, boundaries, out, dpi, stem, subject=None):
         return None
     acc, lat, lon = res
     geo = Geo(lat, lon, boundaries)
-    levels = np.array([1, 2, 5, 10, 15, 20, 30, 40, 60, 80, 100, 150])
+    levels = np.arange(0., 175., 25.)
     cmap = mcolors.ListedColormap(['#e0f0fa', '#b3dbf1', '#7cc0e6', '#3f9ad6', '#2a6fb5', '#2c9c5c', '#8cc63f',
                                    '#f2d43a', '#f29434', '#de3b2f', '#a8166f']).with_extremes(under='white', over='#5b0f4a')
-    norm = mcolors.BoundaryNorm(levels, cmap.N)
+    norm = mcolors.Normalize(levels[0], levels[-1])
     panels = [(acc['geos'], NATIVE_LABEL), (acc['member'][0], 'MERRA-Flow member 1'),
               (acc['member'].mean(0), f'Ensemble mean ({storm.members})'), (acc['truth'], 'Reference')]
     h, w = lat.shape
@@ -1157,7 +1183,7 @@ def fig_storm_totals(storm, boundaries, out, dpi, stem, subject=None):
     for c, (a, t) in enumerate(panels):
         im = draw_map(axes[0, c], a, cmap, norm, geo=geo); letter(axes[0, c], c)
         axes[0, c].set_title(t, fontsize=7.2, pad=3, weight='bold')
-    colorbar(fig, im, caxes[0], f'{len(storm.times)}-h total (mm)', 'max', levels[[0, 2, 3, 5, 7, 9, 11]])
+    colorbar(fig, im, caxes[0], f'{len(storm.times)}-h total (mm)', 'max', levels)
     export(fig, out, stem, dpi, subject)
     return dict(stem=stem, max=dict(geos=float(acc['geos'].max()), member=float(acc['member'][0].max()),
                                     truth=float(acc['truth'].max())))
@@ -1179,7 +1205,7 @@ def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4
     skill_cmap = mcolors.LinearSegmentedColormap.from_list('sk', ['#8e0e2c', '#d6604d', '#f4a582', '#f7f7f7',
                                                                   '#92c5de', '#4393c3', '#2166ac', '#0b3b70'])
     skill_cmap = skill_cmap.with_extremes(bad='#e6e8eb')
-    skill_norm = mcolors.TwoSlopeNorm(0, -50, 80)
+    skill_cmap, skill_norm = difference_scale(-SKILL_COLOR_LIMIT, SKILL_COLOR_LIMIT, SKILL_WHITE_BAND, skill_cmap)
     short = dict(t2m='Temperature', wind_speed='Wind speed', q2m='Humidity', precip='Precipitation')
     numbers = {}
     a = block(area, k)
@@ -1205,7 +1231,7 @@ def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4
             rmse_reduction=relative(np.sqrt(np.sum(data[f'{name}_se_mean']*area)),
                                     np.sqrt(np.sum(data[f'{name}_se_coarse']*area))))
         vmax = max(float(np.nanquantile(bm, .99)), 1e-9)
-        en = mcolors.Normalize(0, vmax)
+        en, error_ticks = precip_error_scale(vmax) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], mae, error_cmap(), en, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), en, geo=geo, k=k)
         im3 = axes[r, 2].imshow(skill, origin='lower', cmap=skill_cmap, norm=skill_norm, interpolation='nearest',
@@ -1225,8 +1251,8 @@ def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4
         row_label(axes[r, 0], short[name])
         pos = axes[r, 1].get_position()
         cax = fig.add_axes([pos.x1+.008, pos.y0+.06*pos.height, .012, .88*pos.height])
-        colorbar(fig, im1, cax, VARS[name]['unit'], 'max')
-        colorbar(fig, im3, caxes[r], 'Skill (%)', 'both', ticks=[-50, -25, 0, 25, 50, 80])
+        colorbar(fig, im1, cax, VARS[name]['unit'], 'max', error_ticks)
+        colorbar(fig, im3, caxes[r], 'Skill (%)', 'both', ticks=np.arange(-SKILL_COLOR_LIMIT, SKILL_COLOR_LIMIT+1, 20))
         score = numbers[name]['skill']
         axes[r, 2].text(.98, .04, f"{100*score:.0f}%" if score is not None else 'undefined', transform=axes[r, 2].transAxes, ha='right',
                         va='bottom', fontsize=6.4, color=INK, zorder=20,
