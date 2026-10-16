@@ -19,15 +19,55 @@ def plots():
 
 
 def test_precipitation_scales_have_linear_five_unit_intervals(plots):
-    cmap, norm = plots.rain_cmap()
+    cmap, norm = plots.rain_cmap([0, 12.3])
+    ticks = plots.precip_ticks(norm)
     assert type(norm) is colors.Normalize
-    np.testing.assert_allclose(np.diff(norm(plots.RAIN_LEVELS)), .1)
+    assert norm.vmax == 15
+    np.testing.assert_allclose(np.diff(ticks), 5)
+    np.testing.assert_allclose(np.diff(norm(ticks)), 1/3)
     np.testing.assert_allclose(cmap(norm(0)), [1, 1, 1, 1])
     for signed in (False, True):
         norm, ticks = plots.precip_error_scale(12.3, signed)
         np.testing.assert_allclose(np.diff(ticks), 5)
         np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
         assert norm.vmax >= 12.3 and (norm.vmin == -norm.vmax if signed else norm.vmin == 0)
+
+
+@pytest.mark.parametrize('peak', [0., 2.4, 38.2, 76.2, 428.1])
+def test_precipitation_max_adapts_without_clipping_or_nonlinearity(plots, peak):
+    values = np.array([0., np.nan, peak, np.inf])
+    cmap, norm = plots.rain_cmap(values)
+    ticks = plots.precip_ticks(norm)
+    assert norm.vmin == 0 and norm.vmax >= peak and norm.vmax > 0
+    np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
+    np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
+    assert ticks[-1] == norm.vmax
+    if peak == 0:assert norm.vmax == 5
+    if peak > 50:assert norm.vmax > 50
+
+
+def test_ensemble_rain_scale_uses_all_displayed_panels_and_only_the_crop(plots, monkeypatch, tmp_path):
+    truth = np.zeros((12, 12));truth[3:8, 3:8] = 6
+    ensemble = np.stack([truth+1, truth+2, truth+3, truth+4])
+    ensemble[1, 5, 5] = 76.2
+    ensemble[:, 0, 0] = 5000  # Outside the plotted crop; must not dilute the displayed colors.
+    arrays = dict(truth=truth, native=truth/2, coarse=truth/2,
+                  mean=ensemble.mean(0), spread=ensemble.std(0))
+    channels = np.zeros((4, 6, 12, 12));channels[:, 1] = ensemble
+    case = SimpleNamespace(members=4, ensemble=channels,
+        get=lambda name, which, m=0: ensemble[m] if which == 'member' else arrays[which],
+        native_cells=lambda name: None)
+    captured = []
+    monkeypatch.setattr(plots, 'export', lambda fig, *args, **kwargs: captured.append(fig))
+    plots.fig_ensemble(case, None, (2, 10, 2, 10), tmp_path, 72, 'ensemble')
+    try:
+        images = [ax.images[0] for ax in captured[0].axes if ax.images]
+        for image in images[:6]:
+            assert image.norm.vmin == 0 and image.norm.vmax == 80
+            assert np.max(image.get_array()) <= image.norm.vmax
+        assert images[-1].norm.vmax == 1  # Exceedance probability keeps its probability scale.
+    finally:
+        plt.close(captured[0])
 
 
 def test_white_band_keeps_linear_values_and_distinguishes_missing_data(plots):

@@ -65,7 +65,7 @@ VARS = {
     'u10m': dict(c=3, title='10-m zonal wind', unit=r'm s$^{-1}$', offset=0., factor=1.),
     'v10m': dict(c=4, title='10-m meridional wind', unit=r'm s$^{-1}$', offset=0., factor=1.),
 }
-RAIN_LEVELS = np.arange(0., 55., 5.)
+RAIN_TICK_STEP = 5.
 RAIN_COLORS = ['#d7ecfb', '#a6d3f2', '#5fb0e5', '#2c7fc9', '#1f9e5a', '#7cc644', '#f2d43a', '#f29434',
                '#de3b2f', '#a8166f']
 # Display-only neutral bands, in physical display units or percentage points.
@@ -111,16 +111,34 @@ def letter(ax, i, text=None, inside=True, color=INK):
         ax.set_title(s, loc='left', fontsize=8, weight='bold', pad=4)
 
 
-def rain_cmap():
+def precip_scale(*fields, signed=False, step=RAIN_TICK_STEP):
+    """Cover every finite displayed value with a linear range and uniform ticks."""
+    peak = 0.
+    for field in fields:
+        values = np.asanyarray(field)
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            peak = max(peak, float(np.max(np.abs(finite) if signed else finite)))
+    tick_step = step*max(1, np.ceil(peak/(10*step)))
+    maximum = tick_step*max(1, np.ceil(peak/tick_step))
+    minimum = -maximum if signed else 0.
+    return mcolors.Normalize(minimum, maximum), np.arange(minimum, maximum+tick_step/2, tick_step)
+
+
+def precip_ticks(norm, step=RAIN_TICK_STEP):
+    tick_step = step*max(1, np.ceil(norm.vmax/(10*step)))
+    return np.arange(norm.vmin, norm.vmax+tick_step/2, tick_step)
+
+
+def rain_cmap(*fields):
     cmap = mcolors.LinearSegmentedColormap.from_list('rain_linear', ['white', *RAIN_COLORS])
-    return cmap.with_extremes(under='white', over=RAIN_COLORS[-1]), mcolors.Normalize(RAIN_LEVELS[0], RAIN_LEVELS[-1])
+    norm, _ = precip_scale(*fields)
+    return cmap.with_extremes(under='white', over=RAIN_COLORS[-1]), norm
 
 
 def precip_error_scale(limit, signed=False):
-    """Linear precipitation error/difference range with evenly spaced 5-mm/h ticks."""
-    maximum = 5.*max(1, np.ceil(limit/5.))
-    minimum = -maximum if signed else 0.
-    return mcolors.Normalize(minimum, maximum), np.arange(minimum, maximum+2.5, 5.)
+    """Dynamic linear precipitation error/difference scale; symmetric when signed."""
+    return precip_scale(limit, signed=signed)
 
 
 def difference_scale(vmin, vmax, white_band, cmap='RdBu'):
@@ -136,9 +154,9 @@ def difference_scale(vmin, vmax, white_band, cmap='RdBu'):
 
 
 def scale_for(name, reference):
-    """Shared colour scale for a variable, from the reference only (visual choice, no score)."""
+    """Linear colour scale; precipitation map callers supply every compared panel."""
     if name == 'precip':
-        cmap, norm = rain_cmap(); return cmap, norm, 'max'
+        cmap, norm = rain_cmap(reference); return cmap, norm, 'max'
     ref = np.asarray(reference, dtype='float64')
     lo, hi = np.nanquantile(ref, [.01, .99])
     if name in ('u10m', 'v10m'):
@@ -522,9 +540,11 @@ def fig_overview(case, geo, boxes, out, dpi, stem, subject=None, rows=OVERVIEW_R
     native_ok = []
     for r, name in enumerate(rows):
         ref = case.get(name, 'truth')
-        cmap, norm, extend = scale_for(name, ref)
         native_ok.append(case.has_native(name))
         panels = [case.get(name, 'native'), case.get(name, 'member', 0), ref]
+        cmap, norm, extend = scale_for(name, ref)
+        if name == 'precip':
+            cmap, norm = rain_cmap(*(block(data, DISPLAY_BLOCK) for data in panels))
         for c, data in enumerate(panels):
             im = draw_map(axes[r, c], data, cmap, norm, geo=geo, k=DISPLAY_BLOCK,
                           interpolation='nearest')
@@ -537,7 +557,7 @@ def fig_overview(case, geo, boxes, out, dpi, stem, subject=None, rows=OVERVIEW_R
                     mark_box(axes[r, c], b, label)
         row_label(axes[r, 0], VARS[name]['title'])
         colorbar(fig, im, caxes[r], VARS[name]['unit'], extend,
-                 ticks=RAIN_LEVELS if name == 'precip' else None)
+                 ticks=precip_ticks(norm) if name == 'precip' else None)
     col_titles(axes, [NATIVE_LABEL, 'MERRA-Flow (member 1, ~3 km)',
                       'GEOS-CAM reference (~3 km)'])
     export(fig, out, stem, dpi, subject)
@@ -560,16 +580,18 @@ def fig_zoom(case, geo, boxes, out, dpi, stem, subject=None):
         ref = case.get(name, 'truth')
         sub = ref[box[0]:box[1], box[2]:box[3]]
         cmap, norm, extend = scale_for(name, sub)
+        panels = [case.get(name, which) for which in cols]
+        if name == 'precip':
+            cmap, norm = rain_cmap(*(data[box[0]:box[1], box[2]:box[3]] for data in panels))
         cells = case.native_cells(name)
-        for c, which in enumerate(cols):
-            data = case.get(name, which)
+        for c, (which, data) in enumerate(zip(cols, panels)):
             im = draw_map(axes[r, c], data, cmap, norm, box=box, geo=geo, cells=cells if which == 'native' else None)
             letter(axes[r, c], len(cols)*r+c)
         row_label(axes[r, 0], f'{VARS[name]["title"]}\nbox {key}')
         if not case.has_native(name):
             tag(axes[r, 0], 'cell means of input')
         colorbar(fig, im, caxes[r], VARS[name]['unit'], extend,
-                 ticks=RAIN_LEVELS if name == 'precip' else None)
+                 ticks=precip_ticks(norm) if name == 'precip' else None)
     col_titles(axes, titles, size=7.0)
     export(fig, out, stem, dpi, subject)
     return dict(stem=stem)
@@ -589,17 +611,22 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
     ref = case.get(name, 'truth'); cmap, norm, extend = scale_for(name, ref[box[0]:box[1], box[2]:box[3]])
     cells = case.native_cells(name)
     top = [('native', 0, NATIVE_LABEL)] + [('member', m, f'Member {m+1}') for m in range(min(3, case.members))]
-    for c, (which, m, title) in enumerate(top):
-        im = draw_map(axes[0, c], case.get(name, which, m), cmap, norm, box=box, geo=geo,
+    top_fields = [case.get(name, which, m) for which, m, _ in top]
+    mean = case.get(name, 'mean')
+    if name == 'precip':
+        cmap, norm = rain_cmap(*(data[box[0]:box[1], box[2]:box[3]] for data in [*top_fields, ref, mean]))
+    for c, ((which, m, title), data) in enumerate(zip(top, top_fields)):
+        im = draw_map(axes[0, c], data, cmap, norm, box=box, geo=geo,
                       cells=cells if which == 'native' else None)
         axes[0, c].set_title(title, fontsize=7.4, pad=3, weight='bold'); letter(axes[0, c], c)
     im_ref = draw_map(axes[1, 0], ref, cmap, norm, box=box, geo=geo)
     axes[1, 0].set_title('Reference', fontsize=7.4, pad=3, weight='bold'); letter(axes[1, 0], 4)
-    draw_map(axes[1, 1], case.get(name, 'mean'), cmap, norm, box=box, geo=geo)
+    draw_map(axes[1, 1], mean, cmap, norm, box=box, geo=geo)
     axes[1, 1].set_title(f'Ensemble mean ({case.members} members)', fontsize=7.4, pad=3, weight='bold')
     letter(axes[1, 1], 5)
     spread = case.get(name, 'spread')
-    smax = max(float(np.nanquantile(spread[box[0]:box[1], box[2]:box[3]], .995)), 1e-6)
+    shown_spread = spread[box[0]:box[1], box[2]:box[3]]
+    smax = max(float(np.nanmax(shown_spread) if name == 'precip' else np.nanquantile(shown_spread, .995)), 1e-6)
     spread_norm, spread_ticks = precip_error_scale(smax) if name == 'precip' else (mcolors.Normalize(0, smax), None)
     im_s = draw_map(axes[1, 2], spread, spread_cmap(), spread_norm, box=box, geo=geo)
     axes[1, 2].set_title('Ensemble spread (s.d.)', fontsize=7.4, pad=3, weight='bold'); letter(axes[1, 2], 6)
@@ -613,7 +640,7 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
     axes[1, 3].set_title(f'P(rate ≥ {threshold:g} mm h$^{{-1}}$)', fontsize=7.4, pad=3, weight='bold')
     letter(axes[1, 3], 7)
     # Horizontal colour bars under the bottom row.
-    for ax, im, lab, ticks in ((axes[1, 0], im_ref, VARS[name]['unit'], RAIN_LEVELS if name == 'precip' else None),
+    for ax, im, lab, ticks in ((axes[1, 0], im_ref, VARS[name]['unit'], precip_ticks(norm) if name == 'precip' else None),
                                (axes[1, 2], im_s, f'Spread ({VARS[name]["unit"]})', spread_ticks),
                                (axes[1, 3], im_p, 'Probability (red: reference ≥ threshold)', [0, .25, .5, .75, 1])):
         pos = ax.get_position(); cax = fig.add_axes([pos.x0+.1*pos.width, pos.y0-.05, .8*pos.width, .013])
@@ -653,11 +680,11 @@ def fig_gain(case, geo, out, dpi, stem, subject=None, k=4):
                                                  max(np.sum(case.area*fine_wet), 1e-12)))
         numbers[name]['skill'] = 1-numbers[name]['crps']/numbers[name]['coarse_mae'] if numbers[name]['coarse_mae'] > 0 else None
         vmax = max(float(np.nanquantile(ce, .99)), 1e-6)
-        n1, error_ticks = precip_error_scale(vmax) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
+        n1, error_ticks = precip_scale(ce, cr) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], coarse_err, error_cmap(), n1, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), n1, geo=geo, k=k)
         gm = max(float(np.nanquantile(np.abs(g), .99)), 1e-6)
-        gain_norm, gain_ticks = precip_error_scale(gm, signed=True) if name == 'precip' else (mcolors.Normalize(-gm, gm), None)
+        gain_norm, gain_ticks = precip_scale(g, signed=True) if name == 'precip' else (mcolors.Normalize(-gm, gm), None)
         gain_cmap, gain_norm = difference_scale(gain_norm.vmin, gain_norm.vmax, GAIN_WHITE_BAND[name])
         im3 = draw_map(axes[r, 2], gain, gain_cmap, gain_norm, geo=geo, k=k)
         for cc in range(3):
@@ -1062,7 +1089,7 @@ def fig_storm_evolution(storm, boundaries, out, dpi, stem, subject=None, n=4):
            [('truth', 0, 'Reference')]
     h, w = storm.lat.shape[1:]
     fig, axes, caxes = map_grid(len(ks), len(cols), h/w, width=7.2, hspace=.04, top_pad=.2, cbar=False)
-    cmap, norm = rain_cmap()
+    cmap, norm = rain_cmap(*(storm.field('precip', src, k, m) for k in ks for src, m, _ in cols))
     numbers = []
     for r, k in enumerate(ks):
         geo = Geo(storm.lat[k], storm.lon[k], boundaries)
@@ -1089,7 +1116,7 @@ def fig_storm_evolution(storm, boundaries, out, dpi, stem, subject=None, n=4):
     pos = axes[-1, 0].get_position(); last = axes[-1, -1].get_position()
     cax = fig.add_axes([pos.x0+.15*(last.x1-pos.x0), pos.y0-.045, .7*(last.x1-pos.x0), .012])
     colorbar(fig, im, cax, r'Precipitation rate (mm h$^{-1}$); contours: sea-level pressure every 4 hPa', 'max',
-             RAIN_LEVELS, 'horizontal')
+             precip_ticks(norm), 'horizontal')
     export(fig, out, stem, dpi, subject)
     return dict(stem=stem, hours=numbers)
 
@@ -1172,12 +1199,11 @@ def fig_storm_totals(storm, boundaries, out, dpi, stem, subject=None):
         return None
     acc, lat, lon = res
     geo = Geo(lat, lon, boundaries)
-    levels = np.arange(0., 175., 25.)
     cmap = mcolors.ListedColormap(['#e0f0fa', '#b3dbf1', '#7cc0e6', '#3f9ad6', '#2a6fb5', '#2c9c5c', '#8cc63f',
                                    '#f2d43a', '#f29434', '#de3b2f', '#a8166f']).with_extremes(under='white', over='#5b0f4a')
-    norm = mcolors.Normalize(levels[0], levels[-1])
     panels = [(acc['geos'], NATIVE_LABEL), (acc['member'][0], 'MERRA-Flow member 1'),
               (acc['member'].mean(0), f'Ensemble mean ({storm.members})'), (acc['truth'], 'Reference')]
+    norm, levels = precip_scale(*(data for data, _ in panels), step=25.)
     h, w = lat.shape
     fig, axes, caxes = map_grid(1, 4, h/w, width=7.2, top_pad=.2, cbar=True)
     for c, (a, t) in enumerate(panels):
@@ -1231,7 +1257,7 @@ def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4
             rmse_reduction=relative(np.sqrt(np.sum(data[f'{name}_se_mean']*area)),
                                     np.sqrt(np.sum(data[f'{name}_se_coarse']*area))))
         vmax = max(float(np.nanquantile(bm, .99)), 1e-9)
-        en, error_ticks = precip_error_scale(vmax) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
+        en, error_ticks = precip_scale(bm, bc) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], mae, error_cmap(), en, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), en, geo=geo, k=k)
         im3 = axes[r, 2].imshow(skill, origin='lower', cmap=skill_cmap, norm=skill_norm, interpolation='nearest',
