@@ -68,6 +68,7 @@ VARS = {
 RAIN_TICK_STEP = 5.
 RAIN_DISPLAY_QUANTILE = .98
 RAIN_WET_THRESHOLD = .1
+RAIN_ERROR_THRESHOLD = .01
 RAIN_COLORS = ['#d7ecfb', '#a6d3f2', '#5fb0e5', '#2c7fc9', '#1f9e5a', '#7cc644', '#f2d43a', '#f29434',
                '#de3b2f', '#a8166f']
 # Display-only neutral bands, in physical display units or percentage points.
@@ -160,9 +161,27 @@ def rain_cmap(*fields):
     return cmap.with_extremes(under='white', over=RAIN_COLORS[-1]), norm
 
 
-def precip_error_scale(limit, signed=False):
-    """Dynamic linear precipitation error/difference scale; symmetric when signed."""
-    return precip_scale(limit, signed=signed)
+def precip_error_scale(*fields, signed=False):
+    """Linear error range from the largest per-panel active-error 98th percentile.
+
+    Errors above 0.01 mm/h set the display range, excluding numerical drizzle.
+    Rare extremes use the colorbar extensions; no errors or scores are clipped.
+    Signed gains use absolute magnitudes and symmetric limits with uniform ticks.
+    """
+    upper = .1
+    for field in fields:
+        values = np.asanyarray(field)
+        magnitude = np.abs(values) if signed else values
+        active = magnitude[np.isfinite(magnitude) & (magnitude > RAIN_ERROR_THRESHOLD)]
+        if active.size:
+            upper = max(upper, float(np.quantile(active, RAIN_DISPLAY_QUANTILE)))
+    locator = matplotlib.ticker.MaxNLocator(nbins=4 if signed else 8, steps=[1, 2, 2.5, 5, 10])
+    positive = locator.tick_values(0, upper)
+    positive = positive[positive >= 0]
+    ticks = np.r_[-positive[:0:-1], positive] if signed else positive
+    norm = mcolors.Normalize(-positive[-1] if signed else 0, positive[-1])
+    norm._rain_ticks = ticks
+    return norm, ticks
 
 
 def difference_scale(vmin, vmax, white_band, cmap='RdBu'):
@@ -709,11 +728,11 @@ def fig_gain(case, geo, out, dpi, stem, subject=None, k=4):
                                                  max(np.sum(case.area*fine_wet), 1e-12)))
         numbers[name]['skill'] = 1-numbers[name]['crps']/numbers[name]['coarse_mae'] if numbers[name]['coarse_mae'] > 0 else None
         vmax = max(float(np.nanquantile(ce, .99)), 1e-6)
-        n1, error_ticks = precip_scale(ce, cr) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
+        n1, error_ticks = precip_error_scale(ce, cr) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], coarse_err, error_cmap(), n1, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), n1, geo=geo, k=k)
         gm = max(float(np.nanquantile(np.abs(g), .99)), 1e-6)
-        gain_norm, gain_ticks = precip_scale(g, signed=True) if name == 'precip' else (mcolors.Normalize(-gm, gm), None)
+        gain_norm, gain_ticks = precip_error_scale(g, signed=True) if name == 'precip' else (mcolors.Normalize(-gm, gm), None)
         gain_cmap, gain_norm = difference_scale(gain_norm.vmin, gain_norm.vmax, GAIN_WHITE_BAND[name])
         im3 = draw_map(axes[r, 2], gain, gain_cmap, gain_norm, geo=geo, k=k)
         for cc in range(3):
@@ -1286,7 +1305,7 @@ def fig_skill_maps(maps_path, out, dpi, stem, subject=None, boundaries=None, k=4
             rmse_reduction=relative(np.sqrt(np.sum(data[f'{name}_se_mean']*area)),
                                     np.sqrt(np.sum(data[f'{name}_se_coarse']*area))))
         vmax = max(float(np.nanquantile(bm, .99)), 1e-9)
-        en, error_ticks = precip_scale(bm, bc) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
+        en, error_ticks = precip_error_scale(bm, bc) if name == 'precip' else (mcolors.Normalize(0, vmax), None)
         im1 = draw_map(axes[r, 0], mae, error_cmap(), en, geo=geo, k=k)
         draw_map(axes[r, 1], crps, error_cmap(), en, geo=geo, k=k)
         im3 = axes[r, 2].imshow(skill, origin='lower', cmap=skill_cmap, norm=skill_norm, interpolation='nearest',

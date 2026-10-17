@@ -28,10 +28,34 @@ def test_precipitation_scales_have_fine_uniform_linear_intervals(plots):
     np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
     np.testing.assert_allclose(cmap(norm(0)), [1, 1, 1, 1])
     for signed in (False, True):
-        norm, ticks = plots.precip_error_scale(12.3, signed)
-        np.testing.assert_allclose(np.diff(ticks), 5)
+        norm, ticks = plots.precip_error_scale(12.3, signed=signed)
+        assert np.diff(ticks)[0] <= (5 if signed else 2.5)
+        np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
         np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
         assert norm.vmax >= 12.3 and (norm.vmin == -norm.vmax if signed else norm.vmin == 0)
+
+
+@pytest.mark.parametrize('signed', [False, True])
+def test_precipitation_error_outliers_do_not_wash_out_small_errors(plots, signed):
+    values = np.full((100, 100), -.3 if signed else .3)
+    values[0, 0] = 30
+    values[1, 0] = np.nan
+    original = values.copy()
+    comparison = np.full((100, 100), .6)
+    norm, ticks = plots.precip_error_scale(values, comparison, signed=signed)
+    assert .6 <= norm.vmax <= .8
+    assert np.diff(ticks)[0] <= .2+1e-12
+    assert norm.vmin == (-norm.vmax if signed else 0)
+    np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
+    np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
+    np.testing.assert_array_equal(values, original)
+    assert norm(values[0, 0]) > 1
+
+
+def test_dry_precipitation_error_limits_remain_finite(plots):
+    norm, ticks = plots.precip_error_scale([0, np.nan, np.inf, .001], signed=True)
+    assert norm.vmin == -.1 and norm.vmax == .1
+    np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
 
 
 @pytest.mark.parametrize('peak', [0., 2.4, 38.2, 76.2, 428.1])
@@ -113,6 +137,11 @@ def test_gain_figure_whitens_small_changes_but_retains_scores(plots, monkeypatch
             assert image.norm.vmin == -image.norm.vmax
             np.testing.assert_allclose(image.cmap(image.norm(0)), [1, 1, 1, 1])
         rain = images[3*plots.GAIN_ROWS.index('precip')+2]
+        rain_error = images[3*plots.GAIN_ROWS.index('precip')]
+        rain_crps = images[3*plots.GAIN_ROWS.index('precip')+1]
+        assert rain_error.norm is rain_crps.norm
+        assert rain_error.norm.vmax < .2
+        assert rain.norm.vmax == .1
         np.testing.assert_allclose(rain.cmap(rain.norm(rain.get_array())),
                                    np.ones((*rain.get_array().shape, 4)))
         assert result['numbers']['precip']['skill'] == pytest.approx(.5)
