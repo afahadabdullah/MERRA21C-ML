@@ -18,13 +18,14 @@ def plots():
     return module
 
 
-def test_precipitation_scales_have_linear_five_unit_intervals(plots):
+def test_precipitation_scales_have_fine_uniform_linear_intervals(plots):
     cmap, norm = plots.rain_cmap([0, 12.3])
     ticks = plots.precip_ticks(norm)
     assert type(norm) is colors.Normalize
-    assert norm.vmax == 15
-    np.testing.assert_allclose(np.diff(ticks), 5)
-    np.testing.assert_allclose(np.diff(norm(ticks)), 1/3)
+    assert norm.vmax >= 12.3
+    assert np.diff(ticks)[0] <= 2.5
+    np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
+    np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
     np.testing.assert_allclose(cmap(norm(0)), [1, 1, 1, 1])
     for signed in (False, True):
         norm, ticks = plots.precip_error_scale(12.3, signed)
@@ -34,7 +35,7 @@ def test_precipitation_scales_have_linear_five_unit_intervals(plots):
 
 
 @pytest.mark.parametrize('peak', [0., 2.4, 38.2, 76.2, 428.1])
-def test_precipitation_max_adapts_without_clipping_or_nonlinearity(plots, peak):
+def test_sparse_precipitation_limits_are_finite_linear_and_dynamic(plots, peak):
     values = np.array([0., np.nan, peak, np.inf])
     cmap, norm = plots.rain_cmap(values)
     ticks = plots.precip_ticks(norm)
@@ -42,7 +43,7 @@ def test_precipitation_max_adapts_without_clipping_or_nonlinearity(plots, peak):
     np.testing.assert_allclose(np.diff(ticks), np.diff(ticks)[0])
     np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
     assert ticks[-1] == norm.vmax
-    if peak == 0:assert norm.vmax == 5
+    if peak == 0:assert norm.vmax == 1
     if peak > 50:assert norm.vmax > 50
 
 
@@ -63,11 +64,25 @@ def test_ensemble_rain_scale_uses_all_displayed_panels_and_only_the_crop(plots, 
     try:
         images = [ax.images[0] for ax in captured[0].axes if ax.images]
         for image in images[:6]:
-            assert image.norm.vmin == 0 and image.norm.vmax == 80
-            assert np.max(image.get_array()) <= image.norm.vmax
+            assert image.norm.vmin == 0 and image.norm.vmax == 10
+        assert np.max(images[2].get_array()) == 76.2  # Outlier remains in the plotted data.
+        assert np.max(images[2].get_array()) > images[2].norm.vmax
         assert images[-1].norm.vmax == 1  # Exceedance probability keeps its probability scale.
     finally:
         plt.close(captured[0])
+
+
+def test_rare_precipitation_extreme_no_longer_washes_out_typical_rain(plots):
+    values = np.full((100, 100), 3.)
+    values[0, 0] = 700.
+    original = values.copy()
+    cmap, norm = plots.rain_cmap(values, np.full((100, 100), 6.))
+    assert 6 <= norm.vmax <= 8
+    ticks = plots.precip_ticks(norm)
+    assert np.diff(ticks)[0] <= 1
+    np.testing.assert_allclose(np.diff(norm(ticks)), np.diff(norm(ticks))[0])
+    np.testing.assert_allclose(cmap(norm(700)), cmap.get_over())
+    np.testing.assert_array_equal(values, original)
 
 
 def test_white_band_keeps_linear_values_and_distinguishes_missing_data(plots):

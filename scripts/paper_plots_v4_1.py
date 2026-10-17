@@ -66,6 +66,8 @@ VARS = {
     'v10m': dict(c=4, title='10-m meridional wind', unit=r'm s$^{-1}$', offset=0., factor=1.),
 }
 RAIN_TICK_STEP = 5.
+RAIN_DISPLAY_QUANTILE = .98
+RAIN_WET_THRESHOLD = .1
 RAIN_COLORS = ['#d7ecfb', '#a6d3f2', '#5fb0e5', '#2c7fc9', '#1f9e5a', '#7cc644', '#f2d43a', '#f29434',
                '#de3b2f', '#a8166f']
 # Display-only neutral bands, in physical display units or percentage points.
@@ -126,13 +128,35 @@ def precip_scale(*fields, signed=False, step=RAIN_TICK_STEP):
 
 
 def precip_ticks(norm, step=RAIN_TICK_STEP):
+    if hasattr(norm, '_rain_ticks'):
+        return norm._rain_ticks.copy()
     tick_step = step*max(1, np.ceil(norm.vmax/(10*step)))
     return np.arange(norm.vmin, norm.vmax+tick_step/2, tick_step)
 
 
+def rain_display_scale(*fields):
+    """Shared linear display range: largest per-panel 98th percentile of wet pixels.
+
+    Rare extremes use the colorbar's upper extension; values and scores are unchanged.
+    Excluding dry pixels prevents a mostly dry CONUS panel from collapsing the scale.
+    """
+    upper = 1.
+    for field in fields:
+        values = np.asanyarray(field)
+        wet = values[np.isfinite(values) & (values >= RAIN_WET_THRESHOLD)]
+        if wet.size:
+            upper = max(upper, float(np.quantile(wet, RAIN_DISPLAY_QUANTILE)))
+    locator = matplotlib.ticker.MaxNLocator(nbins=8, steps=[1, 2, 2.5, 5, 10])
+    ticks = locator.tick_values(0, upper)
+    ticks = ticks[ticks >= 0]
+    norm = mcolors.Normalize(0, ticks[-1])
+    norm._rain_ticks = ticks
+    return norm, ticks
+
+
 def rain_cmap(*fields):
     cmap = mcolors.LinearSegmentedColormap.from_list('rain_linear', ['white', *RAIN_COLORS])
-    norm, _ = precip_scale(*fields)
+    norm, _ = rain_display_scale(*fields)
     return cmap.with_extremes(under='white', over=RAIN_COLORS[-1]), norm
 
 
@@ -627,7 +651,7 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
     spread = case.get(name, 'spread')
     shown_spread = spread[box[0]:box[1], box[2]:box[3]]
     smax = max(float(np.nanmax(shown_spread) if name == 'precip' else np.nanquantile(shown_spread, .995)), 1e-6)
-    spread_norm, spread_ticks = precip_error_scale(smax) if name == 'precip' else (mcolors.Normalize(0, smax), None)
+    spread_norm, spread_ticks = rain_display_scale(shown_spread) if name == 'precip' else (mcolors.Normalize(0, smax), None)
     im_s = draw_map(axes[1, 2], spread, spread_cmap(), spread_norm, box=box, geo=geo)
     axes[1, 2].set_title('Ensemble spread (s.d.)', fontsize=7.4, pad=3, weight='bold'); letter(axes[1, 2], 6)
     c = VARS[name]['c']
@@ -644,9 +668,14 @@ def fig_ensemble(case, geo, box, out, dpi, stem, name='precip', subject=None, th
                                (axes[1, 2], im_s, f'Spread ({VARS[name]["unit"]})', spread_ticks),
                                (axes[1, 3], im_p, 'Probability (red: reference ≥ threshold)', [0, .25, .5, .75, 1])):
         pos = ax.get_position(); cax = fig.add_axes([pos.x0+.1*pos.width, pos.y0-.05, .8*pos.width, .013])
-        colorbar(fig, im, cax, lab, 'max' if ax is axes[1, 0] else 'neither', ticks, 'horizontal')
+        colorbar(fig, im, cax, lab, 'max' if ax is axes[1, 0] or (name == 'precip' and ax is axes[1, 2]) else 'neither', ticks, 'horizontal')
     export(fig, out, stem, dpi, subject)
-    return dict(stem=stem, members=case.members, threshold=float(threshold))
+    result = dict(stem=stem, members=case.members, threshold=float(threshold))
+    if name == 'precip':
+        result['rain_display'] = dict(upper_quantile=RAIN_DISPLAY_QUANTILE, wet_threshold=RAIN_WET_THRESHOLD,
+                                     vmax=float(norm.vmax), ticks=precip_ticks(norm).tolist(),
+                                     spread_vmax=float(spread_norm.vmax), over_range='colorbar upper extension')
+    return result
 
 
 def pixel_crps(ens, truth):
